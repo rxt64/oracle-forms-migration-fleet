@@ -19,6 +19,8 @@ reconciliation, human acceptance, and production cutover.
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Before your first change — branch naming, the PR loop, and what a change must include |
 | [docs/SECURITY.md](docs/SECURITY.md) | Before touching source acquisition, classification, auth, or anything the browser can see |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | Deploying, rolling back, or debugging a deployment that misbehaved |
+| [infra/legacy-estate/README.md](infra/legacy-estate/README.md) | Deploying the disposable synthetic Oracle database used by demonstrations |
+| [infra/forms-demo/README.md](infra/forms-demo/README.md) | Running the browser-executable banking workflow replica against that database |
 | [CHANGELOG.md](CHANGELOG.md) | Understanding why current behaviour differs from what you expected |
 
 ## Product boundary

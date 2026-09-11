@@ -4,6 +4,17 @@ Notable changes to behaviour, with the reasoning that is not visible in a diff.
 
 ## Unreleased
 
+### Added
+
+**A deployable Oracle Forms workflow replica now exercises the reference estate.** The upstream case
+study publishes design-time `.fmb` modules but no compiled `.fmx`, licensed Forms runtime, WebLogic
+domain, or deployment package, and declares no source license. Rather than claim those modules are
+running, the new Northstar Online Banking app independently implements the published account-opening,
+online-registration, interest, statement, transaction, customer-login, and manager-approval workflows.
+Its .NET backend connects server-side to the internal disposable Oracle estate; the browser never
+receives the database host or credential. The UI identifies itself as a workflow replica, and no
+upstream source or binary artifact is copied into this repository.
+
 ### Fixed
 
 **Build descriptors were counted as Oracle Forms XML exports.** `SourceInventory` classified any `.xml`

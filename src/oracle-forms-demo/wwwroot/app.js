@@ -1,0 +1,1014 @@
+"use strict";
+
+/* ==========================================================================
+   Northstar Online Banking — browser replica of the published Oracle Forms
+   workflow requirements. The original .fmb modules are not executed here.
+   ========================================================================== */
+
+(() => {
+  const TOKEN_KEY = "northstar.token";
+  const ROLE_KEY = "northstar.role";
+  const NAME_KEY = "northstar.name";
+  const ACCOUNT_KEY = "northstar.account";
+
+  const MODULES = {
+    home: { label: "Home", access: "public" },
+    "open-account": { label: "Open Account", access: "public" },
+    registration: { label: "Online Registration", access: "public" },
+    interest: { label: "Interest Calculator", access: "public" },
+    "customer-login": { label: "Customer Login", access: "guest" },
+    "manager-login": { label: "Manager Login", access: "guest" },
+    statement: { label: "Account Statement", access: "customer" },
+    transaction: { label: "Transaction Entry", access: "customer" },
+    requests: { label: "Account Requests", access: "manager" }
+  };
+
+  const state = {
+    module: "home",
+    database: "checking",
+    statement: null,
+    sortKey: "transactionTs",
+    sortDir: 1,
+    requestStatus: "SUBMITTED"
+  };
+
+  /* ---------------------------------------------------------------- format */
+
+  const currencyFormat = new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency: "USD",
+    currencyDisplay: "narrowSymbol"
+  });
+  const dateTimeFormat = new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short"
+  });
+  const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
+  const percentFormat = new Intl.NumberFormat(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  });
+
+  const money = (value) =>
+    typeof value === "number" && Number.isFinite(value) ? currencyFormat.format(value) : "—";
+
+  const parseDate = (value) => {
+    if (typeof value !== "string" || value.length === 0) {
+      return null;
+    }
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  };
+
+  const timestamp = (value) => {
+    const parsed = parseDate(value);
+    return parsed ? dateTimeFormat.format(parsed) : "—";
+  };
+
+  const day = (value) => {
+    const parsed = parseDate(value);
+    return parsed ? dateFormat.format(parsed) : "—";
+  };
+
+  /* --------------------------------------------------------------- session */
+
+  const session = {
+    get token() {
+      return sessionStorage.getItem(TOKEN_KEY);
+    },
+    get role() {
+      return sessionStorage.getItem(ROLE_KEY);
+    },
+    get displayName() {
+      return sessionStorage.getItem(NAME_KEY) || "";
+    },
+    get accountId() {
+      const raw = sessionStorage.getItem(ACCOUNT_KEY);
+      return raw ? Number(raw) : null;
+    },
+    set(token, role, displayName, accountId) {
+      sessionStorage.setItem(TOKEN_KEY, token);
+      sessionStorage.setItem(ROLE_KEY, role);
+      sessionStorage.setItem(NAME_KEY, displayName);
+      if (accountId === null || accountId === undefined) {
+        sessionStorage.removeItem(ACCOUNT_KEY);
+      } else {
+        sessionStorage.setItem(ACCOUNT_KEY, String(accountId));
+      }
+    },
+    clear() {
+      sessionStorage.removeItem(TOKEN_KEY);
+      sessionStorage.removeItem(ROLE_KEY);
+      sessionStorage.removeItem(NAME_KEY);
+      sessionStorage.removeItem(ACCOUNT_KEY);
+    }
+  };
+
+  /* ------------------------------------------------------------- api layer */
+
+  class ApiError extends Error {
+    constructor(message, status) {
+      super(message);
+      this.name = "ApiError";
+      this.status = status;
+    }
+  }
+
+  const fallbackMessage = (status) => {
+    if (status === 0) return "The banking service could not be reached.";
+    if (status === 401) return "Your session is no longer valid. Please sign in again.";
+    if (status === 403) return "This operation is not permitted for the current session.";
+    if (status === 404) return "The requested record was not found.";
+    if (status === 409) return "The record is already in that state.";
+    if (status === 503) return "The banking service is temporarily unavailable.";
+    return "The request could not be completed.";
+  };
+
+  /**
+   * Single entry point for every HTTP call. Attaches the bearer token held in
+   * sessionStorage, normalises error payloads, and drops the session on 401.
+   */
+  async function api(path, options = {}) {
+    const { method = "GET", body, auth = true, raw = false } = options;
+    const headers = { Accept: "application/json" };
+    const token = auth ? session.token : null;
+
+    if (body !== undefined) {
+      headers["Content-Type"] = "application/json";
+    }
+    if (token) {
+      headers.Authorization = "Bearer " + token;
+    }
+
+    let response;
+    try {
+      response = await fetch(path, {
+        method,
+        headers,
+        cache: "no-store",
+        body: body === undefined ? undefined : JSON.stringify(body)
+      });
+    } catch {
+      throw new ApiError(fallbackMessage(0), 0);
+    }
+
+    let data = null;
+    if (response.status !== 204) {
+      const text = await response.text();
+      if (text) {
+        try {
+          data = JSON.parse(text);
+        } catch {
+          data = null;
+        }
+      }
+    }
+
+    if (response.status === 503) {
+      setDatabase("unavailable");
+    } else if (response.ok) {
+      setDatabase("available");
+    }
+
+    if (raw) {
+      return { ok: response.ok, status: response.status, data };
+    }
+
+    if (response.ok) {
+      return data;
+    }
+
+    if (response.status === 401 && token) {
+      const previousRole = session.role;
+      session.clear();
+      applySessionToShell();
+      setModule(previousRole === "manager" ? "manager-login" : "customer-login");
+    }
+
+    const message =
+      data && typeof data.error === "string" && data.error.length > 0
+        ? data.error
+        : fallbackMessage(response.status);
+    throw new ApiError(message, response.status);
+  }
+
+  /* ------------------------------------------------------------ dom helpers */
+
+  const byId = (id) => document.getElementById(id);
+  const text = (node, value) => {
+    node.textContent = value;
+  };
+
+  function element(tag, className, content) {
+    const node = document.createElement(tag);
+    if (className) {
+      node.className = className;
+    }
+    if (content !== undefined && content !== null) {
+      node.textContent = String(content);
+    }
+    return node;
+  }
+
+  function setMessage(node, message, tone) {
+    if (!node) {
+      return;
+    }
+    node.textContent = message || "";
+    if (tone) {
+      node.dataset.tone = tone;
+    } else {
+      delete node.dataset.tone;
+    }
+  }
+
+  function renderResult(list, entries) {
+    list.replaceChildren();
+    for (const [label, value] of entries) {
+      const row = document.createElement("div");
+      row.append(element("dt", null, label), element("dd", null, value));
+      list.append(row);
+    }
+    list.hidden = entries.length === 0;
+  }
+
+  function formNodes(form) {
+    return {
+      status: form.querySelector('[data-role="status"]'),
+      result: form.querySelector('[data-role="result"]')
+    };
+  }
+
+  function setFormBusy(form, busy) {
+    form.dataset.busy = busy ? "true" : "false";
+    for (const control of form.elements) {
+      if (control instanceof HTMLButtonElement) {
+        control.disabled = busy;
+      }
+    }
+  }
+
+  /** Wraps a submit handler with double-submit protection and error surfacing. */
+  function wireForm(form, handler) {
+    const { status, result } = formNodes(form);
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (form.dataset.busy === "true") {
+        return;
+      }
+      if (!form.checkValidity()) {
+        form.reportValidity();
+        return;
+      }
+      if (result) {
+        result.hidden = true;
+        result.replaceChildren();
+      }
+      setMessage(status, "Working…", "busy");
+      setFormBusy(form, true);
+      try {
+        await handler(form);
+      } catch (error) {
+        const message = error instanceof ApiError ? error.message : fallbackMessage(0);
+        setMessage(status, message, "error");
+      } finally {
+        setFormBusy(form, false);
+      }
+    });
+    form.addEventListener("reset", () => {
+      setMessage(status, "", null);
+      if (result) {
+        result.hidden = true;
+        result.replaceChildren();
+      }
+    });
+  }
+
+  /* --------------------------------------------------------------- dialogs */
+
+  const aboutDialog = byId("aboutDialog");
+  const confirmDialog = byId("confirmDialog");
+  const confirmMessage = byId("confirmMessage");
+
+  function openAbout() {
+    if (typeof aboutDialog.showModal === "function") {
+      aboutDialog.showModal();
+    } else {
+      aboutDialog.setAttribute("open", "");
+    }
+  }
+
+  function askConfirm(message) {
+    return new Promise((resolve) => {
+      text(confirmMessage, message);
+      const onClose = () => {
+        confirmDialog.removeEventListener("close", onClose);
+        resolve(confirmDialog.returnValue === "confirm");
+      };
+      confirmDialog.addEventListener("close", onClose);
+      confirmDialog.returnValue = "cancel";
+      if (typeof confirmDialog.showModal === "function") {
+        confirmDialog.showModal();
+      } else {
+        resolve(false);
+      }
+    });
+  }
+
+  /* ------------------------------------------------------------ shell state */
+
+  const dbChip = byId("dbChip");
+  const dbChipLabel = byId("dbChipLabel");
+  const statusModule = byId("statusModule");
+  const statusDb = byId("statusDb");
+  const statusSession = byId("statusSession");
+
+  const DB_LABELS = {
+    checking: "checking…",
+    available: "connected",
+    unavailable: "unavailable"
+  };
+
+  function setDatabase(value) {
+    state.database = value;
+    dbChip.dataset.state = value;
+    text(dbChipLabel, "Database: " + DB_LABELS[value]);
+    text(statusDb, "Database: " + DB_LABELS[value]);
+  }
+
+  async function checkHealth() {
+    setDatabase("checking");
+    try {
+      const { ok, data } = await api("/api/health", { auth: false, raw: true });
+      const available = ok && data && data.database === "available";
+      setDatabase(available ? "available" : "unavailable");
+    } catch {
+      setDatabase("unavailable");
+    }
+  }
+
+  function isVisible(id) {
+    const module = MODULES[id];
+    if (!module) {
+      return false;
+    }
+    const role = session.role;
+    if (module.access === "public") return true;
+    if (module.access === "guest") return role === null;
+    return module.access === role;
+  }
+
+  function setModule(id) {
+    const target = isVisible(id) ? id : "home";
+    state.module = target;
+
+    for (const panel of document.querySelectorAll(".ofx-panel")) {
+      panel.hidden = panel.id !== "panel-" + target;
+    }
+    for (const tab of document.querySelectorAll(".ofx-tab")) {
+      const moduleId = tab.dataset.module;
+      tab.hidden = !isVisible(moduleId);
+      tab.setAttribute("aria-selected", moduleId === target ? "true" : "false");
+      tab.tabIndex = moduleId === target ? 0 : -1;
+    }
+    for (const tool of document.querySelectorAll(".ofx-tool[data-module]")) {
+      const moduleId = tool.dataset.module;
+      tool.disabled = !isVisible(moduleId);
+      tool.setAttribute("aria-current", moduleId === target ? "true" : "false");
+    }
+
+    text(statusModule, "Module: " + MODULES[target].label);
+
+    const panel = byId("panel-" + target);
+    if (panel) {
+      panel.focus({ preventScroll: true });
+    }
+
+    if (target === "statement" && state.statement === null) {
+      void loadStatement();
+    }
+    if (target === "requests") {
+      void loadRequests();
+    }
+  }
+
+  function applySessionToShell() {
+    const role = session.role;
+    if (role === "customer") {
+      const account = session.accountId;
+      text(
+        statusSession,
+        "Session: customer " + (account === null ? "—" : account) + " · " + session.displayName
+      );
+    } else if (role === "manager") {
+      text(statusSession, "Session: manager · " + session.displayName);
+    } else {
+      text(statusSession, "Session: not signed in");
+      state.statement = null;
+    }
+
+    for (const button of document.querySelectorAll("[data-module]")) {
+      const visible = isVisible(button.dataset.module);
+      if (button.classList.contains("ofx-tab") || button.classList.contains("ofx-shortcut")) {
+        button.hidden = !visible;
+      } else {
+        button.disabled = !visible;
+      }
+    }
+    for (const button of document.querySelectorAll('[data-action="signout"]')) {
+      button.disabled = role === null;
+    }
+    for (const button of document.querySelectorAll('[data-action="refresh-statement"]')) {
+      button.disabled = role !== "customer";
+    }
+    for (const button of document.querySelectorAll('[data-action="refresh-requests"]')) {
+      button.disabled = role !== "manager";
+    }
+
+    renderHomeChart();
+  }
+
+  /* ------------------------------------------------------------------ menus */
+
+  function closeMenus(except) {
+    for (const menu of document.querySelectorAll(".ofx-menu")) {
+      if (menu === except) {
+        continue;
+      }
+      const trigger = menu.querySelector(".ofx-menu-trigger");
+      const list = menu.querySelector(".ofx-menu-list");
+      trigger.setAttribute("aria-expanded", "false");
+      list.hidden = true;
+    }
+  }
+
+  for (const menu of document.querySelectorAll(".ofx-menu")) {
+    const trigger = menu.querySelector(".ofx-menu-trigger");
+    const list = menu.querySelector(".ofx-menu-list");
+    trigger.addEventListener("click", () => {
+      const open = trigger.getAttribute("aria-expanded") === "true";
+      closeMenus(menu);
+      trigger.setAttribute("aria-expanded", open ? "false" : "true");
+      list.hidden = open;
+      if (!open) {
+        const first = list.querySelector("button:not(:disabled)");
+        if (first) {
+          first.focus();
+        }
+      }
+    });
+  }
+
+  document.addEventListener("click", (event) => {
+    if (!(event.target instanceof Element) || !event.target.closest(".ofx-menu")) {
+      closeMenus(null);
+    }
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      closeMenus(null);
+    }
+  });
+
+  /* ------------------------------------------------------- global delegation */
+
+  document.addEventListener("click", (event) => {
+    if (!(event.target instanceof Element)) {
+      return;
+    }
+    const moduleButton = event.target.closest("[data-module]");
+    if (moduleButton && !moduleButton.disabled) {
+      closeMenus(null);
+      setModule(moduleButton.dataset.module);
+      return;
+    }
+    const actionButton = event.target.closest("[data-action]");
+    if (actionButton && !actionButton.disabled) {
+      closeMenus(null);
+      void runAction(actionButton.dataset.action);
+    }
+  });
+
+  async function runAction(action) {
+    if (action === "about") {
+      openAbout();
+    } else if (action === "health") {
+      await checkHealth();
+    } else if (action === "signout") {
+      await signOut();
+    } else if (action === "refresh-statement") {
+      setModule("statement");
+      await loadStatement();
+    } else if (action === "refresh-requests") {
+      setModule("requests");
+      await loadRequests();
+    }
+  }
+
+  byId("dbRetry").addEventListener("click", () => void checkHealth());
+  byId("aboutOpen").addEventListener("click", openAbout);
+
+  /* -------------------------------------------------------- account request */
+
+  const accountForm = byId("accountForm");
+  const dobInput = byId("ar-dob");
+  const today = new Date();
+  const boundary = (years) => {
+    const date = new Date(today.getFullYear() - years, today.getMonth(), today.getDate());
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const dayOfMonth = String(date.getDate()).padStart(2, "0");
+    return date.getFullYear() + "-" + month + "-" + dayOfMonth;
+  };
+  dobInput.max = boundary(18);
+  dobInput.min = boundary(120);
+
+  wireForm(accountForm, async (form) => {
+    const { status, result } = formNodes(form);
+    const data = new FormData(form);
+    const optional = (name) => {
+      const value = String(data.get(name) || "").trim();
+      return value.length > 0 ? value : null;
+    };
+
+    const created = await api("/api/account-requests", {
+      method: "POST",
+      auth: false,
+      body: {
+        branchCode: String(data.get("branchCode") || ""),
+        accountKind: String(data.get("accountKind") || ""),
+        honorific: optional("honorific"),
+        givenName: String(data.get("givenName") || "").trim(),
+        familyName: String(data.get("familyName") || "").trim(),
+        dateOfBirth: String(data.get("dateOfBirth") || ""),
+        workPhone: optional("workPhone"),
+        homePhone: optional("homePhone"),
+        streetAddress: String(data.get("streetAddress") || "").trim(),
+        regionCode: String(data.get("regionCode") || ""),
+        postalCode: String(data.get("postalCode") || "").trim(),
+        emailAddress: String(data.get("emailAddress") || "").trim()
+      }
+    });
+
+    form.reset();
+    setMessage(status, "Account request recorded.", "success");
+    renderResult(result, [
+      ["Request ID", String(created.requestId)],
+      ["Status", created.requestStatus]
+    ]);
+  });
+
+  /* ---------------------------------------------------- online registration */
+
+  wireForm(byId("registrationForm"), async (form) => {
+    const { status, result } = formNodes(form);
+    const data = new FormData(form);
+
+    const registration = await api("/api/online-registration", {
+      method: "POST",
+      auth: false,
+      body: {
+        accountId: Number(data.get("accountId")),
+        emailAddress: String(data.get("emailAddress") || "").trim(),
+        password: String(data.get("password") || "")
+      }
+    });
+
+    form.reset();
+    setMessage(status, "Online banking enabled for this account.", "success");
+    renderResult(result, [
+      ["Account", String(registration.accountId)],
+      ["Online access", registration.onlineEnabled ? "Enabled" : "Not enabled"]
+    ]);
+  });
+
+  /* ---------------------------------------------------- interest calculator */
+
+  const interestResult = byId("interestResult");
+  const interestBar = byId("interestBar");
+
+  byId("interestForm").addEventListener("reset", () => {
+    interestResult.hidden = true;
+  });
+
+  wireForm(byId("interestForm"), async (form) => {
+    const { status } = formNodes(form);
+    const data = new FormData(form);
+
+    const result = await api("/api/interest", {
+      method: "POST",
+      auth: false,
+      body: {
+        principal: Number(data.get("principal")),
+        annualRate: Number(data.get("annualRate")),
+        years: Number(data.get("years"))
+      }
+    });
+
+    text(byId("ir-principal"), money(result.principal));
+    text(byId("ir-interest"), money(result.interest));
+    text(byId("ir-total"), money(result.total));
+
+    const total = result.total > 0 ? result.total : 1;
+    const principalShare = Math.max(0, Math.min(100, (result.principal / total) * 100));
+    byId("ir-bar-principal").style.width = principalShare.toFixed(2) + "%";
+    byId("ir-bar-interest").style.width = (100 - principalShare).toFixed(2) + "%";
+    interestBar.setAttribute(
+      "aria-label",
+      "Principal " +
+        money(result.principal) +
+        " plus interest " +
+        money(result.interest) +
+        " over " +
+        percentFormat.format(result.years) +
+        " years at " +
+        percentFormat.format(result.annualRate) +
+        " percent"
+    );
+    interestResult.hidden = false;
+    setMessage(status, "Calculation complete.", "success");
+  });
+
+  /* ------------------------------------------------------------- login flow */
+
+  byId("customerQuickFill").addEventListener("click", () => {
+    byId("cl-account").value = "500001";
+    byId("cl-password").value = "demo1234";
+  });
+
+  byId("managerQuickFill").addEventListener("click", () => {
+    byId("ml-user").value = "branch.manager";
+    byId("ml-password").value = "manager-demo-1";
+  });
+
+  wireForm(byId("customerLoginForm"), async (form) => {
+    const { status } = formNodes(form);
+    const data = new FormData(form);
+
+    const login = await api("/api/customer/login", {
+      method: "POST",
+      auth: false,
+      body: {
+        accountId: Number(data.get("accountId")),
+        password: String(data.get("password") || "")
+      }
+    });
+
+    session.set(login.token, "customer", login.profile.accountHolder, login.profile.accountId);
+    form.reset();
+    setMessage(status, "", null);
+    state.statement = null;
+    applySessionToShell();
+    setModule("statement");
+  });
+
+  wireForm(byId("managerLoginForm"), async (form) => {
+    const { status } = formNodes(form);
+    const data = new FormData(form);
+
+    const login = await api("/api/manager/login", {
+      method: "POST",
+      auth: false,
+      body: {
+        username: String(data.get("username") || "").trim(),
+        password: String(data.get("password") || "")
+      }
+    });
+
+    session.set(login.token, "manager", login.username, null);
+    form.reset();
+    setMessage(status, "", null);
+    applySessionToShell();
+    setModule("requests");
+  });
+
+  async function signOut() {
+    if (session.token) {
+      try {
+        await api("/api/session", { method: "DELETE" });
+      } catch {
+        /* The local session is dropped regardless of the server response. */
+      }
+    }
+    session.clear();
+    state.statement = null;
+    renderStatement();
+    clearRequests();
+    applySessionToShell();
+    setModule("home");
+  }
+
+  /* -------------------------------------------------------------- statement */
+
+  const statementStatus = byId("statementStatus");
+  const statementBody = byId("statementBody");
+  const statementEmpty = byId("statementEmpty");
+
+  async function loadStatement() {
+    if (session.role !== "customer") {
+      return;
+    }
+    setMessage(statementStatus, "Loading statement…", "busy");
+    try {
+      state.statement = await api("/api/customer/statement");
+      setMessage(statementStatus, "", null);
+    } catch (error) {
+      state.statement = null;
+      setMessage(
+        statementStatus,
+        error instanceof ApiError ? error.message : fallbackMessage(0),
+        "error"
+      );
+    }
+    renderStatement();
+    renderHomeChart();
+  }
+
+  function sortedTransactions() {
+    if (!state.statement || !Array.isArray(state.statement.transactions)) {
+      return [];
+    }
+    const rows = state.statement.transactions.slice();
+    const key = state.sortKey;
+    rows.sort((left, right) => {
+      let comparison;
+      if (key === "amount") {
+        comparison = left.amount - right.amount;
+      } else if (key === "transactionTs") {
+        const a = parseDate(left.transactionTs);
+        const b = parseDate(right.transactionTs);
+        comparison = (a ? a.getTime() : 0) - (b ? b.getTime() : 0);
+      } else {
+        comparison = String(left[key]).localeCompare(String(right[key]));
+      }
+      if (comparison === 0) {
+        comparison = left.transactionId - right.transactionId;
+      }
+      return comparison * state.sortDir;
+    });
+    return rows;
+  }
+
+  function renderStatement() {
+    const statement = state.statement;
+    text(byId("st-account"), statement ? String(statement.profile.accountId) : "—");
+    text(byId("st-holder"), statement ? statement.profile.accountHolder : "—");
+    text(byId("st-branch"), statement ? statement.profile.branchCode : "—");
+    text(byId("st-kind"), statement ? statement.profile.accountKind : "—");
+    text(byId("st-balance"), statement ? money(statement.currentBalance) : "—");
+
+    statementBody.replaceChildren();
+    const rows = sortedTransactions();
+    statementEmpty.hidden = rows.length > 0;
+
+    for (const line of rows) {
+      const tr = document.createElement("tr");
+
+      tr.append(element("td", null, timestamp(line.transactionTs)));
+      tr.append(element("td", "ofx-mono", line.referenceCode));
+
+      const typeCell = document.createElement("td");
+      const badge = element("span", "ofx-dir", line.directionCode);
+      badge.dataset.dir = line.directionCode;
+      typeCell.append(badge);
+      tr.append(typeCell);
+
+      const amountCell = element("td", "ofx-num ofx-amount");
+      amountCell.dataset.dir = line.directionCode;
+      text(amountCell, (line.directionCode === "DR" ? "-" : "+") + money(line.amount));
+      tr.append(amountCell);
+
+      statementBody.append(tr);
+    }
+
+    for (const header of document.querySelectorAll("#statementTable thead th")) {
+      const button = header.querySelector(".ofx-sort");
+      if (!button) {
+        continue;
+      }
+      const active = button.dataset.sort === state.sortKey;
+      header.setAttribute("aria-sort", active ? (state.sortDir === 1 ? "ascending" : "descending") : "none");
+      const mark = button.querySelector(".ofx-sort-mark");
+      text(mark, active ? (state.sortDir === 1 ? "▲" : "▼") : "");
+    }
+  }
+
+  for (const button of document.querySelectorAll("#statementTable .ofx-sort")) {
+    button.addEventListener("click", () => {
+      const key = button.dataset.sort;
+      if (state.sortKey === key) {
+        state.sortDir = -state.sortDir;
+      } else {
+        state.sortKey = key;
+        state.sortDir = 1;
+      }
+      renderStatement();
+    });
+  }
+
+  /* ------------------------------------------------------- transaction entry */
+
+  wireForm(byId("transactionForm"), async (form) => {
+    const { status, result } = formNodes(form);
+    const data = new FormData(form);
+
+    const created = await api("/api/customer/transactions", {
+      method: "POST",
+      body: {
+        amount: Number(data.get("amount")),
+        directionCode: String(data.get("directionCode") || ""),
+        referenceCode: String(data.get("referenceCode") || "").trim()
+      }
+    });
+
+    form.reset();
+    setMessage(status, "Transaction posted.", "success");
+    renderResult(result, [
+      ["Transaction ID", String(created.transactionId)],
+      ["Posted", timestamp(created.transactionTs)],
+      ["Direction", created.directionCode],
+      ["Amount", money(created.amount)],
+      ["Reference", created.referenceCode],
+      ["Balance", money(created.currentBalance)]
+    ]);
+
+    await loadStatement();
+  });
+
+  /* -------------------------------------------------------- manager requests */
+
+  const requestsStatus = byId("requestsStatus");
+  const requestsBody = byId("requestsBody");
+  const requestsEmpty = byId("requestsEmpty");
+
+  for (const radio of document.querySelectorAll('input[name="requestStatus"]')) {
+    radio.addEventListener("change", () => {
+      if (radio.checked) {
+        state.requestStatus = radio.value;
+        void loadRequests();
+      }
+    });
+  }
+
+  function clearRequests() {
+    requestsBody.replaceChildren();
+    requestsEmpty.hidden = true;
+    setMessage(requestsStatus, "", null);
+  }
+
+  async function loadRequests() {
+    if (session.role !== "manager") {
+      return;
+    }
+    setMessage(requestsStatus, "Loading requests…", "busy");
+    let requests;
+    try {
+      requests = await api("/api/manager/requests?status=" + encodeURIComponent(state.requestStatus));
+      setMessage(requestsStatus, "", null);
+    } catch (error) {
+      requestsBody.replaceChildren();
+      requestsEmpty.hidden = true;
+      setMessage(
+        requestsStatus,
+        error instanceof ApiError ? error.message : fallbackMessage(0),
+        "error"
+      );
+      return;
+    }
+    renderRequests(Array.isArray(requests) ? requests : []);
+  }
+
+  function renderRequests(requests) {
+    requestsBody.replaceChildren();
+    requestsEmpty.hidden = requests.length > 0;
+
+    for (const request of requests) {
+      const tr = document.createElement("tr");
+
+      tr.append(element("td", "ofx-num", String(request.requestId)));
+
+      const applicant = [request.honorific, request.givenName, request.familyName]
+        .filter((part) => typeof part === "string" && part.length > 0)
+        .join(" ");
+      const nameCell = element("td", null, applicant);
+      nameCell.title = "Date of birth: " + day(request.dateOfBirth);
+      tr.append(nameCell);
+
+      tr.append(element("td", null, request.branchCode));
+      tr.append(element("td", null, request.accountKind));
+      tr.append(element("td", "ofx-mono", request.emailAddress));
+      tr.append(element("td", null, day(request.submittedAt)));
+
+      const statusCell = document.createElement("td");
+      const pill = element("span", "ofx-pill", request.requestStatus);
+      pill.dataset.status = request.requestStatus;
+      statusCell.append(pill);
+      tr.append(statusCell);
+
+      const actionCell = document.createElement("td");
+      if (request.requestStatus === "SUBMITTED") {
+        const approve = element("button", "ofx-btn", "Approve");
+        approve.type = "button";
+        approve.addEventListener("click", () => void approveRequest(request, approve));
+        actionCell.append(approve);
+      } else {
+        actionCell.append(element("span", "ofx-note", day(request.decidedAt)));
+      }
+      tr.append(actionCell);
+
+      requestsBody.append(tr);
+    }
+  }
+
+  async function approveRequest(request, button) {
+    const applicant = [request.givenName, request.familyName].filter(Boolean).join(" ");
+    const confirmed = await askConfirm(
+      "Approve request " + request.requestId + " for " + applicant + "? This opens a new account."
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    button.disabled = true;
+    setMessage(requestsStatus, "Approving request " + request.requestId + "…", "busy");
+    try {
+      const approval = await api("/api/manager/requests/" + request.requestId + "/approve", {
+        method: "POST"
+      });
+      setMessage(
+        requestsStatus,
+        "Request " + approval.requestId + " approved. Account " + approval.accountId + " opened.",
+        "success"
+      );
+      await loadRequests();
+    } catch (error) {
+      button.disabled = false;
+      setMessage(
+        requestsStatus,
+        error instanceof ApiError ? error.message : fallbackMessage(0),
+        "error"
+      );
+    }
+  }
+
+  /* ------------------------------------------------------------- home chart */
+
+  const homeChartPlot = byId("homeChartPlot");
+  const homeChartEmpty = byId("homeChartEmpty");
+  const homeChart = byId("homeChart");
+  const homeChartScope = byId("homeChartScope");
+
+  function renderHomeChart() {
+    const lines =
+      state.statement && Array.isArray(state.statement.transactions)
+        ? state.statement.transactions.slice(-24)
+        : [];
+
+    homeChartPlot.replaceChildren();
+
+    if (lines.length === 0) {
+      homeChart.hidden = true;
+      homeChartEmpty.hidden = false;
+      text(homeChartScope, session.role === "customer" ? "No transactions" : "No session");
+      text(byId("homeChartAxisLeft"), "—");
+      text(byId("homeChartAxisRight"), "—");
+      return;
+    }
+
+    homeChart.hidden = false;
+    homeChartEmpty.hidden = true;
+    text(homeChartScope, "Account " + state.statement.profile.accountId);
+
+    const peak = lines.reduce((max, line) => Math.max(max, line.amount), 0) || 1;
+    for (const line of lines) {
+      const bar = element("div", "ofx-chart-bar");
+      bar.dataset.dir = line.directionCode;
+      bar.style.height = Math.max(3, (line.amount / peak) * 100).toFixed(2) + "%";
+      bar.title =
+        day(line.transactionTs) + " · " + line.directionCode + " " + money(line.amount);
+      homeChartPlot.append(bar);
+    }
+
+    homeChart.setAttribute(
+      "aria-label",
+      "Balance movement: " +
+        lines.length +
+        " transactions, largest " +
+        money(peak) +
+        ", current balance " +
+        money(state.statement.currentBalance)
+    );
+    text(byId("homeChartAxisLeft"), day(lines[0].transactionTs));
+    text(byId("homeChartAxisRight"), day(lines[lines.length - 1].transactionTs));
+  }
+
+  /* -------------------------------------------------------------- bootstrap */
+
+  applySessionToShell();
+  setModule("home");
+  renderStatement();
+  void checkHealth();
+  if (session.role === "customer") {
+    void loadStatement();
+  }
+})();

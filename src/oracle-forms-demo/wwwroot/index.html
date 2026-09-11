@@ -1,0 +1,732 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <script>
+      (() => {
+        const param = new URLSearchParams(window.location.search).get("clawpilotTheme");
+        const theme =
+          param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+        document.documentElement.setAttribute("data-theme", theme);
+      })();
+    </script>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Northstar Online Banking</title>
+    <link rel="stylesheet" href="styles.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='13' font-size='13'%3E%E2%98%85%3C/text%3E%3C/svg%3E"
+    />
+  </head>
+  <body>
+    <div class="ofx-app">
+      <header class="ofx-titlebar">
+        <div class="ofx-titlebar-main">
+          <span class="ofx-mark" aria-hidden="true">★</span>
+          <h1 class="ofx-product">Northstar Online Banking</h1>
+          <span class="ofx-badge">Oracle Forms workflow replica</span>
+        </div>
+        <div class="ofx-titlebar-side">
+          <span class="ofx-dbchip" id="dbChip" data-state="checking">
+            <span class="ofx-dot" aria-hidden="true"></span>
+            <span id="dbChipLabel">Database: checking…</span>
+          </span>
+          <button type="button" class="ofx-btn ofx-btn-quiet" id="dbRetry">Retry</button>
+          <button type="button" class="ofx-btn ofx-btn-quiet" id="aboutOpen">About</button>
+        </div>
+      </header>
+
+      <nav class="ofx-menubar" aria-label="Application menu">
+        <div class="ofx-menu" data-menu="banking">
+          <button
+            type="button"
+            class="ofx-menu-trigger"
+            aria-haspopup="true"
+            aria-expanded="false"
+            aria-controls="menu-banking"
+          >
+            <u>B</u>anking
+          </button>
+          <ul class="ofx-menu-list" id="menu-banking" hidden>
+            <li><button type="button" data-module="home">Home</button></li>
+            <li><button type="button" data-module="open-account">Open Account…</button></li>
+            <li><button type="button" data-module="registration">Online Registration…</button></li>
+            <li><button type="button" data-module="interest">Interest Calculator</button></li>
+            <li class="ofx-menu-sep" role="separator"></li>
+            <li><button type="button" data-module="customer-login">Customer Login</button></li>
+            <li><button type="button" data-action="signout">Sign Out</button></li>
+          </ul>
+        </div>
+        <div class="ofx-menu" data-menu="transactions">
+          <button
+            type="button"
+            class="ofx-menu-trigger"
+            aria-haspopup="true"
+            aria-expanded="false"
+            aria-controls="menu-transactions"
+          >
+            <u>T</u>ransactions
+          </button>
+          <ul class="ofx-menu-list" id="menu-transactions" hidden>
+            <li><button type="button" data-module="statement">Account Statement</button></li>
+            <li><button type="button" data-module="transaction">Transaction Entry</button></li>
+            <li class="ofx-menu-sep" role="separator"></li>
+            <li><button type="button" data-action="refresh-statement">Refresh Statement</button></li>
+          </ul>
+        </div>
+        <div class="ofx-menu" data-menu="manager">
+          <button
+            type="button"
+            class="ofx-menu-trigger"
+            aria-haspopup="true"
+            aria-expanded="false"
+            aria-controls="menu-manager"
+          >
+            <u>M</u>anager
+          </button>
+          <ul class="ofx-menu-list" id="menu-manager" hidden>
+            <li><button type="button" data-module="manager-login">Manager Login</button></li>
+            <li><button type="button" data-module="requests">Account Requests</button></li>
+            <li class="ofx-menu-sep" role="separator"></li>
+            <li><button type="button" data-action="refresh-requests">Refresh Requests</button></li>
+          </ul>
+        </div>
+        <div class="ofx-menu" data-menu="help">
+          <button
+            type="button"
+            class="ofx-menu-trigger"
+            aria-haspopup="true"
+            aria-expanded="false"
+            aria-controls="menu-help"
+          >
+            <u>H</u>elp
+          </button>
+          <ul class="ofx-menu-list" id="menu-help" hidden>
+            <li><button type="button" data-action="about">About This Replica…</button></li>
+            <li><button type="button" data-action="health">Check Database Status</button></li>
+          </ul>
+        </div>
+      </nav>
+
+      <div class="ofx-toolbar" role="toolbar" aria-label="Module commands">
+        <button type="button" class="ofx-tool" data-module="home" title="Home">
+          <span aria-hidden="true">⌂</span><span class="ofx-tool-text">Home</span>
+        </button>
+        <button type="button" class="ofx-tool" data-module="open-account" title="Open a new account">
+          <span aria-hidden="true">✚</span><span class="ofx-tool-text">Open Account</span>
+        </button>
+        <button type="button" class="ofx-tool" data-module="registration" title="Enable online banking">
+          <span aria-hidden="true">✎</span><span class="ofx-tool-text">Register</span>
+        </button>
+        <button type="button" class="ofx-tool" data-module="interest" title="Simple interest calculator">
+          <span aria-hidden="true">∑</span><span class="ofx-tool-text">Interest</span>
+        </button>
+        <span class="ofx-tool-sep" aria-hidden="true"></span>
+        <button type="button" class="ofx-tool" data-module="statement" title="Account statement">
+          <span aria-hidden="true">▤</span><span class="ofx-tool-text">Statement</span>
+        </button>
+        <button type="button" class="ofx-tool" data-module="transaction" title="Post a transaction">
+          <span aria-hidden="true">⇄</span><span class="ofx-tool-text">Post Entry</span>
+        </button>
+        <button type="button" class="ofx-tool" data-module="requests" title="Review account requests">
+          <span aria-hidden="true">☑</span><span class="ofx-tool-text">Requests</span>
+        </button>
+        <span class="ofx-tool-sep" aria-hidden="true"></span>
+        <button type="button" class="ofx-tool" data-action="signout" title="Sign out of this session">
+          <span aria-hidden="true">⏻</span><span class="ofx-tool-text">Sign Out</span>
+        </button>
+      </div>
+
+      <div class="ofx-tabstrip" role="tablist" aria-label="Open modules" id="tabstrip">
+        <button type="button" role="tab" class="ofx-tab" data-module="home" id="tab-home" aria-controls="panel-home" aria-selected="true">Home</button>
+        <button type="button" role="tab" class="ofx-tab" data-module="open-account" id="tab-open-account" aria-controls="panel-open-account" aria-selected="false">Open Account</button>
+        <button type="button" role="tab" class="ofx-tab" data-module="registration" id="tab-registration" aria-controls="panel-registration" aria-selected="false">Registration</button>
+        <button type="button" role="tab" class="ofx-tab" data-module="interest" id="tab-interest" aria-controls="panel-interest" aria-selected="false">Interest</button>
+        <button type="button" role="tab" class="ofx-tab" data-module="customer-login" id="tab-customer-login" aria-controls="panel-customer-login" aria-selected="false">Customer Login</button>
+        <button type="button" role="tab" class="ofx-tab" data-module="manager-login" id="tab-manager-login" aria-controls="panel-manager-login" aria-selected="false">Manager Login</button>
+        <button type="button" role="tab" class="ofx-tab" data-module="statement" id="tab-statement" aria-controls="panel-statement" aria-selected="false">Statement</button>
+        <button type="button" role="tab" class="ofx-tab" data-module="transaction" id="tab-transaction" aria-controls="panel-transaction" aria-selected="false">Transaction Entry</button>
+        <button type="button" role="tab" class="ofx-tab" data-module="requests" id="tab-requests" aria-controls="panel-requests" aria-selected="false">Account Requests</button>
+      </div>
+
+      <main class="ofx-canvas" id="canvas">
+        <!-- ============================ HOME ============================ -->
+        <section
+          class="ofx-panel"
+          id="panel-home"
+          role="tabpanel"
+          aria-labelledby="tab-home"
+          tabindex="-1"
+          hidden
+        >
+          <div class="ofx-window">
+            <div class="ofx-window-bar"><span>Worklist</span></div>
+            <div class="ofx-window-body">
+              <div class="ofx-shortcut-row" id="homeShortcuts">
+                <button type="button" class="ofx-shortcut" data-module="open-account">
+                  <span class="ofx-shortcut-key" aria-hidden="true">✚</span>
+                  <span class="ofx-shortcut-title">Open Account</span>
+                  <span class="ofx-shortcut-sub">Submit an account request</span>
+                </button>
+                <button type="button" class="ofx-shortcut" data-module="registration">
+                  <span class="ofx-shortcut-key" aria-hidden="true">✎</span>
+                  <span class="ofx-shortcut-title">Online Registration</span>
+                  <span class="ofx-shortcut-sub">Enable online banking</span>
+                </button>
+                <button type="button" class="ofx-shortcut" data-module="interest">
+                  <span class="ofx-shortcut-key" aria-hidden="true">∑</span>
+                  <span class="ofx-shortcut-title">Interest Calculator</span>
+                  <span class="ofx-shortcut-sub">Simple interest projection</span>
+                </button>
+                <button type="button" class="ofx-shortcut" data-module="customer-login">
+                  <span class="ofx-shortcut-key" aria-hidden="true">▤</span>
+                  <span class="ofx-shortcut-title">Customer Login</span>
+                  <span class="ofx-shortcut-sub">Statements and entries</span>
+                </button>
+                <button type="button" class="ofx-shortcut" data-module="manager-login">
+                  <span class="ofx-shortcut-key" aria-hidden="true">☑</span>
+                  <span class="ofx-shortcut-title">Manager Login</span>
+                  <span class="ofx-shortcut-sub">Approve account requests</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="ofx-window">
+            <div class="ofx-window-bar">
+              <span>Balance movement</span>
+              <span class="ofx-window-bar-note" id="homeChartScope">No session</span>
+            </div>
+            <div class="ofx-window-body">
+              <div class="ofx-chart" id="homeChart" role="img" aria-label="Balance movement chart">
+                <div class="ofx-chart-plot" id="homeChartPlot"></div>
+                <div class="ofx-chart-axis">
+                  <span id="homeChartAxisLeft">—</span>
+                  <span id="homeChartAxisRight">—</span>
+                </div>
+              </div>
+              <p class="ofx-empty" id="homeChartEmpty">
+                Balance movement loads from the signed-in customer statement.
+              </p>
+              <ul class="ofx-legend">
+                <li><span class="ofx-swatch ofx-swatch-cr" aria-hidden="true"></span>Credit (CR)</li>
+                <li><span class="ofx-swatch ofx-swatch-dr" aria-hidden="true"></span>Debit (DR)</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="ofx-window">
+            <div class="ofx-window-bar"><span>Provenance</span></div>
+            <div class="ofx-window-body">
+              <p class="ofx-note">
+                The original Oracle Forms <span class="ofx-mono">.fmb</span> modules are not running
+                here. This browser client re-implements the published workflow requirements against
+                the synthetic demo Oracle database.
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <!-- ======================== OPEN ACCOUNT ======================== -->
+        <section
+          class="ofx-panel"
+          id="panel-open-account"
+          role="tabpanel"
+          aria-labelledby="tab-open-account"
+          tabindex="-1"
+          hidden
+        >
+          <div class="ofx-window">
+            <div class="ofx-window-bar"><span>Account request</span></div>
+            <div class="ofx-window-body">
+              <form class="ofx-form" id="accountForm" novalidate>
+                <fieldset class="ofx-block">
+                  <legend>Account</legend>
+                  <div class="ofx-grid">
+                    <div class="ofx-field">
+                      <label for="ar-branch">Branch</label>
+                      <select id="ar-branch" name="branchCode" required>
+                        <option value="CENTRAL">CENTRAL</option>
+                        <option value="RIVERSIDE">RIVERSIDE</option>
+                        <option value="HARBOUR">HARBOUR</option>
+                      </select>
+                    </div>
+                    <div class="ofx-field">
+                      <label for="ar-kind">Account kind</label>
+                      <select id="ar-kind" name="accountKind" required>
+                        <option value="SAVINGS">SAVINGS</option>
+                        <option value="CHECKING">CHECKING</option>
+                      </select>
+                    </div>
+                  </div>
+                </fieldset>
+
+                <fieldset class="ofx-block">
+                  <legend>Applicant</legend>
+                  <div class="ofx-grid">
+                    <div class="ofx-field">
+                      <label for="ar-honorific">Honorific</label>
+                      <select id="ar-honorific" name="honorific">
+                        <option value="">(none)</option>
+                        <option value="Mr">Mr</option>
+                        <option value="Mrs">Mrs</option>
+                        <option value="Ms">Ms</option>
+                        <option value="Mx">Mx</option>
+                        <option value="Dr">Dr</option>
+                      </select>
+                    </div>
+                    <div class="ofx-field">
+                      <label for="ar-dob">Date of birth</label>
+                      <input id="ar-dob" name="dateOfBirth" type="date" required />
+                    </div>
+                    <div class="ofx-field">
+                      <label for="ar-given">Given name</label>
+                      <input id="ar-given" name="givenName" type="text" maxlength="40" autocomplete="given-name" required />
+                    </div>
+                    <div class="ofx-field">
+                      <label for="ar-family">Family name</label>
+                      <input id="ar-family" name="familyName" type="text" maxlength="40" autocomplete="family-name" required />
+                    </div>
+                    <div class="ofx-field">
+                      <label for="ar-work">Work phone</label>
+                      <input id="ar-work" name="workPhone" type="tel" maxlength="20" autocomplete="tel" />
+                    </div>
+                    <div class="ofx-field">
+                      <label for="ar-home">Home phone</label>
+                      <input id="ar-home" name="homePhone" type="tel" maxlength="20" autocomplete="tel" />
+                    </div>
+                  </div>
+                </fieldset>
+
+                <fieldset class="ofx-block">
+                  <legend>Correspondence</legend>
+                  <div class="ofx-grid">
+                    <div class="ofx-field ofx-field-wide">
+                      <label for="ar-street">Street address</label>
+                      <input id="ar-street" name="streetAddress" type="text" maxlength="120" autocomplete="street-address" required />
+                    </div>
+                    <div class="ofx-field">
+                      <label for="ar-region">Region</label>
+                      <select id="ar-region" name="regionCode" required>
+                        <option value="NY">NY</option>
+                        <option value="NJ">NJ</option>
+                        <option value="CT">CT</option>
+                        <option value="PA">PA</option>
+                        <option value="MA">MA</option>
+                        <option value="IL">IL</option>
+                        <option value="TX">TX</option>
+                        <option value="CA">CA</option>
+                        <option value="WA">WA</option>
+                        <option value="FL">FL</option>
+                      </select>
+                    </div>
+                    <div class="ofx-field">
+                      <label for="ar-postal">Postal code</label>
+                      <input id="ar-postal" name="postalCode" type="text" maxlength="12" inputmode="numeric" autocomplete="postal-code" required />
+                    </div>
+                    <div class="ofx-field ofx-field-wide">
+                      <label for="ar-email">Email address</label>
+                      <input id="ar-email" name="emailAddress" type="email" maxlength="120" autocomplete="email" required />
+                    </div>
+                  </div>
+                </fieldset>
+
+                <div class="ofx-actions">
+                  <button type="submit" class="ofx-btn ofx-btn-primary">Submit request</button>
+                  <button type="reset" class="ofx-btn">Clear form</button>
+                </div>
+                <p class="ofx-msg" data-role="status" role="status" aria-live="polite"></p>
+                <dl class="ofx-result" data-role="result" hidden></dl>
+              </form>
+            </div>
+          </div>
+        </section>
+
+        <!-- ========================= REGISTRATION ======================= -->
+        <section
+          class="ofx-panel"
+          id="panel-registration"
+          role="tabpanel"
+          aria-labelledby="tab-registration"
+          tabindex="-1"
+          hidden
+        >
+          <div class="ofx-window ofx-window-narrow">
+            <div class="ofx-window-bar"><span>Online registration</span></div>
+            <div class="ofx-window-body">
+              <form class="ofx-form" id="registrationForm" novalidate>
+                <div class="ofx-grid">
+                  <div class="ofx-field">
+                    <label for="rg-account">Account number</label>
+                    <input id="rg-account" name="accountId" type="number" min="1" step="1" inputmode="numeric" required />
+                  </div>
+                  <div class="ofx-field ofx-field-wide">
+                    <label for="rg-email">Email on record</label>
+                    <input id="rg-email" name="emailAddress" type="email" maxlength="120" autocomplete="email" required />
+                  </div>
+                  <div class="ofx-field">
+                    <label for="rg-password">New password</label>
+                    <input id="rg-password" name="password" type="password" minlength="8" maxlength="64" autocomplete="new-password" required />
+                  </div>
+                </div>
+                <div class="ofx-actions">
+                  <button type="submit" class="ofx-btn ofx-btn-primary">Enable online banking</button>
+                  <button type="reset" class="ofx-btn">Clear form</button>
+                </div>
+                <p class="ofx-msg" data-role="status" role="status" aria-live="polite"></p>
+                <dl class="ofx-result" data-role="result" hidden></dl>
+              </form>
+            </div>
+          </div>
+        </section>
+
+        <!-- ========================== INTEREST ========================== -->
+        <section
+          class="ofx-panel"
+          id="panel-interest"
+          role="tabpanel"
+          aria-labelledby="tab-interest"
+          tabindex="-1"
+          hidden
+        >
+          <div class="ofx-window ofx-window-narrow">
+            <div class="ofx-window-bar"><span>Simple interest</span></div>
+            <div class="ofx-window-body">
+              <form class="ofx-form" id="interestForm" novalidate>
+                <div class="ofx-grid">
+                  <div class="ofx-field">
+                    <label for="in-principal">Principal</label>
+                    <input id="in-principal" name="principal" type="number" min="0.01" max="100000000" step="0.01" inputmode="decimal" required />
+                  </div>
+                  <div class="ofx-field">
+                    <label for="in-rate">Annual rate (%)</label>
+                    <input id="in-rate" name="annualRate" type="number" min="0.01" max="100" step="0.01" inputmode="decimal" required />
+                  </div>
+                  <div class="ofx-field">
+                    <label for="in-years">Term (years)</label>
+                    <input id="in-years" name="years" type="number" min="0.01" max="100" step="0.01" inputmode="decimal" required />
+                  </div>
+                </div>
+                <div class="ofx-actions">
+                  <button type="submit" class="ofx-btn ofx-btn-primary">Calculate</button>
+                  <button type="reset" class="ofx-btn">Clear form</button>
+                </div>
+                <p class="ofx-msg" data-role="status" role="status" aria-live="polite"></p>
+              </form>
+
+              <div class="ofx-subwindow" id="interestResult" hidden>
+                <dl class="ofx-result">
+                  <div><dt>Principal</dt><dd id="ir-principal">—</dd></div>
+                  <div><dt>Interest</dt><dd id="ir-interest">—</dd></div>
+                  <div><dt>Total</dt><dd id="ir-total">—</dd></div>
+                </dl>
+                <div class="ofx-stackbar" role="img" id="interestBar" aria-label="Principal and interest split">
+                  <span class="ofx-stackbar-principal" id="ir-bar-principal"></span>
+                  <span class="ofx-stackbar-interest" id="ir-bar-interest"></span>
+                </div>
+                <ul class="ofx-legend">
+                  <li><span class="ofx-swatch ofx-swatch-principal" aria-hidden="true"></span>Principal</li>
+                  <li><span class="ofx-swatch ofx-swatch-interest" aria-hidden="true"></span>Interest</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ======================= CUSTOMER LOGIN ======================= -->
+        <section
+          class="ofx-panel"
+          id="panel-customer-login"
+          role="tabpanel"
+          aria-labelledby="tab-customer-login"
+          tabindex="-1"
+          hidden
+        >
+          <div class="ofx-window ofx-window-narrow">
+            <div class="ofx-window-bar"><span>Customer login</span></div>
+            <div class="ofx-window-body">
+              <form class="ofx-form" id="customerLoginForm" novalidate>
+                <div class="ofx-grid">
+                  <div class="ofx-field">
+                    <label for="cl-account">Account number</label>
+                    <input id="cl-account" name="accountId" type="number" min="1" step="1" inputmode="numeric" autocomplete="username" required />
+                  </div>
+                  <div class="ofx-field">
+                    <label for="cl-password">Password</label>
+                    <input id="cl-password" name="password" type="password" minlength="8" maxlength="64" autocomplete="current-password" required />
+                  </div>
+                </div>
+                <div class="ofx-actions">
+                  <button type="submit" class="ofx-btn ofx-btn-primary">Sign in</button>
+                  <button type="button" class="ofx-btn" id="customerQuickFill">
+                    Fill synthetic demo credentials
+                  </button>
+                </div>
+                <p class="ofx-msg" data-role="status" role="status" aria-live="polite"></p>
+                <p class="ofx-note ofx-note-tight">
+                  Synthetic demo credentials: account <span class="ofx-mono">500001</span> /
+                  password <span class="ofx-mono">demo1234</span>. Seed data only, no real customer.
+                </p>
+              </form>
+            </div>
+          </div>
+        </section>
+
+        <!-- ======================== MANAGER LOGIN ======================= -->
+        <section
+          class="ofx-panel"
+          id="panel-manager-login"
+          role="tabpanel"
+          aria-labelledby="tab-manager-login"
+          tabindex="-1"
+          hidden
+        >
+          <div class="ofx-window ofx-window-narrow">
+            <div class="ofx-window-bar"><span>Manager login</span></div>
+            <div class="ofx-window-body">
+              <form class="ofx-form" id="managerLoginForm" novalidate>
+                <div class="ofx-grid">
+                  <div class="ofx-field">
+                    <label for="ml-user">Username</label>
+                    <input id="ml-user" name="username" type="text" maxlength="40" autocomplete="username" required />
+                  </div>
+                  <div class="ofx-field">
+                    <label for="ml-password">Password</label>
+                    <input id="ml-password" name="password" type="password" minlength="8" maxlength="64" autocomplete="current-password" required />
+                  </div>
+                </div>
+                <div class="ofx-actions">
+                  <button type="submit" class="ofx-btn ofx-btn-primary">Sign in</button>
+                  <button type="button" class="ofx-btn" id="managerQuickFill">
+                    Fill synthetic demo credentials
+                  </button>
+                </div>
+                <p class="ofx-msg" data-role="status" role="status" aria-live="polite"></p>
+                <p class="ofx-note ofx-note-tight">
+                  Synthetic demo credentials: <span class="ofx-mono">branch.manager</span> /
+                  <span class="ofx-mono">manager-demo-1</span>. Seed data only, no real staff account.
+                </p>
+              </form>
+            </div>
+          </div>
+        </section>
+
+        <!-- ========================= STATEMENT ========================== -->
+        <section
+          class="ofx-panel"
+          id="panel-statement"
+          role="tabpanel"
+          aria-labelledby="tab-statement"
+          tabindex="-1"
+          hidden
+        >
+          <div class="ofx-window">
+            <div class="ofx-window-bar">
+              <span>Account statement</span>
+              <button type="button" class="ofx-btn ofx-btn-quiet" data-action="refresh-statement">
+                Refresh
+              </button>
+            </div>
+            <div class="ofx-window-body">
+              <dl class="ofx-result ofx-result-inline">
+                <div><dt>Account</dt><dd id="st-account">—</dd></div>
+                <div><dt>Holder</dt><dd id="st-holder">—</dd></div>
+                <div><dt>Branch</dt><dd id="st-branch">—</dd></div>
+                <div><dt>Kind</dt><dd id="st-kind">—</dd></div>
+                <div><dt>Current balance</dt><dd id="st-balance" class="ofx-figure">—</dd></div>
+              </dl>
+              <p class="ofx-msg" id="statementStatus" role="status" aria-live="polite"></p>
+              <div class="ofx-tablewrap">
+                <table class="ofx-table" id="statementTable">
+                  <caption>Posted transactions for the signed-in account</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col" aria-sort="ascending">
+                        <button type="button" class="ofx-sort" data-sort="transactionTs">
+                          Posted<span class="ofx-sort-mark" aria-hidden="true"></span>
+                        </button>
+                      </th>
+                      <th scope="col" aria-sort="none">
+                        <button type="button" class="ofx-sort" data-sort="referenceCode">
+                          Reference<span class="ofx-sort-mark" aria-hidden="true"></span>
+                        </button>
+                      </th>
+                      <th scope="col" aria-sort="none">
+                        <button type="button" class="ofx-sort" data-sort="directionCode">
+                          Type<span class="ofx-sort-mark" aria-hidden="true"></span>
+                        </button>
+                      </th>
+                      <th scope="col" class="ofx-num" aria-sort="none">
+                        <button type="button" class="ofx-sort" data-sort="amount">
+                          Amount<span class="ofx-sort-mark" aria-hidden="true"></span>
+                        </button>
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody id="statementBody"></tbody>
+                </table>
+              </div>
+              <p class="ofx-empty" id="statementEmpty" hidden>No transactions are posted to this account.</p>
+            </div>
+          </div>
+        </section>
+
+        <!-- ====================== TRANSACTION ENTRY ===================== -->
+        <section
+          class="ofx-panel"
+          id="panel-transaction"
+          role="tabpanel"
+          aria-labelledby="tab-transaction"
+          tabindex="-1"
+          hidden
+        >
+          <div class="ofx-window ofx-window-narrow">
+            <div class="ofx-window-bar"><span>Transaction entry</span></div>
+            <div class="ofx-window-body">
+              <form class="ofx-form" id="transactionForm" novalidate>
+                <fieldset class="ofx-block ofx-block-flat">
+                  <legend>Direction</legend>
+                  <div class="ofx-segmented">
+                    <input type="radio" id="tx-cr" name="directionCode" value="CR" checked />
+                    <label for="tx-cr">CR — Credit</label>
+                    <input type="radio" id="tx-dr" name="directionCode" value="DR" />
+                    <label for="tx-dr">DR — Debit</label>
+                  </div>
+                </fieldset>
+                <div class="ofx-grid">
+                  <div class="ofx-field">
+                    <label for="tx-amount">Amount</label>
+                    <input id="tx-amount" name="amount" type="number" min="0.01" max="1000000" step="0.01" inputmode="decimal" required />
+                  </div>
+                  <div class="ofx-field">
+                    <label for="tx-reference">Reference</label>
+                    <input
+                      id="tx-reference"
+                      name="referenceCode"
+                      type="text"
+                      maxlength="30"
+                      pattern="[A-Za-z0-9][-A-Za-z0-9_/]*"
+                      required
+                    />
+                  </div>
+                </div>
+                <div class="ofx-actions">
+                  <button type="submit" class="ofx-btn ofx-btn-primary">Post transaction</button>
+                  <button type="reset" class="ofx-btn">Clear form</button>
+                </div>
+                <p class="ofx-msg" data-role="status" role="status" aria-live="polite"></p>
+                <dl class="ofx-result" data-role="result" hidden></dl>
+              </form>
+            </div>
+          </div>
+        </section>
+
+        <!-- ======================= ACCOUNT REQUESTS ===================== -->
+        <section
+          class="ofx-panel"
+          id="panel-requests"
+          role="tabpanel"
+          aria-labelledby="tab-requests"
+          tabindex="-1"
+          hidden
+        >
+          <div class="ofx-window">
+            <div class="ofx-window-bar">
+              <span>Account requests</span>
+              <button type="button" class="ofx-btn ofx-btn-quiet" data-action="refresh-requests">
+                Refresh
+              </button>
+            </div>
+            <div class="ofx-window-body">
+              <div class="ofx-filterbar">
+                <span class="ofx-filterbar-label" id="requestFilterLabel">Status</span>
+                <div class="ofx-segmented" role="group" aria-labelledby="requestFilterLabel">
+                  <input type="radio" id="rq-submitted" name="requestStatus" value="SUBMITTED" checked />
+                  <label for="rq-submitted">Submitted</label>
+                  <input type="radio" id="rq-approved" name="requestStatus" value="APPROVED" />
+                  <label for="rq-approved">Approved</label>
+                  <input type="radio" id="rq-rejected" name="requestStatus" value="REJECTED" />
+                  <label for="rq-rejected">Rejected</label>
+                </div>
+              </div>
+              <p class="ofx-msg" id="requestsStatus" role="status" aria-live="polite"></p>
+              <div class="ofx-tablewrap">
+                <table class="ofx-table" id="requestsTable">
+                  <caption>Account requests matching the selected status</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col" class="ofx-num">Request</th>
+                      <th scope="col">Applicant</th>
+                      <th scope="col">Branch</th>
+                      <th scope="col">Kind</th>
+                      <th scope="col">Email</th>
+                      <th scope="col">Submitted</th>
+                      <th scope="col">Status</th>
+                      <th scope="col"><span class="ofx-visually-hidden">Decision</span></th>
+                    </tr>
+                  </thead>
+                  <tbody id="requestsBody"></tbody>
+                </table>
+              </div>
+              <p class="ofx-empty" id="requestsEmpty" hidden>No requests match this status.</p>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <footer class="ofx-statusbar">
+        <span class="ofx-statuscell" id="statusModule">Module: Home</span>
+        <span class="ofx-statuscell" id="statusDb">Database: checking…</span>
+        <span class="ofx-statuscell ofx-statuscell-grow" id="statusSession">Session: not signed in</span>
+      </footer>
+    </div>
+
+    <dialog class="ofx-dialog" id="aboutDialog" aria-labelledby="aboutTitle">
+      <form method="dialog" class="ofx-dialog-form">
+        <div class="ofx-window-bar">
+          <span id="aboutTitle">About Northstar Online Banking</span>
+        </div>
+        <div class="ofx-dialog-body">
+          <p>
+            <strong>The original Oracle Forms <span class="ofx-mono">.fmb</span> source is not
+            running here.</strong>
+            No Oracle Forms runtime, Forms Services component, or compiled module is loaded by this
+            page.
+          </p>
+          <p>
+            This is a browser replica that implements the published workflow requirements of the
+            public Oracle Apps case study against the synthetic demo Oracle database exposed by this
+            application's HTTP API.
+          </p>
+          <p>
+            All accounts, staff users, balances and transactions are invented seed data. Nothing in
+            this environment corresponds to a real person, account, or transaction.
+          </p>
+          <dl class="ofx-result ofx-result-inline">
+            <div><dt>Client</dt><dd>Static HTML, CSS and JavaScript — no framework, no build step</dd></div>
+            <div><dt>Session storage</dt><dd>Bearer token held in <span class="ofx-mono">sessionStorage</span> only</dd></div>
+          </dl>
+        </div>
+        <div class="ofx-dialog-actions">
+          <button type="submit" class="ofx-btn ofx-btn-primary" value="close">Close</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="ofx-dialog" id="confirmDialog" aria-labelledby="confirmTitle">
+      <form method="dialog" class="ofx-dialog-form">
+        <div class="ofx-window-bar"><span id="confirmTitle">Confirm</span></div>
+        <div class="ofx-dialog-body">
+          <p id="confirmMessage"></p>
+        </div>
+        <div class="ofx-dialog-actions">
+          <button type="submit" class="ofx-btn" value="cancel">Cancel</button>
+          <button type="submit" class="ofx-btn ofx-btn-primary" value="confirm">Confirm</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="app.js"></script>
+  </body>
+</html>

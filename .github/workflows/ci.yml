@@ -53,6 +53,10 @@ jobs:
 
       # Proves the Dockerfile still builds without pushing anywhere. The deployed image is built by
       # Azure Container Registry, not here.
-      - name: Build image
+      - name: Build workbench image
         working-directory: src/oracle-forms-migration-fleet
         run: docker build -f Dockerfile -t migration-fleet-workbench:ci .
+
+      - name: Build Forms replica image
+        working-directory: src/oracle-forms-demo
+        run: docker build -f Dockerfile -t oracle-forms-demo:ci .
