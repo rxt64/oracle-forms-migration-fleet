@@ -1,4 +1,4 @@
-import type { AzureComponent } from "./types";
+import type { AzureComponent, ExecutionResult } from "./types";
 
 export interface SourceArtifact {
   kind: string;
@@ -19,7 +19,7 @@ export interface SourceWorkspace {
 }
 
 export interface ConsoleLine {
-  level: "info" | "warn" | "error" | "found" | "done";
+  level: "info" | "warn" | "error" | "found" | "skip" | "done";
   text: string;
 }
 
@@ -62,7 +62,7 @@ export function parseRepositoryUrl(raw: string): { target?: RepositoryTarget; er
   return { target: { label: `${url.hostname}/${path}`, host: url.hostname } };
 }
 
-async function* readEvents(response: Response): AsyncGenerator<ConsoleLine | { level: "done"; workspace: SourceWorkspace }> {
+async function* readEvents<TDone>(response: Response): AsyncGenerator<ConsoleLine | TDone> {
   if (!response.body) throw new Error("The server sent no progress stream.");
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -120,7 +120,46 @@ export async function* acquireSource(
 
   if (response.status === 401 || response.status === 403) throw new Error(SessionExpired);
   if (!response.ok) throw new Error(`The server refused the request (${response.status}).`);
-  yield* readEvents(response);
+  yield* readEvents<{ level: "done"; workspace: SourceWorkspace }>(response);
+}
+
+/**
+ * Streams a run of the phases the server's own planner authorized. Progress lines are the server's,
+ * and the closing frame carries what actually ran and what it wrote.
+ */
+export async function* executeRun(
+  body: Record<string, unknown>,
+  signal: AbortSignal,
+): AsyncGenerator<ConsoleLine | { level: "done"; result: ExecutionResult }> {
+  let response: Response;
+  try {
+    response = await fetch("/api/workbench/execute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    });
+  } catch (error) {
+    if (signal.aborted) throw error;
+    throw new Error(SessionExpired);
+  }
+
+  if (response.status === 401 || response.status === 403) throw new Error(SessionExpired);
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null) as { error?: string } | null;
+    throw new Error(payload?.error ?? `The server refused the request (${response.status}).`);
+  }
+  yield* readEvents<{ level: "done"; result: ExecutionResult }>(response);
+}
+
+export async function fetchArtifact(workspaceId: string, path: string, signal?: AbortSignal) {
+  const query = `workspaceId=${encodeURIComponent(workspaceId)}&path=${encodeURIComponent(path)}`;
+  const response = await fetch(`/api/workbench/artifact?${query}`, { signal });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null) as { error?: string } | null;
+    throw new Error(payload?.error ?? `The artifact could not be loaded (${response.status}).`);
+  }
+  return response.text();
 }
 
 export function releaseSource(workspaceId: string) {

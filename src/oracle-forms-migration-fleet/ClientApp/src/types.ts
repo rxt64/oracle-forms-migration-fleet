@@ -105,6 +105,39 @@ export interface PlanResponse {
   executionBoundary: string;
 }
 
+export interface ExecutedArtifact {
+  path: string;
+  kind: string;
+  description: string;
+  previewable: boolean;
+}
+
+export interface ExecutedPhase {
+  phase: string;
+  plannedStatus: string;
+  state: "Executed" | "SkippedByPlanner" | "AdapterNotImplemented" | "Failed";
+  detail: string | null;
+  artifacts: ExecutedArtifact[];
+  findings: string[];
+}
+
+export interface ExecutedAttestation {
+  kind: string;
+  succeeded: boolean;
+  summary: string;
+  artifacts: string[];
+}
+
+export interface ExecutionResult {
+  requestedMode: string;
+  authorizedMode: string;
+  outputRoot: string;
+  phases: ExecutedPhase[];
+  artifacts: ExecutedArtifact[];
+  attestations: ExecutedAttestation[];
+  blockers: string[];
+}
+
 export interface RunFields {
   engagementId: string;
   applicationName: string;

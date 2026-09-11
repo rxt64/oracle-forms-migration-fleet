@@ -6,8 +6,12 @@ using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using OracleFormsMigrationFleet.Fleet;
+using OracleFormsMigrationFleet.Fleet.Execution;
 using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Threading.Channels;
 
 namespace OracleFormsMigrationFleet.Hosting;
 
@@ -89,7 +93,12 @@ internal static class WorkbenchEndpoints
 
         if (sourceWorkspaces is not null)
         {
+            ILogger logger = endpoints.ServiceProvider
+                .GetRequiredService<ILoggerFactory>()
+                .CreateLogger("OracleFormsMigrationFleet.Workbench");
+
             MapSourceAcquisition(endpoints, sourceWorkspaces);
+            MapExecution(endpoints, sourceWorkspaces, logger);
         }
     }
 
@@ -144,6 +153,137 @@ internal static class WorkbenchEndpoints
             workspaces.Release(Owner(context), workspaceId) ? Results.NoContent() : Results.NotFound());
     }
 
+    /// <summary>
+    /// Runs the phases the planner authorized for a source copy the caller owns.
+    ///
+    /// The workspace is addressed by identifier and resolved against the signed-in owner, so no path
+    /// from the request body ever reaches the file system. Every write lands under the session-private
+    /// output directory; the read-only source copy, the customer's repository, and every database and
+    /// Azure resource are untouched.
+    /// </summary>
+    private static void MapExecution(IEndpointRouteBuilder endpoints, SourceWorkspaceService workspaces, ILogger logger)
+    {
+        endpoints.MapPost("/api/workbench/execute", async (HttpContext context, CancellationToken cancellationToken) =>
+        {
+            string owner = Owner(context);
+            MigrationRunRequest? request = null;
+            string? workspaceId = null;
+
+            try
+            {
+                using JsonDocument document = await JsonDocument.ParseAsync(context.Request.Body, cancellationToken: cancellationToken);
+                workspaceId = document.RootElement.TryGetProperty("workspaceId", out JsonElement id) && id.ValueKind == JsonValueKind.String
+                    ? id.GetString()
+                    : null;
+                request = document.RootElement.Deserialize<MigrationRunRequest>(RequestOptions);
+            }
+            catch (JsonException)
+            {
+                request = null;
+            }
+
+            if (!WorkbenchExecution.TryPrepare(
+                workspaces, owner, workspaceId, request,
+                out string workspaceRoot, out MigrationRunRequest? prepared, out int status, out string error))
+            {
+                context.Response.StatusCode = status;
+                await context.Response.WriteAsJsonAsync(new { error }, cancellationToken);
+                return;
+            }
+
+            context.Response.ContentType = "text/event-stream";
+            context.Response.Headers.CacheControl = "no-cache";
+
+            WorkbenchExecution.ResetOutput(workspaceRoot);
+
+            Channel<ExecutionProgress> channel = Channel.CreateUnbounded<ExecutionProgress>(
+                new UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
+
+            MigrationExecutor executor = new(workspaceRoot);
+
+            // The adapters are synchronous, so the run moves off the request thread to keep the
+            // progress frames flowing while it works.
+            Task<MigrationExecutionResult> run = Task.Run(async () =>
+            {
+                try
+                {
+                    return await executor.ExecuteAsync(
+                        prepared!,
+                        owner,
+                        step => channel.Writer.TryWrite(step),
+                        cancellationToken);
+                }
+                finally
+                {
+                    channel.Writer.TryComplete();
+                }
+            }, cancellationToken);
+
+            try
+            {
+                await foreach (ExecutionProgress step in channel.Reader.ReadAllAsync(cancellationToken))
+                {
+                    await WriteFrameAsync(context, new { level = step.Level, text = step.Text }, cancellationToken);
+                }
+
+                MigrationExecutionResult result = await run;
+                await WriteFrameAsync(context, new { level = "done", result = WorkbenchExecution.Project(result) }, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                // The operator navigated away or the host is shutting down. Nothing further is written.
+            }
+            catch (Exception exception)
+            {
+                // Reason stays in the server log; the browser is told only that the run stopped.
+                logger.LogError(exception, "Workbench execution failed for workspace {WorkspaceId}.", workspaceId);
+                await WriteFrameAsync(
+                    context,
+                    new { level = "error", text = "The run stopped before it finished. Nothing further was written." },
+                    CancellationToken.None);
+            }
+        });
+
+        endpoints.MapGet("/api/workbench/artifact", (HttpContext context, string? workspaceId, string? path) =>
+        {
+            if (!WorkbenchExecution.TryResolveArtifact(
+                workspaces, Owner(context), workspaceId, path,
+                out string absolutePath, out int status, out string error))
+            {
+                return Results.Json(new { error }, statusCode: status);
+            }
+
+            string text;
+            bool truncated;
+            try
+            {
+                text = WorkbenchExecution.ReadPreview(absolutePath, out truncated);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                logger.LogWarning(exception, "Artifact preview could not be read.");
+                return Results.Json(
+                    new { error = "That artifact could not be read." },
+                    statusCode: StatusCodes.Status500InternalServerError);
+            }
+
+            if (truncated)
+            {
+                text += "\n\n--- Truncated at 512 KB. ---\n";
+            }
+
+            context.Response.Headers.CacheControl = "no-store";
+            context.Response.Headers.XContentTypeOptions = "nosniff";
+            return Results.Text(text, "text/plain; charset=utf-8");
+        });
+    }
+
+    private static async Task WriteFrameAsync(HttpContext context, object payload, CancellationToken cancellationToken)
+    {
+        await context.Response.WriteAsync($"data: {JsonSerializer.Serialize(payload, JsonOptions)}\n\n", cancellationToken);
+        await context.Response.Body.FlushAsync(cancellationToken);
+    }
+
     private static async Task StreamAsync(
         HttpContext context,
         IAsyncEnumerable<SourceProgress> progress,
@@ -167,6 +307,12 @@ internal static class WorkbenchEndpoints
 
     private static readonly JsonSerializerOptions JsonOptions =
         new(JsonSerializerDefaults.Web);
+
+    /// <summary>The console posts enum values as names, exactly as the plan endpoint accepts them.</summary>
+    private static readonly JsonSerializerOptions RequestOptions = new(JsonSerializerDefaults.Web)
+    {
+        Converters = { new JsonStringEnumConverter() },
+    };
 
     /// <summary>
     /// Workspace ownership comes from the Container Apps authentication header only. It is never

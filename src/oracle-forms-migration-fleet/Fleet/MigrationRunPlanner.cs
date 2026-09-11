@@ -309,7 +309,8 @@ public static class MigrationRunPlanner
                 []),
 
             new(MigrationPhase.SourceAnalysis, FleetRole.DependencyMapper, PhaseStatus.Planned,
-                MutationClass.None, ExecutionMode.PlanOnly, RequiresApproval: false,
+                // It writes the five analysis artifacts below, so "plan only" must not authorize it.
+                MutationClass.WorkspaceArtifactWrite, ExecutionMode.GenerateArtifacts, RequiresApproval: false,
                 "Parse modules, triggers, program units, libraries, and schema objects into a dependency graph and risk register.",
                 [nameof(EvidenceKind.PlSqlProgramUnit), nameof(EvidenceKind.DatabaseSchemaExport)],
                 [

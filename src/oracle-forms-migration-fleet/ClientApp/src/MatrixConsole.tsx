@@ -83,6 +83,7 @@ function prefix(level: ConsoleLine["level"]) {
     case "error": return "!!";
     case "warn": return "??";
     case "found": return "++";
+    case "skip": return "--";
     case "done": return "==";
     default: return ">>";
   }
