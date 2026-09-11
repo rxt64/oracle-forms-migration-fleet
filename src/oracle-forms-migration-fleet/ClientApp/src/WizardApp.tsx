@@ -6,6 +6,7 @@ import {
   Check,
   CheckCircle2,
   Cloud,
+  Cpu,
   Database,
   FileArchive,
   FileCheck2,
@@ -24,11 +25,15 @@ import {
   XCircle,
 } from "lucide-react";
 import type {
+  AzureFootprint,
   Bootstrap,
   EvidenceOption,
   ExecutionResult,
   FieldErrors,
+  FleetAttribution,
   Phase,
+  PhaseAttribution,
+  PhaseEngine,
   PlanResponse,
   RunFields,
 } from "./types";
@@ -253,7 +258,13 @@ function ReviewRow({ label, value, onEdit }: { label: string; value: string; onE
   );
 }
 
-function PhaseCard({ phase }: { phase: Phase }) {
+const ENGINE_LABELS: Record<PhaseEngine, string> = {
+  NotImplemented: "No adapter",
+  Deterministic: "Deterministic code",
+  DeterministicWithModelReview: "Deterministic code + model review",
+};
+
+function PhaseCard({ phase, attribution }: { phase: Phase; attribution?: PhaseAttribution }) {
   const blocked = phase.status.startsWith("Blocked");
   return (
     <article className="mf-phase">
@@ -262,6 +273,14 @@ function PhaseCard({ phase }: { phase: Phase }) {
         <span className={blocked ? "mf-pill danger" : "mf-pill success"}>{blocked ? <XCircle /> : <CheckCircle2 />}{humanize(phase.status)}</span>
       </header>
       <p>{phase.objective}</p>
+      {attribution && <p className="mf-attribution">
+        <Cpu />
+        <span>
+          <strong>{ENGINE_LABELS[attribution.engine]}</strong>
+          {attribution.modelDeployment && <code>{attribution.modelDeployment}</code>}
+          <small>{attribution.summary}</small>
+        </span>
+      </p>}
       {phase.blockers.length > 0 && <ul>{phase.blockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul>}
       <details><summary>Inputs, outputs, and tooling</summary><div className="mf-phase-detail">
         <div><strong>Required inputs</strong><p>{phase.requiredInputs.map(humanize).join(", ") || "None"}</p></div>
@@ -269,6 +288,88 @@ function PhaseCard({ phase }: { phase: Phase }) {
         <div><strong>Tooling</strong><p>{phase.tooling.join(" · ") || "None"}</p></div>
       </div></details>
     </article>
+  );
+}
+
+function AttributionSection({ attribution }: { attribution: FleetAttribution }) {
+  return (
+    <section className="mf-result-section">
+      <p className="mf-kicker">Who does the work</p>
+      <h2>Which model and which code runs each step</h2>
+      <div className="mf-models">
+        {attribution.models.map((model) => (
+          <article key={model.capability}>
+            <h3>{model.capability}</h3>
+            {model.deployment
+              ? <code>{model.deployment}</code>
+              : <span className="mf-pill">Not configured</span>}
+            <p>{model.summary}</p>
+          </article>
+        ))}
+      </div>
+      <ul className="mf-caveats">
+        {attribution.disclaimers.map((text) => <li key={text}><ShieldCheck />{text}</li>)}
+      </ul>
+    </section>
+  );
+}
+
+function AzureFootprintSection({ footprint }: { footprint: AzureFootprint }) {
+  return (
+    <section className="mf-result-section">
+      <p className="mf-kicker">Before you deploy</p>
+      <h2>What this needs in Azure, and what it would create</h2>
+
+      <div className="mf-boundary compact">
+        <LockKeyhole />
+        <p>
+          <strong>Nothing below has been created.</strong>
+          {footprint.disclaimers[0]}
+        </p>
+      </div>
+
+      <h3 className="mf-subhead">Resources</h3>
+      <ul className="mf-requirements">
+        {footprint.resources.map((resource) => (
+          <li key={resource.resourceType}>
+            <span className={resource.disposition === "Created" ? "mf-pill warn" : "mf-pill"}>{resource.disposition}</span>
+            <div><code>{resource.resourceType}</code><small>{resource.purpose}</small></div>
+            <em>from {humanize(resource.neededFrom)}</em>
+          </li>
+        ))}
+      </ul>
+
+      <h3 className="mf-subhead">Permissions the deploying identity needs</h3>
+      <ul className="mf-requirements">
+        {footprint.roles.map((role) => (
+          <li key={`${role.role}-${role.scope}`}>
+            <span className="mf-pill">{role.role}</span>
+            <div><code>{role.scope}</code><small>{role.why}</small></div>
+            <em>from {humanize(role.neededFrom)}</em>
+          </li>
+        ))}
+      </ul>
+
+      <h3 className="mf-subhead">Signing in to a customer tenant</h3>
+      <ul className="mf-caveats">
+        {footprint.tenantModel.map((text) => <li key={text}><ShieldCheck />{text}</li>)}
+      </ul>
+
+      <div className="mf-boundary compact">
+        <AlertTriangle />
+        <p>
+          <strong>There is no deploy button, deliberately.</strong>
+          This build has no adapter that provisions an Azure resource or opens a database connection, so a
+          sign-in here could not deploy anything. Wiring one before the cross-tenant consent, scoping, and
+          audit trail above are agreed would create a path to write into a customer subscription that nobody
+          had reviewed. Take this list to whoever owns the subscription instead.
+        </p>
+      </div>
+
+      <ul className="mf-caveats">
+        {footprint.disclaimers.slice(1).map((text) => <li key={text}><ShieldCheck />{text}</li>)}
+      </ul>
+    </section>
   );
 }
 
@@ -922,7 +1023,9 @@ export default function WizardApp() {
         {plan.plan.blockers.length > 0 && <section className="mf-alert"><h2><AlertTriangle />What is still missing</h2><ul>{plan.plan.blockers.map((item) => <li key={item}>{item}</li>)}</ul></section>}
         <ArchitectureReveal applicationName={plan.plan.applicationName} database={database} databaseName={selectedDatabase?.name ?? database} />
         <section className="mf-result-section"><p className="mf-kicker">Lifecycle</p><h2>Six-stage modernization path</h2><ol className="mf-lifecycle">{plan.steps.map((item) => <li key={item.step}><span>{item.order}</span><div><strong>{item.title}</strong><small>{item.phases.map(humanize).join(" · ")}</small></div><em className={item.state === "Blocked" ? "mf-pill danger" : "mf-pill success"}>{item.state === "Blocked" ? <XCircle /> : <CheckCircle2 />}{item.state}</em></li>)}</ol></section>
-        <section className="mf-result-section"><p className="mf-kicker">Phase detail</p><h2>Authorized work and blockers</h2><div className="mf-phases">{plan.plan.phases.map((phase) => <PhaseCard key={phase.phase} phase={phase} />)}</div></section>
+        <section className="mf-result-section"><p className="mf-kicker">Phase detail</p><h2>Authorized work and blockers</h2><div className="mf-phases">{plan.plan.phases.map((phase) => <PhaseCard key={phase.phase} phase={phase} attribution={bootstrap.attribution?.phases.find((item) => item.phase === phase.phase)} />)}</div></section>
+        {bootstrap.attribution && <AttributionSection attribution={bootstrap.attribution} />}
+        {plan.azureFootprint && <AzureFootprintSection footprint={plan.azureFootprint} />}
         <section className="mf-result-section"><p className="mf-kicker">Execution</p><h2>Run the authorized phases</h2>
           <p className="mf-run-lead">This runs only the phases marked <strong>Planned</strong> above. Everything it produces is written into your private session workspace, which is deleted with the rest of your copy. Your repository, your databases, and your Azure resources are never touched.</p>
           {!runnable && <p className="mf-help" id="run-hint">{runHint}</p>}

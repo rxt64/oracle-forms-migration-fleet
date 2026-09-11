@@ -83,6 +83,7 @@ public sealed record WorkbenchBootstrap(
     IReadOnlyList<ExecutionModeOption> ExecutionModes,
     IReadOnlyList<AzureComponentStatus> AzureComponents,
     IReadOnlyList<AzureTopologyHop> Topology,
+    FleetAttribution Attribution,
     bool AgentChatAvailable,
     string ExecutionBoundary,
     IReadOnlyList<string> Disclaimers);
@@ -119,7 +120,8 @@ public sealed record WorkbenchStepStatus(
 public sealed record WorkbenchPlanResponse(
     MigrationRunPlan Plan,
     IReadOnlyList<WorkbenchStepStatus> Steps,
-    string ExecutionBoundary);
+    string ExecutionBoundary,
+    AzureFootprint? AzureFootprint = null);
 
 /// <summary>
 /// Deterministic, request-independent description of the operator workbench. It groups the twelve
@@ -332,7 +334,8 @@ public static class MigrationWorkbenchCatalog
         bool modelConfigured = true,
         bool agentChatAvailable = false,
         bool managedIdentityConfigured = false,
-        bool entraAuthenticationConfigured = false) => new(
+        bool entraAuthenticationConfigured = false,
+        FleetAttribution? attribution = null) => new(
         Steps,
         MigrationRunPlanner.Lifecycle,
         EvidenceKinds,
@@ -340,6 +343,7 @@ public static class MigrationWorkbenchCatalog
         ExecutionModes,
         AzureComponents(applicationInsightsConfigured, modelConfigured, agentChatAvailable, managedIdentityConfigured, entraAuthenticationConfigured),
         Topology(applicationInsightsConfigured, modelConfigured, agentChatAvailable, managedIdentityConfigured, entraAuthenticationConfigured),
+        attribution ?? FleetAttributionMap.Describe([], null, null),
         agentChatAvailable,
         ExecutionBoundary,
         MigrationRunPlanner.Disclaimers);

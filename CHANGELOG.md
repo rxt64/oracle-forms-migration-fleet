@@ -23,6 +23,20 @@ Notable changes to behaviour, with the reasoning that is not visible in a diff.
   constraints that will not execute, each with the `::text` cast that fixes it, plus nineteen Oracle/PostgreSQL
   behaviour differences with concrete DDL. The mini model found none of them.
 
+- Attribution in the console. Each phase card now states what performs it — deterministic code, deterministic
+  code followed by a model review, or nothing at all — and names the deployment when a model is involved. A
+  section lists both model capabilities with their deployments, and says plainly that specialist role names
+  label ownership rather than dispatch to independent agents.
+
+- Azure footprint disclosure on every plan (`Fleet/AzureFootprint.cs`). Lists the resources a run would need and
+  which it would create, the role assignments the deploying identity requires and at what scope, and the
+  cross-tenant sign-in model. Pure and offline: it contacts nothing. `Contributor` is scoped to a single
+  resource group and the only subscription-scoped role is `Reader`, both enforced by test.
+
+  No deploy button ships with it. No adapter in this build provisions an Azure resource, so a customer-tenant
+  sign-in could not deploy anything; adding one before the consent, scoping, and audit model is agreed would
+  create an unreviewed write path into a customer subscription.
+
 ### Fixed
 
 - A review that could not run no longer reads as a review that found nothing. Unparseable output and a failed

@@ -37,13 +37,25 @@ internal static class WorkbenchEndpoints
         endpoints.MapGet("/styles.css", (HttpContext context) => ServeAsset(context, webRoot, "styles.css", "text/css; charset=utf-8"));
         endpoints.MapGet("/app.js", (HttpContext context) => ServeAsset(context, webRoot, "app.js", "text/javascript; charset=utf-8"));
 
-        endpoints.MapGet("/api/workbench/bootstrap", () =>
-            Results.Ok(MigrationWorkbenchCatalog.Bootstrap(
+        endpoints.MapGet("/api/workbench/bootstrap", (HttpContext context) =>
+        {
+            // Reported from what is actually registered, so the console cannot claim a capability the process lacks.
+            FleetAttribution attribution = FleetAttributionMap.Describe(
+                [.. MigrationExecutor.DefaultAdapters(context.RequestServices.GetService<IArtifactReviewer>()).Select(adapter => adapter.Phase)],
+                Environment.GetEnvironmentVariable("AZURE_AI_MODEL_DEPLOYMENT_NAME"),
+                context.RequestServices.GetService<IArtifactReviewer>() is null
+                    ? null
+                    : Environment.GetEnvironmentVariable("AZURE_AI_REVIEW_MODEL_DEPLOYMENT_NAME")
+                      ?? Environment.GetEnvironmentVariable("AZURE_AI_MODEL_DEPLOYMENT_NAME"));
+
+            return Results.Ok(MigrationWorkbenchCatalog.Bootstrap(
                 ApplicationInsightsConfigured(),
                 modelConfigured,
                 foundryAgentClient is not null,
                 managedIdentityConfigured,
-                entraAuthenticationConfigured)));
+                entraAuthenticationConfigured,
+                attribution));
+        });
 
         endpoints.MapPost("/api/workbench/plan", (MigrationRunRequest request) =>
         {
@@ -51,7 +63,8 @@ internal static class WorkbenchEndpoints
             return Results.Ok(new WorkbenchPlanResponse(
                 plan,
                 MigrationWorkbenchCatalog.Project(plan),
-                MigrationWorkbenchCatalog.ExecutionBoundary));
+                MigrationWorkbenchCatalog.ExecutionBoundary,
+                AzureFootprintCalculator.Describe(plan.Target.Database, plan.AuthorizedMode)));
         });
 
         endpoints.MapPost("/api/workbench/agent", async (
