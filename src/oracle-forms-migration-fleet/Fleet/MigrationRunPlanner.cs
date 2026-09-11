@@ -194,6 +194,14 @@ public static class MigrationRunPlanner
         List<PhasePlan> phases =
             [.. Blueprint(request).Select(phase => Resolve(phase, request, authorized, generationBlockers, sandboxBlockers, productionBlockers))];
 
+        // A phase that cleared its own evidence may run even when an unrelated requirement is outstanding,
+        // so the header must report what was actually authorized rather than the strictest gate.
+        if (authorized == ExecutionMode.PlanOnly &&
+            phases.Any(phase => phase.Status == PhaseStatus.Planned && phase.Mutation != MutationClass.None))
+        {
+            authorized = ExecutionMode.GenerateArtifacts;
+        }
+
         List<string> planBlockers = [.. phases
             .Where(phase => phase.Status is not (PhaseStatus.Planned or PhaseStatus.NotRequested))
             .SelectMany(phase => phase.Blockers.Select(blocker => $"{phase.Phase}: {blocker}"))
@@ -211,6 +219,40 @@ public static class MigrationRunPlanner
             Disclaimers);
     }
 
+    private static PhasePlan ResolveInputs(PhasePlan phase, MigrationRunRequest request)
+    {
+        IReadOnlyList<string> missing = MissingInputs(phase, request);
+        return missing.Count == 0
+            ? phase with { Status = PhaseStatus.Planned }
+            : phase with { Status = PhaseStatus.BlockedOnEvidence, Blockers = missing };
+    }
+
+    /// <summary>
+    /// Narrows the generation gate to the evidence a phase actually consumes.
+    ///
+    /// Gating every phase on the union trained operators to tick boxes they could not stand behind just to
+    /// proceed, which is the failure this product exists to prevent: a schema conversion was refused for
+    /// want of Forms binaries it never reads. A phase is still blocked by anything it does rely on.
+    /// </summary>
+    private static IReadOnlyList<string> RelevantTo(MigrationPhase phase, IReadOnlyList<string> generationBlockers)
+    {
+        EvidenceKind[] consumed = phase switch
+        {
+            // Emits DDL from the schema export, and lists PL/SQL it will not translate. Reads no Forms module.
+            MigrationPhase.DatabaseConversion => [EvidenceKind.DatabaseSchemaExport, EvidenceKind.PlSqlProgramUnit],
+
+            // Indexes whatever source is present; it makes no behavioural claim, so no baseline is required.
+            MigrationPhase.SourceAnalysis or MigrationPhase.SourceAcquisition =>
+                [EvidenceKind.FormsModuleSource, EvidenceKind.FormsXmlExport, EvidenceKind.PlSqlProgramUnit, EvidenceKind.DatabaseSchemaExport],
+
+            _ => [],
+        };
+
+        return consumed.Length == 0
+            ? generationBlockers
+            : [.. generationBlockers.Where(blocker => consumed.Any(kind => blocker.Contains(kind.ToString(), StringComparison.Ordinal)))];
+    }
+
     private static PhasePlan Resolve(
         PhasePlan phase,
         MigrationRunRequest request,
@@ -221,10 +263,7 @@ public static class MigrationRunPlanner
     {
         if (phase.RequiredMode <= authorized)
         {
-            IReadOnlyList<string> missing = MissingInputs(phase, request);
-            return missing.Count == 0
-                ? phase with { Status = PhaseStatus.Planned }
-                : phase with { Status = PhaseStatus.BlockedOnEvidence, Blockers = missing };
+            return ResolveInputs(phase, request);
         }
 
         if (phase.RequiredMode > request.RequestedMode)
@@ -235,11 +274,13 @@ public static class MigrationRunPlanner
         // The caller asked for this phase but a gate denied it. Report the gate that applies.
         return phase.RequiredMode switch
         {
-            ExecutionMode.GenerateArtifacts => phase with
-            {
-                Status = PhaseStatus.BlockedOnEvidence,
-                Blockers = generationBlockers,
-            },
+            ExecutionMode.GenerateArtifacts => RelevantTo(phase.Phase, generationBlockers) is { Count: 0 } && request.RequestedMode >= ExecutionMode.GenerateArtifacts
+                ? ResolveInputs(phase, request)
+                : phase with
+                {
+                    Status = PhaseStatus.BlockedOnEvidence,
+                    Blockers = RelevantTo(phase.Phase, generationBlockers),
+                },
             ExecutionMode.SandboxMigration when generationBlockers.Count > 0 => phase with
             {
                 Status = PhaseStatus.BlockedOnEvidence,

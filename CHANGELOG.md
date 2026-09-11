@@ -39,6 +39,15 @@ Notable changes to behaviour, with the reasoning that is not visible in a diff.
 
 ### Fixed
 
+- The generation gate no longer blocks a phase on evidence that phase does not read. Converting the Northstar
+  Oracle schema was refused for want of Forms `.fmb` binaries, which a schema conversion never opens. Each
+  phase is now gated on what it consumes: `DatabaseConversion` needs the schema export and PL/SQL units,
+  source analysis needs source, and `TestBaseline` is required by the phases that make a behavioural claim
+  rather than by DDL emission into a workspace.
+
+  This is a security fix, not a relaxation. A gate demanding irrelevant evidence gets defeated by ticking the
+  box falsely, and a false attestation in an auditable plan is the outcome the gate exists to prevent.
+
 - A review that could not run no longer reads as a review that found nothing. Unparseable output and a failed
   model call now write "The review did not run" with the reason, instead of "returned no findings".
 - An unrecognised severity word no longer discards the whole review. `gpt-5.6-sol` answered `"Error"` for a

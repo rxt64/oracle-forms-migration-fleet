@@ -76,14 +76,13 @@ public class MigrationExecutorTests
     {
         using TemporaryWorkspace workspace = SeededWorkspace();
 
-        // Without a verified TestBaseline the planner refuses to authorize artifact generation.
-        IReadOnlyList<EvidenceItem> incomplete = [.. FullEvidence().Where(item => item.Kind != EvidenceKind.TestBaseline)];
+        // The schema export is the one input a schema conversion cannot proceed without.
+        IReadOnlyList<EvidenceItem> incomplete = [.. FullEvidence().Where(item => item.Kind != EvidenceKind.DatabaseSchemaExport)];
         RecordingAdapter adapter = new(MigrationPhase.DatabaseConversion);
 
         MigrationExecutor executor = new(workspace.Root, [adapter]);
         MigrationExecutionResult result = await executor.ExecuteAsync(Request(evidence: incomplete), Operator);
 
-        Assert.Equal(ExecutionMode.PlanOnly, result.Plan.AuthorizedMode);
         Assert.Equal(0, adapter.Invocations);
 
         PhaseOutcome outcome = Outcome(result, MigrationPhase.DatabaseConversion);
@@ -92,6 +91,54 @@ public class MigrationExecutorTests
         Assert.Empty(outcome.Artifacts);
         Assert.Empty(result.Attestations);
         Assert.False(workspace.Exists("out/orders/database/postgresql/schema/schema.sql"));
+    }
+
+    [Fact]
+    public async Task A_missing_test_baseline_does_not_block_a_schema_conversion()
+    {
+        using TemporaryWorkspace workspace = SeededWorkspace();
+
+        // Emitting DDL into the workspace asserts nothing about behaviour, so it does not need a baseline.
+        IReadOnlyList<EvidenceItem> noBaseline = [.. FullEvidence().Where(item => item.Kind != EvidenceKind.TestBaseline)];
+        RecordingAdapter adapter = new(MigrationPhase.DatabaseConversion);
+
+        MigrationExecutionResult result = await new MigrationExecutor(workspace.Root, [adapter])
+            .ExecuteAsync(Request(evidence: noBaseline), Operator);
+
+        Assert.Equal(PhaseStatus.Planned, Outcome(result, MigrationPhase.DatabaseConversion).PlannedStatus);
+        Assert.Equal(1, adapter.Invocations);
+    }
+
+    [Fact]
+    public async Task A_missing_test_baseline_still_blocks_converting_application_code()
+    {
+        using TemporaryWorkspace workspace = SeededWorkspace();
+
+        IReadOnlyList<EvidenceItem> noBaseline = [.. FullEvidence().Where(item => item.Kind != EvidenceKind.TestBaseline)];
+        RecordingAdapter adapter = new(MigrationPhase.ApplicationCodeConversion);
+
+        MigrationExecutionResult result = await new MigrationExecutor(workspace.Root, [adapter])
+            .ExecuteAsync(Request(evidence: noBaseline), Operator);
+
+        Assert.Equal(PhaseStatus.BlockedOnEvidence, Outcome(result, MigrationPhase.ApplicationCodeConversion).PlannedStatus);
+        Assert.Equal(0, adapter.Invocations);
+    }
+
+    [Fact]
+    public async Task A_missing_forms_module_does_not_block_a_schema_conversion()
+    {
+        using TemporaryWorkspace workspace = SeededWorkspace();
+
+        // The defect this guards: an Oracle schema conversion refused for want of Forms binaries it never reads.
+        IReadOnlyList<EvidenceItem> noForms =
+            [.. FullEvidence().Where(item => item.Kind is not (EvidenceKind.FormsModuleSource or EvidenceKind.FormsXmlExport))];
+        RecordingAdapter adapter = new(MigrationPhase.DatabaseConversion);
+
+        MigrationExecutionResult result = await new MigrationExecutor(workspace.Root, [adapter])
+            .ExecuteAsync(Request(evidence: noForms), Operator);
+
+        Assert.Equal(PhaseStatus.Planned, Outcome(result, MigrationPhase.DatabaseConversion).PlannedStatus);
+        Assert.Equal(1, adapter.Invocations);
     }
 
     [Fact]
