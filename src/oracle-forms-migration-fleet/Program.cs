@@ -46,6 +46,7 @@ using Microsoft.Agents.AI;
 using Microsoft.Agents.AI.Foundry.Hosting;
 using Microsoft.Extensions.AI;
 using OracleFormsMigrationFleet.Fleet;
+using OracleFormsMigrationFleet.Fleet.Execution;
 using OracleFormsMigrationFleet.Hosting;
 
 // Load environment variables from a .env file if present (for local development).
@@ -122,6 +123,11 @@ if (modelConfigured)
             tools: FleetTools.Create());
 
     builder.Services.AddFoundryResponses(agent);
+
+    // Reviews generated artifacts for defects the deterministic emitter did not anticipate. Its output is
+    // advisory: it is written to its own report and never reaches a gate, an approval, or an attestation.
+    builder.Services.AddSingleton<IArtifactReviewer>(
+        new ModelArtifactReviewer(new SecretRejectingChatClient(modelClient)));
 }
 else
 {

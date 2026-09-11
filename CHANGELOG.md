@@ -6,6 +6,17 @@ Notable changes to behaviour, with the reasoning that is not visible in a diff.
 
 ### Added
 
+- Artifact review agent (`Fleet/Execution/ArtifactReview.cs`). After the schema conversion writes its DDL, an
+  optional `IArtifactReviewer` reads that DDL and reports suspected defects a rules engine did not anticipate.
+  Findings go to `model-review.md` and are prefixed `Advisory:` in the phase findings. They cannot open a gate,
+  sign an attestation, or alter the deterministic conversion report, so a prompt-injected or wrong reviewer can
+  only add noise to a section labelled unverified.
+
+  First measured run against the Trisha11r banking schema: two claims, one correct (a foreign key to a table no
+  `CREATE TABLE` defines) and one false positive (it reported a missing unique constraint on a column the same
+  DDL declares `PRIMARY KEY`). It did not detect that `CHECK (LENGTH(WorkPhone) = 10)` cannot execute, because
+  PostgreSQL has no `length(bigint)`. Useful as a lead generator; not yet trustworthy as a reviewer.
+
 **The fleet can now execute the phases it authorizes.** `Fleet/Execution/` adds an Oracle DDL parser, a
 PostgreSQL emitter, a phase-adapter framework, and a workbench execution API with a browser action, so a
 plan can be carried out rather than only read. Two adapters ship: source analysis and Oracle-to-PostgreSQL

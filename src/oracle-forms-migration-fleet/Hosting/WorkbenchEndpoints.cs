@@ -199,10 +199,11 @@ internal static class WorkbenchEndpoints
             Channel<ExecutionProgress> channel = Channel.CreateUnbounded<ExecutionProgress>(
                 new UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
 
-            MigrationExecutor executor = new(workspaceRoot);
+            MigrationExecutor executor = new(
+                workspaceRoot,
+                MigrationExecutor.DefaultAdapters(context.RequestServices.GetService<IArtifactReviewer>()));
 
-            // The adapters are synchronous, so the run moves off the request thread to keep the
-            // progress frames flowing while it works.
+            // The run moves off the request thread to keep progress frames flowing while it works.
             Task<MigrationExecutionResult> run = Task.Run(async () =>
             {
                 try
