@@ -12,6 +12,15 @@ reconciliation, human acceptance, and production cutover.
 > SQL Server, or move data. Work is performed by **execution adapters** outside this deterministic core, and
 > a phase counts as done only when an adapter returns artifacts plus a matching successful attestation.
 
+## Documentation
+
+| Document | Read it when |
+|---|---|
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Before your first change — branch naming, the PR loop, and what a change must include |
+| [docs/SECURITY.md](docs/SECURITY.md) | Before touching source acquisition, classification, auth, or anything the browser can see |
+| [docs/OPERATIONS.md](docs/OPERATIONS.md) | Deploying, rolling back, or debugging a deployment that misbehaved |
+| [CHANGELOG.md](CHANGELOG.md) | Understanding why current behaviour differs from what you expected |
+
 ## Product boundary
 
 | Layer | What it does | Where it lives |
@@ -365,6 +374,10 @@ dotnet test                                  # offline: no Azure or model access
 azd ai agent run --no-client                 # local host on http://localhost:8088
 azd ai agent invoke --local "Assess ENG-4471 for ORDERS."
 ```
+
+Run `npm ci` before `dotnet build`: the csproj regenerates the client only when
+`ClientApp/node_modules` already exists, and `wwwroot/` is generated and git-ignored, so a fresh clone
+that skips it builds cleanly and then serves an empty page.
 
 Or without `azd`:
 
