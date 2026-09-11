@@ -42,9 +42,31 @@ public class ArtifactReviewParsingTests
     [InlineData("   ")]
     [InlineData("no json here at all")]
     [InlineData("{ this is not valid json }")]
-    [InlineData("{\"findings\":[{\"severity\":\"Catastrophic\",\"construct\":\"t\",\"reason\":\"r\"}]}")]
     public void Parse_returns_nothing_for_unusable_output(string text) =>
         Assert.Empty(ModelArtifactReviewer.Parse(text, 25));
+
+    [Fact]
+    public void Unreadable_output_is_distinguishable_from_an_empty_review()
+    {
+        Assert.False(ModelArtifactReviewer.TryParse("not json", 25, out _));
+        Assert.True(ModelArtifactReviewer.TryParse("""{"findings":[]}""", 25, out IReadOnlyList<AdvisoryFinding> empty));
+        Assert.Empty(empty);
+    }
+
+    // gpt-5.6-sol returned "Error" for a correct finding; strict enum parsing discarded the whole review.
+    [Theory]
+    [InlineData("Error", AdvisorySeverity.WillFail)]
+    [InlineData("critical", AdvisorySeverity.WillFail)]
+    [InlineData("warning", AdvisorySeverity.BehaviourDiffers)]
+    [InlineData("Catastrophic", AdvisorySeverity.Note)]
+    public void An_unexpected_severity_word_does_not_discard_the_finding(string severity, AdvisorySeverity expected)
+    {
+        IReadOnlyList<AdvisoryFinding> findings = ModelArtifactReviewer.Parse(
+            $$"""{"findings":[{"severity":"{{severity}}","construct":"t.c","reason":"kept"}]}""",
+            25);
+
+        Assert.Equal(expected, Assert.Single(findings).Severity);
+    }
 
     [Fact]
     public void Parse_drops_findings_missing_a_construct_or_reason()
@@ -202,6 +224,18 @@ public class ReviewedConversionTests
             PhaseExecutionState.Executed,
             result.Phases.Single(phase => phase.Phase == MigrationPhase.DatabaseConversion).State);
         Assert.Contains("CREATE TABLE", workspace.Read(DdlPath), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_review_that_fails_does_not_read_like_a_review_that_found_nothing()
+    {
+        using TemporaryWorkspace workspace = SeededWorkspace();
+
+        await RunAsync(workspace, new ThrowingReviewer());
+
+        string review = workspace.Read(ReviewPath);
+        Assert.Contains("The review did not run", review, StringComparison.Ordinal);
+        Assert.DoesNotContain("returned no findings", review, StringComparison.Ordinal);
     }
 
     [Fact]

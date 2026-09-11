@@ -118,10 +118,26 @@ public sealed class DatabaseConversionAdapter(IArtifactReviewer? reviewer = null
         if (reviewer is not null)
         {
             string reviewPath = $"{outputRoot}/database/postgresql/model-review.md";
-            IReadOnlyList<AdvisoryFinding> advisories = await ReviewAsync(context, conversion, findings, cancellationToken)
-                .ConfigureAwait(false);
+            context.Info("Reviewing the generated DDL with the review model.");
 
-            context.Workspace.WriteText(reviewPath, ArtifactReviewReport.Render(context.Request.ApplicationName, target, advisories));
+            IReadOnlyList<AdvisoryFinding> advisories;
+            try
+            {
+                advisories = await reviewer.ReviewAsync(
+                    new ArtifactReviewRequest(context.Request.ApplicationName, target, conversion.Ddl, findings),
+                    cancellationToken).ConfigureAwait(false);
+
+                context.Workspace.WriteText(reviewPath, ArtifactReviewReport.Render(context.Request.ApplicationName, target, advisories));
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                // The conversion already succeeded and is on disk; a failed review must not discard it.
+                advisories = [];
+                context.Warn($"The model review did not complete ({exception.GetType().Name}). The converted schema is unaffected.");
+                context.Workspace.WriteText(reviewPath, ArtifactReviewReport.RenderFailure(
+                    context.Request.ApplicationName, target, exception.Message));
+            }
+
             artifacts.Add(new ArtifactReference(
                 reviewPath,
                 ArtifactKind.ValidationReport,
@@ -141,31 +157,6 @@ public sealed class DatabaseConversionAdapter(IArtifactReviewer? reviewer = null
         }
 
         return PhaseExecutionResult.Success(artifacts, findings);
-    }
-
-    private async Task<IReadOnlyList<AdvisoryFinding>> ReviewAsync(
-        PhaseExecutionContext context,
-        PostgreSqlConversion conversion,
-        IReadOnlyList<string> deterministicFindings,
-        CancellationToken cancellationToken)
-    {
-        context.Info("Reviewing the generated DDL with the review model.");
-        try
-        {
-            return await reviewer!.ReviewAsync(
-                new ArtifactReviewRequest(
-                    context.Request.ApplicationName,
-                    DatabaseTarget.PostgreSql,
-                    conversion.Ddl,
-                    deterministicFindings),
-                cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception exception) when (exception is not OperationCanceledException)
-        {
-            // The conversion already succeeded and is on disk; a failed review must not discard it.
-            context.Warn($"The model review did not complete ({exception.GetType().Name}). The converted schema is unaffected.");
-            return [];
-        }
     }
 
     /// <summary>Prefers the blueprint's own artifact description when the plan declares this exact path.</summary>

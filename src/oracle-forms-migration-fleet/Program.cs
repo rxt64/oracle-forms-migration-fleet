@@ -108,7 +108,8 @@ if (modelConfigured)
     // The model handles intake dialogue and reporting; the deterministic fleet, exposed as tools, owns
     // every stage transition and the target platform recommendation.
     var credential = new ChainedTokenCredential(
-        new AzureDeveloperCliCredential(),
+        // The default process timeout is short enough that a cold azd invocation loses the race.
+        new AzureDeveloperCliCredential(new AzureDeveloperCliCredentialOptions { ProcessTimeout = TimeSpan.FromSeconds(30) }),
         new ManagedIdentityCredential(ManagedIdentityId.SystemAssigned));
 
     IChatClient modelClient = new AzureOpenAIClient(openAiEndpoint!, credential)
@@ -124,10 +125,20 @@ if (modelConfigured)
 
     builder.Services.AddFoundryResponses(agent);
 
-    // Reviews generated artifacts for defects the deterministic emitter did not anticipate. Its output is
-    // advisory: it is written to its own report and never reaches a gate, an approval, or an attestation.
+    // Reviewing generated DDL is an adversarial reasoning task, so it gets its own deployment rather than
+    // the conversational one. Falls back to the conversation model when no review deployment is set.
+    string reviewDeployment = Environment.GetEnvironmentVariable("AZURE_AI_REVIEW_MODEL_DEPLOYMENT_NAME") is { Length: > 0 } configured
+        ? configured
+        : deployment!;
+
+    IChatClient reviewModelClient = string.Equals(reviewDeployment, deployment, StringComparison.OrdinalIgnoreCase)
+        ? modelClient
+        : new AzureOpenAIClient(openAiEndpoint!, credential).GetChatClient(reviewDeployment).AsIChatClient();
+
+    Console.WriteLine($"[INFO] Conversation model: {deployment}. Artifact review model: {reviewDeployment}.");
+
     builder.Services.AddSingleton<IArtifactReviewer>(
-        new ModelArtifactReviewer(new SecretRejectingChatClient(modelClient)));
+        new ModelArtifactReviewer(new SecretRejectingChatClient(reviewModelClient)));
 }
 else
 {

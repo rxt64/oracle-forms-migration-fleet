@@ -17,6 +17,22 @@ Notable changes to behaviour, with the reasoning that is not visible in a diff.
   DDL declares `PRIMARY KEY`). It did not detect that `CHECK (LENGTH(WorkPhone) = 10)` cannot execute, because
   PostgreSQL has no `length(bigint)`. Useful as a lead generator; not yet trustworthy as a reviewer.
 
+- Per-agent model deployments. Conversation and tool calling stay on `gpt-5.4-mini`; artifact review moved to a
+  `gpt-5.6-sol` deployment selected by `AZURE_AI_REVIEW_MODEL_DEPLOYMENT_NAME`, falling back to the conversation
+  model when unset. On the same banking schema the review model found all four `length(bigint)` CHECK
+  constraints that will not execute, each with the `::text` cast that fixes it, plus nineteen Oracle/PostgreSQL
+  behaviour differences with concrete DDL. The mini model found none of them.
+
+### Fixed
+
+- A review that could not run no longer reads as a review that found nothing. Unparseable output and a failed
+  model call now write "The review did not run" with the reason, instead of "returned no findings".
+- An unrecognised severity word no longer discards the whole review. `gpt-5.6-sol` answered `"Error"` for a
+  correct finding and strict enum parsing threw away every finding in the reply; severities now map leniently.
+- The deterministic findings passed to the reviewer were framed as "do not repeat", which suppressed exactly the
+  constructs where the model adds value: the converter had already flagged those CHECK constraints as needing
+  review, so the model stayed silent about them. They are now framed as a list to adjudicate.
+
 **The fleet can now execute the phases it authorizes.** `Fleet/Execution/` adds an Oracle DDL parser, a
 PostgreSQL emitter, a phase-adapter framework, and a workbench execution API with a browser action, so a
 plan can be carried out rather than only read. Two adapters ship: source analysis and Oracle-to-PostgreSQL
