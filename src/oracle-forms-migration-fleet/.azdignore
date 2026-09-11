@@ -1,0 +1,19 @@
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+**/.secrets/
+
+# Build and test output
+bin/
+obj/
+artifacts/
+TestResults/
+ClientApp/node_modules/
+ClientApp/*.tsbuildinfo
+
+# IDE and version-control metadata
+.vs/
+.vscode/
+.idea/
+.git/

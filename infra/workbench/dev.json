@@ -1,0 +1,26 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "location": {
+      "value": "eastus2"
+    },
+    "workloadToken": {
+      "value": "ofmfleet"
+    },
+    "environmentName": {
+      "value": "dev"
+    },
+    "foundryAccountName": {
+      "value": "cog-czusrhcg4gpm2"
+    },
+    "foundryProjectName": {
+      "value": "oracle-forms-migration-fleet-dev"
+    },
+    "operatorPrincipalObjectIds": {
+      "value": [
+        "dd84da40-177f-47b9-9c4d-4b657ee4de36"
+      ]
+    }
+  }
+}

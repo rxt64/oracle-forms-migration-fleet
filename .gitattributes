@@ -1,0 +1,11 @@
+# Keep LF in the repository. The Dockerfile and .dockerignore are consumed by Alpine images,
+# where CRLF silently breaks RUN lines and ignore patterns.
+* text=auto eol=lf
+
+# Vendored lock files and binaries must never be line-ending normalized.
+package-lock.json -text
+*.png binary
+*.ico binary
+*.woff2 binary
+*.fmb binary
+*.fmx binary

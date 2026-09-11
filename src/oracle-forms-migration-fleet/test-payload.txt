@@ -1,0 +1,5 @@
+What evidence do you need to assess an Oracle Forms application for migration?
+Which of my dependencies would force Azure SQL Managed Instance instead of Azure SQL Database?
+Assess engagement ENG-4471 for the ORDERS application; I have a module inventory, PL/SQL units, a schema export, and a workload profile showing DBMS_SCHEDULER jobs.
+I only have a module inventory so far. What is blocked and what should I collect next?
+Explain the stages of the fleet and who owns each one.

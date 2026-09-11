@@ -1,0 +1,34 @@
+# azd environment — endpoints and secrets, never commit
+.azure
+
+# Local environment files — never commit
+.env
+.env.local
+*.env.local
+
+# .NET build output
+bin/
+obj/
+artifacts/
+TestResults/
+
+# Front-end dependencies and TypeScript build state
+**/node_modules/
+**/*.tsbuildinfo
+**/.build-stamp
+
+# Generated client bundle. Rebuilt by the csproj BuildClient target and by the Docker client stage,
+# so committing it would only produce minified merge conflicts on every pull request.
+src/oracle-forms-migration-fleet/wwwroot/
+
+# .NET user secrets
+**/.secrets/
+
+# Local agent host checkpoints — local state, never evidence
+**/.checkpoints/
+
+# IDE
+.vs/
+*.user
+*.suo
+.idea/
