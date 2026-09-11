@@ -6,6 +6,30 @@ Notable changes to behaviour, with the reasoning that is not visible in a diff.
 
 ### Added
 
+**The fleet can now execute the phases it authorizes.** `Fleet/Execution/` adds an Oracle DDL parser, a
+PostgreSQL emitter, a phase-adapter framework, and a workbench execution API with a browser action, so a
+plan can be carried out rather than only read. Two adapters ship: source analysis and Oracle-to-PostgreSQL
+schema conversion. The planner remains authoritative — the executor calls it and runs only phases resolved
+to `Planned`, so the browser cannot forge an authorization. Artifacts are written into the operator's
+private session workspace under `.fleet-run`, never into the acquired source copy and never into the
+customer's repository.
+
+PL/SQL bodies are deliberately **not** translated. Packages, procedures, functions, triggers, `%ROWTYPE`,
+and `STANDARD_HASH` are reported as manual PL/pgSQL rewrites with reasons, because emitting plausible but
+unverified PL/pgSQL is worse than emitting nothing. Adapters also emit no attestation for analysis or
+conversion: the defined attestation kinds all unlock the sandbox or production gate, and signing one for a
+schema conversion would be a false statement.
+
+### Fixed
+
+**"Plan only" could authorize a phase that writes files.** `SourceAnalysis` declared five output artifacts
+while being classified `MutationClass.None` at `ExecutionMode.PlanOnly`. Once an adapter existed to carry
+the phase out, that combination would have written files for an operator who explicitly asked for a plan
+only. It now requires `GenerateArtifacts`, restoring the invariant that plan-only authorizes nothing
+mutating.
+
+### Added
+
 **A deployable Oracle Forms workflow replica now exercises the reference estate.** The upstream case
 study publishes design-time `.fmb` modules but no compiled `.fmx`, licensed Forms runtime, WebLogic
 domain, or deployment package, and declares no source license. Rather than claim those modules are

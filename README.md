@@ -7,10 +7,13 @@ conversion of the Oracle database to **PostgreSQL** or the **SQL Server family**
 Database, Azure SQL Managed Instance), build and behavior validation, sandbox data migration,
 reconciliation, human acceptance, and production cutover.
 
-> **What runs inside this service today.** Everything in `Fleet/` is deterministic and offline. It assesses,
-> plans, and gates. It does not start a process, write a generated file, connect to Oracle, PostgreSQL, or
-> SQL Server, or move data. Work is performed by **execution adapters** outside this deterministic core, and
-> a phase counts as done only when an adapter returns artifacts plus a matching successful attestation.
+> **What runs inside this service today.** `Fleet/` is deterministic and offline: it assesses, plans, and
+> gates. It never connects to Oracle, PostgreSQL, or SQL Server, and never moves data. `Fleet/Execution/`
+> adds adapters that carry out the phases the planner authorizes — source analysis and Oracle-to-PostgreSQL
+> schema conversion — writing artifacts **only** into the operator's private session workspace, never into
+> the customer's repository. The planner stays authoritative: an adapter runs only for a phase the planner
+> resolved to `Planned`, and a phase counts as done only when an adapter returns artifacts plus a matching
+> successful attestation.
 
 ## Documentation
 
@@ -28,7 +31,7 @@ reconciliation, human acceptance, and production cutover.
 | Layer | What it does | Where it lives |
 |---|---|---|
 | **Deterministic planning** | Validates requests, scores the target platform, sequences assessment stages, and authorizes lifecycle phases, owners, inputs, outputs, tooling, mutation class, and approval gates | `Fleet/` — pure C#, no network, fully unit-tested |
-| **Local execution adapters** | Actually parse source, generate React/Java/database artifacts, build, test, and load the sandbox. **To be implemented and invoked outside the deterministic core.** | not in `Fleet/` |
+| **Execution adapters** | Parse the acquired source, emit PostgreSQL DDL from Oracle DDL, and write analysis and conversion artifacts into the session workspace. Forms-to-React/Java conversion and sandbox data movement are **not implemented yet**. | `Fleet/Execution/` |
 | **Attestation-backed completion** | An adapter reports back a signed `MigrationAttestation` naming a signer and citing at least one valid workspace-relative artifact. Without one, the agent must say the phase is *planned*, never *performed*. | `MigrationAttestation`, gate logic in `MigrationRunPlanner` |
 
 The assessment pipeline (`assess_oracle_forms_migration`) is unchanged and still produces plans only. The
