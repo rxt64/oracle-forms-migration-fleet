@@ -1,8 +1,10 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/oracle-forms-demo/OracleFormsDemo.csproj" />
     <Project Path="src/oracle-forms-migration-fleet/oracle-forms-migration-fleet.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/oracle-forms-demo.Tests/oracle-forms-demo.Tests.csproj" />
     <Project Path="tests/oracle-forms-migration-fleet.Tests/oracle-forms-migration-fleet.Tests.csproj" />
   </Folder>
 </Solution>

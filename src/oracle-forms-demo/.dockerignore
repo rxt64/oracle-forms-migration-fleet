@@ -1,0 +1,10 @@
+# Build output and local state that must never enter the image context.
+**/bin/
+**/obj/
+**/.vs/
+**/.vscode/
+**/*.user
+**/appsettings.*.Local.json
+**/.env
+Dockerfile
+.dockerignore
