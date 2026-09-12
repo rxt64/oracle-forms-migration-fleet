@@ -241,6 +241,11 @@ public static class MigrationRunPlanner
             // Emits DDL from the schema export, and lists PL/SQL it will not translate. Reads no Forms module.
             MigrationPhase.DatabaseConversion => [EvidenceKind.DatabaseSchemaExport, EvidenceKind.PlSqlProgramUnit],
 
+            // Generates the application tier from the converted schema. It reports Forms modules it cannot
+            // read rather than reading them, so Forms source is not what gates it.
+            MigrationPhase.ApplicationCodeConversion =>
+                [EvidenceKind.DatabaseSchemaExport, EvidenceKind.PlSqlProgramUnit, EvidenceKind.TestBaseline],
+
             // Indexes whatever source is present; it makes no behavioural claim, so no baseline is required.
             MigrationPhase.SourceAnalysis or MigrationPhase.SourceAcquisition =>
                 [EvidenceKind.FormsModuleSource, EvidenceKind.FormsXmlExport, EvidenceKind.PlSqlProgramUnit, EvidenceKind.DatabaseSchemaExport],
@@ -391,8 +396,8 @@ public static class MigrationRunPlanner
 
             new(MigrationPhase.ApplicationCodeConversion, FleetRole.ApplicationCodeConverter, PhaseStatus.Planned,
                 MutationClass.WorkspaceArtifactWrite, ExecutionMode.GenerateArtifacts, RequiresApproval: false,
-                "Convert a pilot slice of Forms UI to React and Forms client-side logic to a Java/Spring Boot service, repair the output until it compiles, and only widen scope after the pilot is reviewed.",
-                [FormsSourceInput, nameof(EvidenceKind.PlSqlProgramUnit)],
+                "Generate a pilot React and Java/Spring Boot application tier over the converted schema, bound to the Azure database with no Oracle in its data path, and report the Forms and PL/SQL behaviour that must be rebuilt by hand before the pilot is widened.",
+                [nameof(EvidenceKind.DatabaseSchemaExport), nameof(EvidenceKind.PlSqlProgramUnit)],
                 [
                     new ArtifactReference($"{root}/web/react/src", ArtifactKind.FrontEndCode, "React components, routing, and validation derived from Forms blocks and triggers."),
                     new ArtifactReference($"{root}/service/java-springboot/src/main/java", ArtifactKind.BackEndCode, "Java/Spring Boot services, controllers, and persistence for converted client-side logic."),

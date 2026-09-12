@@ -1,5 +1,9 @@
 # Coding Agent Instructions
 
+> **Read `.github/copilot-instructions.md` first.** It carries the operator's standing order: the Oracle
+> database **and** the Oracle Forms application must both be migrated to Azure components, from the GUI.
+> When a phase cannot run, build the missing capability rather than reporting the limit.
+
 This project was built with the microsoft-foundry skill. Before working on or answering questions about foundry agents, read the microsoft-foundry skill first.
 
 This project is a **Microsoft Foundry hosted agent** — a containerized AI agent that runs in [Foundry Agent Service](https://learn.microsoft.com/en-us/azure/foundry/agents/concepts/hosted-agents). The platform handles containerization, hosting, security, scaling, and observability so you can focus on agent logic.

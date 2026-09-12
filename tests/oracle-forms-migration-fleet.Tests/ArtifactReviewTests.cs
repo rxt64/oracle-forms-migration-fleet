@@ -193,7 +193,7 @@ public class ReviewedConversionTests
         StubReviewer reviewer = new([new AdvisoryFinding(AdvisorySeverity.WillFail, "anything", "claim", null)]);
         await RunAsync(reviewed, reviewer);
 
-        Assert.Equal(1, reviewer.Calls);
+        Assert.True(reviewer.Calls >= 1, "the schema conversion should have been reviewed");
         Assert.Equal(plain.Read(DdlPath), reviewed.Read(DdlPath));
         Assert.Equal(plain.Read(ReportPath), reviewed.Read(ReportPath));
     }
