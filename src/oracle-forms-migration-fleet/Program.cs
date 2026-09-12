@@ -46,6 +46,7 @@ using Microsoft.Agents.AI;
 using Microsoft.Agents.AI.Foundry.Hosting;
 using Microsoft.Extensions.AI;
 using OracleFormsMigrationFleet.Fleet;
+using OracleFormsMigrationFleet.Fleet.Agents;
 using OracleFormsMigrationFleet.Fleet.Execution;
 using OracleFormsMigrationFleet.Hosting;
 
@@ -139,6 +140,14 @@ if (modelConfigured)
 
     builder.Services.AddSingleton<IArtifactReviewer>(
         new ModelArtifactReviewer(new SecretRejectingChatClient(reviewModelClient)));
+
+    // The one genuinely multi-agent exchange: a critic raises statements it claims will fail and a
+    // repairer proposes a fix, bounded by a step budget. Its output is a proposal written beside the
+    // deterministic artifact, never over it.
+    builder.Services.AddSingleton(new CritiqueRepairOrchestrator(
+        new ReviewerAgent(new ModelArtifactReviewer(new SecretRejectingChatClient(reviewModelClient))),
+        new SqlRepairAgent(new SecretRejectingChatClient(reviewModelClient)),
+        maxRounds: 2));
 }
 else
 {

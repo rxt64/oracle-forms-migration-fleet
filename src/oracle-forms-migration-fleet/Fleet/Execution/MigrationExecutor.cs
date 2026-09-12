@@ -64,10 +64,11 @@ public sealed class MigrationExecutor
 
     public static IReadOnlyList<IPhaseAdapter> DefaultAdapters(
         IArtifactReviewer? reviewer = null,
-        IDataMigrationGateway? dataGateway = null) =>
+        IDataMigrationGateway? dataGateway = null,
+        Agents.CritiqueRepairOrchestrator? orchestrator = null) =>
     [
         new SourceAnalysisAdapter(),
-        new DatabaseConversionAdapter(reviewer),
+        new DatabaseConversionAdapter(reviewer, orchestrator),
         new ApplicationCodeConversionAdapter(reviewer),
         new SandboxDataMigrationAdapter(dataGateway),
     ];

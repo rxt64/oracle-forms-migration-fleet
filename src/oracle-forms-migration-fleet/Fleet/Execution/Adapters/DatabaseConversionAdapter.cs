@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft. All rights reserved.
 
 using System.Globalization;
+using OracleFormsMigrationFleet.Fleet.Agents;
 
 namespace OracleFormsMigrationFleet.Fleet.Execution.Adapters;
 
@@ -15,7 +16,9 @@ namespace OracleFormsMigrationFleet.Fleet.Execution.Adapters;
 /// An optional <see cref="IArtifactReviewer"/> reads the emitted DDL afterwards and adds advisory findings
 /// to a separate artifact. That review cannot change the conversion, its report, or the phase outcome.
 /// </summary>
-public sealed class DatabaseConversionAdapter(IArtifactReviewer? reviewer = null) : IPhaseAdapter
+public sealed class DatabaseConversionAdapter(
+    IArtifactReviewer? reviewer = null,
+    CritiqueRepairOrchestrator? orchestrator = null) : IPhaseAdapter
 {
     private const int MaxFiles = 20_000;
     private const long MaxTextBytes = 8L * 1024 * 1024;
@@ -156,7 +159,56 @@ public sealed class DatabaseConversionAdapter(IArtifactReviewer? reviewer = null
                 $"Advisory ({advisory.Severity}): {advisory.Construct} — {advisory.Reason}"));
         }
 
+        if (orchestrator is not null)
+        {
+            await ProposeRepairAsync(context, conversion, target, appRootless: outputRoot, artifacts, findings, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
         return PhaseExecutionResult.Success(artifacts, findings);
+    }
+
+    /// <summary>
+    /// Runs the critic-and-repair exchange and writes any revision <em>beside</em> the deterministic DDL.
+    /// The converter's own output is never overwritten: a model editing reviewed SQL must leave the
+    /// difference visible rather than silently replacing what a human signed off.
+    /// </summary>
+    private async Task ProposeRepairAsync(
+        PhaseExecutionContext context,
+        PostgreSqlConversion conversion,
+        DatabaseTarget target,
+        string appRootless,
+        List<ArtifactReference> artifacts,
+        List<string> findings,
+        CancellationToken cancellationToken)
+    {
+        context.Info("Running the critic and repair agents over the generated schema.");
+
+        OrchestrationResult result = await orchestrator!.RunAsync(
+            new FleetAgentRequest(context.Request.ApplicationName, target, conversion.Ddl, findings),
+            step => context.Info($"  [{step.Role}] {step.Agent}: {step.Summary}"),
+            cancellationToken).ConfigureAwait(false);
+
+        context.Info($"Exchange ended: {result.Termination} after {result.Steps.Count.ToString(CultureInfo.InvariantCulture)} steps.");
+
+        if (!result.ProducedRevision)
+        {
+            return;
+        }
+
+        string proposedPath = $"{appRootless}/database/postgresql/schema/schema.proposed.sql";
+        context.Workspace.WriteText(proposedPath, result.ProposedArtifact!);
+
+        artifacts.Add(new ArtifactReference(
+            proposedPath,
+            ArtifactKind.DatabaseSchema,
+            "Agent-proposed repair of the generated DDL. Unverified, and not a replacement for schema.sql."));
+
+        context.Warn(
+            "The repair agent proposed a revised schema. It was written beside the converted DDL, not over it, " +
+            "and has not been executed or reviewed.");
+
+        findings.Add($"Proposal: a repair agent revised the schema after {result.Steps.Count.ToString(CultureInfo.InvariantCulture)} steps ({result.Termination}).");
     }
 
     /// <summary>Prefers the blueprint's own artifact description when the plan declares this exact path.</summary>
