@@ -290,6 +290,35 @@ internal static class WorkbenchEndpoints
             context.Response.Headers.XContentTypeOptions = "nosniff";
             return Results.Text(text, "text/plain; charset=utf-8");
         });
+
+        // Session workspaces are swept after four hours, so without this a completed migration is lost.
+        endpoints.MapGet("/api/workbench/export", async (HttpContext context, string? workspaceId, CancellationToken cancellationToken) =>
+        {
+            if (!WorkbenchExecution.TryResolveExport(
+                workspaces, Owner(context), workspaceId,
+                out string runRoot, out int status, out string error))
+            {
+                await Results.Json(new { error }, statusCode: status).ExecuteAsync(context);
+                return;
+            }
+
+            context.Response.ContentType = "application/zip";
+            context.Response.Headers.CacheControl = "no-store";
+            context.Response.Headers.XContentTypeOptions = "nosniff";
+            context.Response.Headers.ContentDisposition = "attachment; filename=\"migration-output.zip\"";
+
+            try
+            {
+                await using MemoryStream buffer = new();
+                WorkbenchExecution.WriteExport(runRoot, buffer);
+                buffer.Position = 0;
+                await buffer.CopyToAsync(context.Response.Body, cancellationToken);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                logger.LogWarning(exception, "Run output could not be exported.");
+            }
+        });
     }
 
     private static async Task WriteFrameAsync(HttpContext context, object payload, CancellationToken cancellationToken)

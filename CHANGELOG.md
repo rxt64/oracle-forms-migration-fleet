@@ -6,6 +6,21 @@ Notable changes to behaviour, with the reasoning that is not visible in a diff.
 
 ### Added
 
+- Application tier generation (`Fleet/Execution/ApplicationCodeEmitter.cs` and its adapter).
+  `ApplicationCodeConversion` had no adapter, so every run reported the phase as unperformed and a run
+  converted the schema while leaving the application on Oracle. It now emits JPA entities, Spring Data
+  repositories, REST controllers, a typed React client and screen, and a Spring Boot build bound to Azure
+  Database for PostgreSQL with Entra authentication. Oracle does not appear in the generated data path.
+
+  What it refuses to do is stated in its own output: `.fmb` modules are counted and reported unread rather
+  than guessed at, PL/SQL units are listed as untranslated, and every endpoint is declared unauthenticated.
+  The phase produces no attestation, because code that has never been compiled is not working software.
+
+- Run export (`GET /api/workbench/export`). Session workspaces are swept after four hours, so a completed
+  migration used to evaporate. The console now offers the run output as a zip. Only `.fleet-run` is
+  exportable: the acquired source copy is the customer's code and never leaves in an export, and entry
+  names are relative so an archive cannot carry a rooted or traversing path to whoever opens it.
+
 - Artifact review agent (`Fleet/Execution/ArtifactReview.cs`). After the schema conversion writes its DDL, an
   optional `IArtifactReviewer` reads that DDL and reports suspected defects a rules engine did not anticipate.
   Findings go to `model-review.md` and are prefixed `Advisory:` in the phase findings. They cannot open a gate,

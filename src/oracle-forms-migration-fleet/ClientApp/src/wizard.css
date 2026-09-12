@@ -505,3 +505,8 @@ progress::-moz-progress-bar { background: var(--cp-accent); }
 .mf-caveats svg { width: 16px; height: 16px; margin-top: 2px; color: var(--cp-accent); }
 
 .mf-pill.warn { background: rgba(240, 173, 78, .14); border-color: rgba(240, 173, 78, .4); }
+
+/* Run export */
+.mf-export { margin-top: 16px; padding: 16px; border: 1px solid var(--cp-border); border-radius: 8px; display: grid; gap: 8px; justify-items: start; }
+.mf-export a { display: inline-flex; align-items: center; gap: 8px; text-decoration: none; }
+.mf-export p { margin: 0; }

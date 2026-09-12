@@ -1,5 +1,6 @@
 // Copyright (c) Microsoft. All rights reserved.
 
+using System.IO.Compression;
 using System.Text;
 using OracleFormsMigrationFleet.Fleet;
 using OracleFormsMigrationFleet.Fleet.Execution;
@@ -197,12 +198,69 @@ public static class WorkbenchExecution
     {
         using FileStream stream = File.OpenRead(absolutePath);
         truncated = stream.Length > MaxPreviewBytes;
-
         byte[] buffer = new byte[(int)Math.Min(MaxPreviewBytes, stream.Length)];
         stream.ReadExactly(buffer);
 
         string text = Encoding.UTF8.GetString(buffer);
         return text.Length > 0 && text[0] == '\uFEFF' ? text[1..] : text;
+    }
+
+    /// <summary>
+    /// Resolves the directory a run wrote so it can be exported. Only <see cref="OutputRoot"/> is
+    /// exportable: the acquired source copy is the customer's code and must never leave in an export.
+    /// </summary>
+    public static bool TryResolveExport(
+        SourceWorkspaceService workspaces,
+        string owner,
+        string? workspaceId,
+        out string absolutePath,
+        out int status,
+        out string error)
+    {
+        ArgumentNullException.ThrowIfNull(workspaces);
+
+        absolutePath = string.Empty;
+
+        if (string.IsNullOrWhiteSpace(workspaceId) ||
+            workspaces.ResolveRoot(owner, workspaceId) is not string root)
+        {
+            status = 404;
+            error = UnknownWorkspace;
+            return false;
+        }
+
+        string resolved = System.IO.Path.Combine(root, OutputRoot);
+        if (!Directory.Exists(resolved) || !Directory.EnumerateFiles(resolved, "*", SearchOption.AllDirectories).Any())
+        {
+            status = 404;
+            error = "This session has no generated artifacts to export. Run the authorized phases first.";
+            return false;
+        }
+
+        absolutePath = resolved;
+        status = 200;
+        error = string.Empty;
+        return true;
+    }
+
+    /// <summary>
+    /// Writes the run output as a zip. Entry names stay relative to the run root so an archive cannot
+    /// carry an absolute path or a traversal segment to whoever opens it.
+    /// </summary>
+    public static void WriteExport(string runRoot, Stream destination)
+    {
+        using ZipArchive archive = new(destination, ZipArchiveMode.Create, leaveOpen: true);
+
+        foreach (string file in Directory.EnumerateFiles(runRoot, "*", SearchOption.AllDirectories))
+        {
+            string entryName = System.IO.Path.GetRelativePath(runRoot, file).Replace('\\', '/');
+            if (entryName.StartsWith("..", StringComparison.Ordinal) || System.IO.Path.IsPathRooted(entryName))
+            {
+                continue;
+            }
+
+            archive.CreateEntryFromFile(file, entryName, CompressionLevel.Optimal);
+        }
     }
 
     /// <summary>

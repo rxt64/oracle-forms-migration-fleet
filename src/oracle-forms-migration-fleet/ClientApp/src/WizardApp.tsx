@@ -380,7 +380,7 @@ const PHASE_STATE_LABELS: Record<string, string> = {
   Failed: "Failed",
 };
 
-function ExecutionReport({ result, onPreview }: { result: ExecutionResult; onPreview: (path: string) => void }) {
+function ExecutionReport({ result, onPreview, workspaceId }: { result: ExecutionResult; onPreview: (path: string) => void; workspaceId?: string }) {
   const executed = result.phases.filter((phase) => phase.state === "Executed").length;
   return (
     <div className="mf-run-report">
@@ -409,14 +409,20 @@ function ExecutionReport({ result, onPreview }: { result: ExecutionResult; onPre
       <h3>Files written</h3>
       {result.artifacts.length === 0
         ? <p className="mf-help">Nothing was written, so there is nothing to open.</p>
-        : <ul className="mf-run-artifacts">{result.artifacts.map((artifact) => (
+        : <><ul className="mf-run-artifacts">{result.artifacts.map((artifact) => (
           <li key={artifact.path}>
             <div><code>{artifact.path}</code><small>{artifact.description}</small></div>
             {artifact.previewable
               ? <button type="button" className="mf-inline-link" onClick={() => onPreview(artifact.path)}><FileText />Open</button>
               : <span className="mf-help">Not a text file</span>}
           </li>
-        ))}</ul>}
+        ))}</ul>
+        {workspaceId && <div className="mf-export">
+          <a className="mf-secondary" href={`/api/workbench/export?workspaceId=${encodeURIComponent(workspaceId)}`} download="migration-output.zip">
+            <FileArchive />Download everything this run generated
+          </a>
+          <p className="mf-help">Your session workspace is deleted after four hours. Nothing leaves here except what the run wrote; your source copy is not included.</p>
+        </div>}</>}
 
       <h3>Attestations</h3>
       {result.attestations.length === 0
@@ -1034,7 +1040,7 @@ export default function WizardApp() {
           </button>
           <p className="mf-status" role="status" aria-live="polite">{executing ? "The fleet is working. The activity log shows each step as it happens." : execution ? "Run finished." : ""}</p>
           {executionError && <p className="mf-error" role="alert">{executionError}</p>}
-          {execution && <ExecutionReport result={execution} onPreview={(path) => void openArtifact(path)} />}
+          {execution && <ExecutionReport result={execution} onPreview={(path) => void openArtifact(path)} workspaceId={workspace?.workspaceId} />}
           {execution && <button type="button" className="mf-inline-link" onClick={() => { setConsoleMode("execution"); setConsoleOpen(true); }}>View activity log</button>}
         </section>
       </main>}
