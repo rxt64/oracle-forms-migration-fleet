@@ -8,7 +8,7 @@ This project was built with the microsoft-foundry skill. Before working on or an
 
 This project is a **Microsoft Foundry hosted agent** — a containerized AI agent that runs in [Foundry Agent Service](https://learn.microsoft.com/en-us/azure/foundry/agents/concepts/hosted-agents). The platform handles containerization, hosting, security, scaling, and observability so you can focus on agent logic.
 
-It implements the **Oracle Forms Migration Fleet**: an assessment and planning service for moving Oracle Forms applications to Azure SQL Database or Azure SQL Managed Instance.
+It implements the **Oracle Forms Migration Fleet**: a service that plans **and performs** migrations of Oracle Forms applications and their Oracle databases onto Azure components. The deterministic planner authorizes phases; execution adapters carry them out and write artifacts into the operator's session workspace.
 
 ## Key files
 
@@ -24,8 +24,8 @@ It implements the **Oracle Forms Migration Fleet**: an assessment and planning s
 - Domain types are immutable records and enums in `Fleet/FleetContracts.cs`. Add new state there, not as mutable fields.
 - The human approval gate is the only path to `MigrationPlan.IsAccepted == true`. Do not add a bypass.
 - The execution lifecycle in `Fleet/MigrationRunPlanner.cs` stays deterministic too: it authorizes phases, it never runs one. Sandbox mutation needs its own execution approval and production cutover needs its own production approval plus successful attestations. Do not collapse those gates into the assessment plan approval.
-- Never claim code was generated, a schema was converted, or data was migrated unless an execution adapter returned artifacts and a matching successful attestation.
-- Never emit executable SQL from the deterministic core, and never claim a migration was performed there.
+- Never claim behaviour was preserved, a sandbox was loaded, or data was reconciled without a matching successful attestation. Conversion and generation phases produce artifacts and deliberately no attestation, so report those by what was written and state what remains unverified: generated code that has never been compiled is not working software, and DDL that has never executed is not a migrated schema.
+- Never emit executable SQL from the deterministic core in `Fleet/`, and never claim a migration was performed there. Execution belongs to the adapters in `Fleet/Execution/`, which run only when the planner authorized the phase.
 - Never place secrets in prompts, evidence, logs, or output. `FleetGuardrails.ContainsPotentialSecret` rejects obvious credential material at intake.
 
 ## Development workflow

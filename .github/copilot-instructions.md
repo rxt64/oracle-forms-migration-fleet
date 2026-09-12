@@ -36,6 +36,25 @@ watching?* If the answer is no because you did it yourself, put it in the tool i
 Using the Azure CLI is correct for **building and deploying the tool**. Using it to perform a customer's
 migration is the tool doing nothing and you doing everything.
 
+## How work actually gets done
+
+**Azure CLI for Azure, GitHub runner for builds.**
+
+- **`az` is the default for anything in Azure** — inspecting resources, role assignments, firewall rules,
+  identities, diagnosing a deployment. Reach for it before a REST call or a portal instruction. It reports
+  clearer errors than raw ARM, and `az postgres flexible-server execute` will tell you *why* a connection
+  failed where a bare socket timeout will not.
+- **Container images are built by the GitHub runner, never from a workstation.** No `az acr build` from
+  a developer machine and no local `docker build` for anything deployable. Push the branch and let the
+  workflow in `.github/workflows/` build, tag, and push. A build that only exists because someone ran it
+  locally cannot be reproduced, reviewed, or rolled back.
+- The runner authenticates to Azure with **OIDC federated credentials**. No registry password, no client
+  secret, and no credential stored in the repository.
+- Tag images from the commit, not by hand. A deployed tag must map back to a commit someone can read.
+
+If a build fails on the runner, fix it on the runner. Reproducing it locally to get unblocked is fine for
+diagnosis, but the artifact that ships is the one CI produced.
+
 ## The tool is a multi-agent system
 
 The fleet must migrate through **cooperating agents that review, write, and perform** the work, following

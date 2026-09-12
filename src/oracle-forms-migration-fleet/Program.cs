@@ -160,9 +160,9 @@ if (Environment.GetEnvironmentVariable("SANDBOX_PGHOST") is { Length: > 0 } sand
         sandboxHost,
         Environment.GetEnvironmentVariable("SANDBOX_PGDATABASE") ?? "postgres",
         sandboxUser,
-        new ChainedTokenCredential(
-            new ManagedIdentityCredential(ManagedIdentityId.SystemAssigned),
-            new AzureDeveloperCliCredential(new AzureDeveloperCliCredentialOptions { ProcessTimeout = TimeSpan.FromSeconds(30) }))));
+        string.IsNullOrWhiteSpace(managedIdentityClientId)
+            ? new AzureDeveloperCliCredential(new AzureDeveloperCliCredentialOptions { ProcessTimeout = TimeSpan.FromSeconds(30) })
+            : new ManagedIdentityCredential(ManagedIdentityId.FromUserAssignedClientId(managedIdentityClientId))));
 
     Console.WriteLine($"[INFO] Sandbox data migration target: {sandboxHost}. Authentication is Entra only.");
 }
