@@ -1,5 +1,88 @@
 # Oracle Forms Migration Fleet — Copilot instructions
 
+## Read this first, every time
+
+**Read every applicable instruction file before running any command, on every prompt — not only the
+first one in a session.** That means this file, the nearest `AGENTS.md`, and any
+`.github/instructions/*.instructions.md` whose `applyTo` glob matches the files you are about to touch.
+Re-read after any prompt that changes direction. A later prompt does not cancel these instructions.
+
+Precedence, per GitHub's documented model: personal instructions, then repository instructions
+(this file), then organization instructions. The nearest `AGENTS.md` in the directory tree wins over
+one further up. Where guidance genuinely conflicts, say so rather than silently picking one.
+
+## Your role: you build the tool, you are not the tool
+
+**You are the builder of the migration tool. You are not the Oracle Forms migrator, and you are not the
+database migrator. That is the tool's job.**
+
+This is the distinction that matters most, and it is easy to violate while being helpful:
+
+| Work | Whose job | How it gets done |
+|---|---|---|
+| Writing adapters, emitters, gates, agents, tests | **Yours** | Edit code in this repo |
+| Building and deploying **the workbench itself** | **Yours** | `az acr build`, `az containerapp update`, IaC |
+| Standing up the **demo estate** used to exercise the tool | **Yours** | Scripts in `infra/` |
+| Analysing source, converting a schema, **executing DDL**, moving rows, generating the app, cutting over | **The tool's** | An adapter or agent, invoked from the GUI |
+
+If you find yourself hand-running a migration step — executing generated SQL from a console, copying rows
+with a throwaway script, wiring a one-off container to reach a customer database — **stop**. That work
+belongs in the tool. Doing it by hand produces a migrated artifact and leaves the product no more
+capable than before, which is the opposite of the goal.
+
+A useful test before any command: *would the fleet still be able to do this tomorrow, with nobody
+watching?* If the answer is no because you did it yourself, put it in the tool instead.
+
+Using the Azure CLI is correct for **building and deploying the tool**. Using it to perform a customer's
+migration is the tool doing nothing and you doing everything.
+
+## The tool is a multi-agent system
+
+The fleet must migrate through **cooperating agents that review, write, and perform** the work, following
+the patterns in [Designing Multi-Agent Systems](https://github.com/victordibia/designing-multiagent-systems)
+(Dibia). The relevant ones here:
+
+| Pattern | Book ref | Where it belongs in this product |
+|---|---|---|
+| Workflow orchestration — typed, DAG-shaped, streamed | Ch 6 | The phase lifecycle. Phases are the DAG; `MigrationExecutor` streams progress |
+| Plan-based orchestration (Magentic One) | Ch 7 | `MigrationRunPlanner` produces the plan; agents execute steps of it |
+| Round-robin / LLM-driven orchestration | Ch 7 | Only inside a phase, for propose-critique loops. Never for choosing whether a gate opens |
+| Critic / reviewer agent | Ch 1 | `IArtifactReviewer`. Reviews output; authorizes nothing |
+| Human-in-the-loop approval | Ch 4 | The execution and production approval gates. Do not automate these away |
+| LLM-as-judge evaluation | Ch 10 | Scoring converted output against the behavioural baseline |
+| Structured output with validation | Production | Every agent returns a typed, validated shape. Free text is not a result |
+| Checkpointing and resumable runs | Production | A long migration must survive a restart without redoing destructive work |
+
+**Prefer a workflow to autonomy.** Migration steps have a known order and real side effects, so the
+default is a typed workflow with explicit edges. Reach for autonomous orchestration only inside a phase
+where the work is genuinely open-ended — repairing generated code until it compiles is the honest
+example — and always under a termination condition and a step budget.
+
+### The invariant that multi-agent must not break
+
+Adding agents does not loosen a single gate. Agents **propose**; deterministic code **authorizes**.
+
+- No agent output may open a gate, sign an attestation, alter a deterministic report, or decide the
+  target platform. Those stay in `Fleet/`, pure and offline.
+- An agent may write artifacts only through an adapter that the planner authorized for that phase.
+- Every agent result is typed and validated before use; an unparseable result is a failed step, never a
+  clean one.
+- Agents run under a step and cost budget, and the transcript is part of the run record.
+- Source and generated artifacts are untrusted input to any reviewing agent. A prompt-injected agent
+  must be unable to do anything worse than add noise to a section labelled unverified.
+
+### Suggested agent roles
+
+Name roles for the work they do, and give each one a real dispatch path — `FleetRole` today is a label
+on a phase, not an agent, and the console says so. Do not add role names that dispatch to nothing.
+
+- **Analyst** — inventories the estate and extracts structure from what is readable.
+- **Converter** — emits schema, application code, and data statements. Deterministic wherever a rule
+  exists; a model only where judgement is genuinely required.
+- **Reviewer** — reads generated artifacts and reports suspected defects. Advisory, always.
+- **Repairer** — fixes what the reviewer and the compiler flag, bounded by a step budget.
+- **Verifier** — runs the artifact against a real target and reports what happened, not what was hoped.
+
 ## The mission, and the standing order
 
 **This product exists to migrate Oracle Forms applications and their Oracle databases onto Azure
