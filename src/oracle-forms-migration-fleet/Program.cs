@@ -151,6 +151,22 @@ else
 // Cloned and uploaded source lives in a per-session sandbox that is swept on a timer and on shutdown.
 SourceWorkspaceService sourceWorkspaces = new(Environment.GetEnvironmentVariable("WORKBENCH_SOURCE_ROOT"));
 
+// The sandbox database target is configured here, never by a caller, so a request can ask for a data
+// migration but cannot choose where the rows land.
+if (Environment.GetEnvironmentVariable("SANDBOX_PGHOST") is { Length: > 0 } sandboxHost &&
+    Environment.GetEnvironmentVariable("SANDBOX_PGUSER") is { Length: > 0 } sandboxUser)
+{
+    builder.Services.AddSingleton<IDataMigrationGateway>(new PostgresDataMigrationGateway(
+        sandboxHost,
+        Environment.GetEnvironmentVariable("SANDBOX_PGDATABASE") ?? "postgres",
+        sandboxUser,
+        new ChainedTokenCredential(
+            new ManagedIdentityCredential(ManagedIdentityId.SystemAssigned),
+            new AzureDeveloperCliCredential(new AzureDeveloperCliCredentialOptions { ProcessTimeout = TimeSpan.FromSeconds(30) }))));
+
+    Console.WriteLine($"[INFO] Sandbox data migration target: {sandboxHost}. Authentication is Entra only.");
+}
+
 builder.RegisterProtocol("responses", endpoints =>
 {
     if (modelConfigured)

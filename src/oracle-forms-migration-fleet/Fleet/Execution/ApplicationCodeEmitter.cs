@@ -70,6 +70,8 @@ public static class ApplicationCodeEmitter
         files.Add(BuildReactTypes(tables));
         files.Add(BuildReactClient(tables));
         files.Add(BuildReactApp(tables));
+        files.Add(BuildDockerfile());
+        files.Add(BuildDockerIgnore());
         files.Add(BuildReadme(applicationName, tables));
 
         foreach (string unparsed in schema.Unparsed)
@@ -422,6 +424,37 @@ public static class ApplicationCodeEmitter
 
         return new GeneratedFile("frontend/src/App.tsx", builder.ToString(), $"React screen over {first.Name}.");
     }
+
+    private static GeneratedFile BuildDockerfile() => new(
+        "backend/Dockerfile",
+        """
+        # Build and run the migrated back end. No credential is baked in: the running container gets a
+        # token from its managed identity, so the image is safe to store in a registry.
+        FROM mcr.microsoft.com/openjdk/jdk:21-mariner AS build
+        WORKDIR /src
+        COPY pom.xml .
+        RUN --mount=type=cache,target=/root/.m2 \
+            curl -fsSL https://archive.apache.org/dist/maven/maven-3/3.9.9/binaries/apache-maven-3.9.9-bin.tar.gz \
+            | tar -xz -C /opt && ln -s /opt/apache-maven-3.9.9/bin/mvn /usr/local/bin/mvn && mvn -B dependency:go-offline
+        COPY src ./src
+        RUN mvn -B -DskipTests package
+
+        FROM mcr.microsoft.com/openjdk/jdk:21-distroless
+        WORKDIR /app
+        COPY --from=build /src/target/*.jar app.jar
+        EXPOSE 8080
+        ENTRYPOINT ["java", "-jar", "/app/app.jar"]
+        """,
+        "Container build for the migrated back end. No credential is baked into the image.");
+
+    private static GeneratedFile BuildDockerIgnore() => new(
+        "backend/.dockerignore",
+        """
+        target/
+        .git/
+        *.md
+        """,
+        "Keeps build output and notes out of the image context.");
 
     private static GeneratedFile BuildReadme(string applicationName, IReadOnlyList<OracleTable> tables)
     {

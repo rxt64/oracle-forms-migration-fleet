@@ -214,7 +214,9 @@ internal static class WorkbenchEndpoints
 
             MigrationExecutor executor = new(
                 workspaceRoot,
-                MigrationExecutor.DefaultAdapters(context.RequestServices.GetService<IArtifactReviewer>()));
+                MigrationExecutor.DefaultAdapters(
+                    context.RequestServices.GetService<IArtifactReviewer>(),
+                    context.RequestServices.GetService<IDataMigrationGateway>()));
 
             // The run moves off the request thread to keep progress frames flowing while it works.
             Task<MigrationExecutionResult> run = Task.Run(async () =>

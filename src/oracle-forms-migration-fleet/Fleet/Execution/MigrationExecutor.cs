@@ -62,8 +62,15 @@ public sealed class MigrationExecutor
         }
     }
 
-    public static IReadOnlyList<IPhaseAdapter> DefaultAdapters(IArtifactReviewer? reviewer = null) =>
-        [new SourceAnalysisAdapter(), new DatabaseConversionAdapter(reviewer), new ApplicationCodeConversionAdapter(reviewer)];
+    public static IReadOnlyList<IPhaseAdapter> DefaultAdapters(
+        IArtifactReviewer? reviewer = null,
+        IDataMigrationGateway? dataGateway = null) =>
+    [
+        new SourceAnalysisAdapter(),
+        new DatabaseConversionAdapter(reviewer),
+        new ApplicationCodeConversionAdapter(reviewer),
+        new SandboxDataMigrationAdapter(dataGateway),
+    ];
 
     /// <summary>
     /// Phases an execution adapter is permitted to attest to. Documentation, conversion, and build phases
