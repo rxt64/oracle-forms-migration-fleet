@@ -23,17 +23,14 @@
     <PackageReference Include="Microsoft.Extensions.AI.OpenAI" Version="10.6.0" />
     <!-- .env file support for local development -->
     <PackageReference Include="DotNetEnv" Version="3.1.1" />
+    <PackageReference Include="Npgsql" Version="9.0.3" />
   </ItemGroup>
 
   <ItemGroup>
     <ClientAppSource Include="ClientApp\src\**\*;ClientApp\index.html;ClientApp\package.json;ClientApp\package-lock.json;ClientApp\tsconfig*.json;ClientApp\vite.config.ts" />
   </ItemGroup>
 
-  <Target Name="BuildClientApp"
-          BeforeTargets="Build;Publish"
-          Inputs="@(ClientAppSource)"
-      Outputs="$(ClientAppRoot)\.build-stamp"
-          Condition="'$(SkipClientBuild)' != 'true' and Exists('$(ClientAppRoot)\node_modules')">
+  <Target Name="BuildClientApp" BeforeTargets="Build;Publish" Inputs="@(ClientAppSource)" Outputs="$(ClientAppRoot)\.build-stamp" Condition="'$(SkipClientBuild)' != 'true' and Exists('$(ClientAppRoot)\node_modules')">
     <Exec Command="npm run build" WorkingDirectory="$(ClientAppRoot)" />
   </Target>
 

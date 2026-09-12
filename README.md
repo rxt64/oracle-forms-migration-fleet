@@ -7,10 +7,13 @@ conversion of the Oracle database to **PostgreSQL** or the **SQL Server family**
 Database, Azure SQL Managed Instance), build and behavior validation, sandbox data migration,
 reconciliation, human acceptance, and production cutover.
 
-> **What runs inside this service today.** Everything in `Fleet/` is deterministic and offline. It assesses,
-> plans, and gates. It does not start a process, write a generated file, connect to Oracle, PostgreSQL, or
-> SQL Server, or move data. Work is performed by **execution adapters** outside this deterministic core, and
-> a phase counts as done only when an adapter returns artifacts plus a matching successful attestation.
+> **What runs inside this service today.** `Fleet/` is deterministic and offline: it assesses, plans, and
+> gates. It never connects to Oracle, PostgreSQL, or SQL Server, and never moves data. `Fleet/Execution/`
+> adds adapters that carry out the phases the planner authorizes — source analysis and Oracle-to-PostgreSQL
+> schema conversion — writing artifacts **only** into the operator's private session workspace, never into
+> the customer's repository. The planner stays authoritative: an adapter runs only for a phase the planner
+> resolved to `Planned`, and a phase counts as done only when an adapter returns artifacts plus a matching
+> successful attestation.
 
 ## Documentation
 
@@ -28,8 +31,26 @@ reconciliation, human acceptance, and production cutover.
 | Layer | What it does | Where it lives |
 |---|---|---|
 | **Deterministic planning** | Validates requests, scores the target platform, sequences assessment stages, and authorizes lifecycle phases, owners, inputs, outputs, tooling, mutation class, and approval gates | `Fleet/` — pure C#, no network, fully unit-tested |
-| **Local execution adapters** | Actually parse source, generate React/Java/database artifacts, build, test, and load the sandbox. **To be implemented and invoked outside the deterministic core.** | not in `Fleet/` |
+| **Execution adapters** | Parse the acquired source, emit PostgreSQL DDL from Oracle DDL, and write analysis and conversion artifacts into the session workspace. Forms-to-React/Java conversion and sandbox data movement are **not implemented yet**. | `Fleet/Execution/` |
+| **Artifact review** | After the schema conversion writes its DDL, a model reads it back and reports suspected defects into a separate report. Advisory by construction: it cannot open a gate, sign an attestation, or alter the deterministic conversion report. | `Fleet/Execution/ArtifactReview.cs` |
 | **Attestation-backed completion** | An adapter reports back a signed `MigrationAttestation` naming a signer and citing at least one valid workspace-relative artifact. Without one, the agent must say the phase is *planned*, never *performed*. | `MigrationAttestation`, gate logic in `MigrationRunPlanner` |
+
+A model is consulted at exactly two points: conversation with the operator, and reading a generated schema
+after it is written. Neither reaches a gate, an approval, an attestation, or the platform recommendation.
+The specialist role names on each phase label ownership; no code selects behaviour from a role, so they are
+not independent agents. The workbench states this per phase rather than leaving it to be inferred.
+
+### Models
+
+| Capability | Deployment | Why |
+|---|---|---|
+| Conversation and tool calling | `gpt-5.4-mini` (`AZURE_AI_MODEL_DEPLOYMENT_NAME`) | High call volume, formatting and tool dispatch |
+| Artifact review | `gpt-5.6-sol` (`AZURE_AI_REVIEW_MODEL_DEPLOYMENT_NAME`) | Adversarial reasoning over generated DDL |
+
+The review deployment falls back to the conversation deployment when unset. On the Northstar banking schema
+the review model found four `CHECK` constraints that cannot execute on PostgreSQL — `length()` applied to a
+`bigint` column, which Oracle permits by implicit conversion — each with the cast that fixes it. The mini
+model found none of them. Its findings are still unverified and gate nothing.
 
 The assessment pipeline (`assess_oracle_forms_migration`) is unchanged and still produces plans only. The
 execution lifecycle (`plan_oracle_forms_migration_run`) is a separate, additive contract.
@@ -165,8 +186,14 @@ contain a credential, connection string, or URL.
 
 ### Gates
 
-- **GenerateArtifacts** requires verified `FormsModuleSource` **or** `FormsXmlExport`, plus
-  `PlSqlProgramUnit`, `DatabaseSchemaExport`, and `TestBaseline`. An inventory alone is not enough.
+- **GenerateArtifacts** is checked per phase, against the evidence that phase actually reads.
+  `DatabaseConversion` requires `DatabaseSchemaExport` and `PlSqlProgramUnit`; the source and code-conversion
+  phases require `FormsModuleSource` **or** `FormsXmlExport`; `TestBaseline` is required by the phases that
+  make a behavioural claim, not by emitting DDL into a workspace. An inventory alone is never enough.
+
+  Gating every phase on the union looks stricter and is not: a schema conversion refused for want of Forms
+  binaries it never opens teaches operators to tick the box falsely, and a false attestation in an auditable
+  plan is the outcome these gates exist to prevent.
 - **SandboxMigration** requires an `executionApproval` with `Approved` and an `approverId`.
   Assessment plan approval does **not** authorize execution.
 - **ProductionCutover** requires a `productionApproval` separate from the execution approval, plus
@@ -516,11 +543,21 @@ the required artifacts and attestations.
 
 ## Limitations
 
-- **No migration is performed.** No connection is made to Oracle, Azure SQL Database, or Azure SQL
-  Managed Instance. Nothing is read from or written to a source or target system.
-- **No executable SQL or migration scripts are generated.** The planner emits tasks only. When Forms
-  source evidence (`FormsModuleSource` **or** `FormsXmlExport`), `PlSqlProgramUnit`, or
-  `DatabaseSchemaExport` evidence is absent, it also records the gap as a blocker.
+- **No database is contacted and no Azure resource is created.** Nothing connects to Oracle, PostgreSQL,
+  Azure SQL Database, or Azure SQL Managed Instance. Every artifact is written inside the operator's private
+  session workspace, which is deleted after four hours. There is no deploy action, and a customer-tenant
+  sign-in would have nothing to call: no adapter in this repository provisions anything. Each plan states
+  the resources and role assignments a deployment *would* need so that list can be reviewed before anyone
+  grants it.
+- **Generated PostgreSQL DDL has not been executed anywhere.** The schema conversion emits real
+  `CREATE TABLE`, `CREATE SEQUENCE`, and constraint statements, and its report names the type mappings and
+  the constructs it refused to translate. DDL that parses is not DDL that runs: nothing here has been
+  validated against a live server, and the review model's findings are explicitly unverified.
+- **PL/SQL is not translated.** Packages, procedures, functions, triggers, `%ROWTYPE`, and `STANDARD_HASH`
+  are reported as manual PL/pgSQL rewrites with reasons. No attempt is made to convert a body.
+- **Forms are not converted.** `.fmb` files are indexed by name and size only; their contents are a
+  proprietary binary format requiring Forms Builder or the JDAPI. No trigger, block, or program unit is
+  extracted, and no React or Java source is produced.
 - **Evidence is taken as attested, not independently verified.** The service does not parse `.fmb`
   files. It ignores platform signals attached to unrelated artifact kinds; `isVerified` remains a
   human attestation; unverified artifacts do not satisfy evidence gates or drive recommendations.

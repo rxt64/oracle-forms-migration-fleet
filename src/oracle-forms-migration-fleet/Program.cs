@@ -46,6 +46,7 @@ using Microsoft.Agents.AI;
 using Microsoft.Agents.AI.Foundry.Hosting;
 using Microsoft.Extensions.AI;
 using OracleFormsMigrationFleet.Fleet;
+using OracleFormsMigrationFleet.Fleet.Execution;
 using OracleFormsMigrationFleet.Hosting;
 
 // Load environment variables from a .env file if present (for local development).
@@ -107,7 +108,8 @@ if (modelConfigured)
     // The model handles intake dialogue and reporting; the deterministic fleet, exposed as tools, owns
     // every stage transition and the target platform recommendation.
     var credential = new ChainedTokenCredential(
-        new AzureDeveloperCliCredential(),
+        // The default process timeout is short enough that a cold azd invocation loses the race.
+        new AzureDeveloperCliCredential(new AzureDeveloperCliCredentialOptions { ProcessTimeout = TimeSpan.FromSeconds(30) }),
         new ManagedIdentityCredential(ManagedIdentityId.SystemAssigned));
 
     IChatClient modelClient = new AzureOpenAIClient(openAiEndpoint!, credential)
@@ -122,6 +124,21 @@ if (modelConfigured)
             tools: FleetTools.Create());
 
     builder.Services.AddFoundryResponses(agent);
+
+    // Reviewing generated DDL is an adversarial reasoning task, so it gets its own deployment rather than
+    // the conversational one. Falls back to the conversation model when no review deployment is set.
+    string reviewDeployment = Environment.GetEnvironmentVariable("AZURE_AI_REVIEW_MODEL_DEPLOYMENT_NAME") is { Length: > 0 } configured
+        ? configured
+        : deployment!;
+
+    IChatClient reviewModelClient = string.Equals(reviewDeployment, deployment, StringComparison.OrdinalIgnoreCase)
+        ? modelClient
+        : new AzureOpenAIClient(openAiEndpoint!, credential).GetChatClient(reviewDeployment).AsIChatClient();
+
+    Console.WriteLine($"[INFO] Conversation model: {deployment}. Artifact review model: {reviewDeployment}.");
+
+    builder.Services.AddSingleton<IArtifactReviewer>(
+        new ModelArtifactReviewer(new SecretRejectingChatClient(reviewModelClient)));
 }
 else
 {
@@ -133,6 +150,22 @@ else
 
 // Cloned and uploaded source lives in a per-session sandbox that is swept on a timer and on shutdown.
 SourceWorkspaceService sourceWorkspaces = new(Environment.GetEnvironmentVariable("WORKBENCH_SOURCE_ROOT"));
+
+// The sandbox database target is configured here, never by a caller, so a request can ask for a data
+// migration but cannot choose where the rows land.
+if (Environment.GetEnvironmentVariable("SANDBOX_PGHOST") is { Length: > 0 } sandboxHost &&
+    Environment.GetEnvironmentVariable("SANDBOX_PGUSER") is { Length: > 0 } sandboxUser)
+{
+    builder.Services.AddSingleton<IDataMigrationGateway>(new PostgresDataMigrationGateway(
+        sandboxHost,
+        Environment.GetEnvironmentVariable("SANDBOX_PGDATABASE") ?? "postgres",
+        sandboxUser,
+        string.IsNullOrWhiteSpace(managedIdentityClientId)
+            ? new AzureDeveloperCliCredential(new AzureDeveloperCliCredentialOptions { ProcessTimeout = TimeSpan.FromSeconds(30) })
+            : new ManagedIdentityCredential(ManagedIdentityId.FromUserAssignedClientId(managedIdentityClientId))));
+
+    Console.WriteLine($"[INFO] Sandbox data migration target: {sandboxHost}. Authentication is Entra only.");
+}
 
 builder.RegisterProtocol("responses", endpoints =>
 {

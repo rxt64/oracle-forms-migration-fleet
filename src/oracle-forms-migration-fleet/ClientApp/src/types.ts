@@ -55,6 +55,28 @@ export interface TopologyHop {
   state: ComponentState;
 }
 
+export type PhaseEngine = "NotImplemented" | "Deterministic" | "DeterministicWithModelReview";
+
+export interface PhaseAttribution {
+  phase: string;
+  role: string;
+  engine: PhaseEngine;
+  modelDeployment: string | null;
+  summary: string;
+}
+
+export interface ModelAttribution {
+  capability: string;
+  deployment: string | null;
+  summary: string;
+}
+
+export interface FleetAttribution {
+  phases: PhaseAttribution[];
+  models: ModelAttribution[];
+  disclaimers: string[];
+}
+
 export interface Bootstrap {
   steps: MacroStep[];
   evidenceKinds: EvidenceOption[];
@@ -62,6 +84,7 @@ export interface Bootstrap {
   executionModes: ModeOption[];
   azureComponents: AzureComponent[];
   topology: TopologyHop[];
+  attribution: FleetAttribution;
   agentChatAvailable: boolean;
   executionBoundary: string;
   disclaimers: string[];
@@ -99,10 +122,67 @@ export interface RunPlan {
   disclaimers: string[];
 }
 
+export type ResourceDisposition = "Created" | "Required";
+
+export interface AzureResourceRequirement {
+  resourceType: string;
+  purpose: string;
+  disposition: ResourceDisposition;
+  neededFrom: string;
+}
+
+export interface AzureRoleRequirement {
+  role: string;
+  scope: string;
+  why: string;
+  neededFrom: string;
+}
+
+export interface AzureFootprint {
+  resources: AzureResourceRequirement[];
+  roles: AzureRoleRequirement[];
+  tenantModel: string[];
+  disclaimers: string[];
+}
+
 export interface PlanResponse {
   plan: RunPlan;
   steps: StepStatus[];
   executionBoundary: string;
+  azureFootprint?: AzureFootprint;
+}
+
+export interface ExecutedArtifact {
+  path: string;
+  kind: string;
+  description: string;
+  previewable: boolean;
+}
+
+export interface ExecutedPhase {
+  phase: string;
+  plannedStatus: string;
+  state: "Executed" | "SkippedByPlanner" | "AdapterNotImplemented" | "Failed";
+  detail: string | null;
+  artifacts: ExecutedArtifact[];
+  findings: string[];
+}
+
+export interface ExecutedAttestation {
+  kind: string;
+  succeeded: boolean;
+  summary: string;
+  artifacts: string[];
+}
+
+export interface ExecutionResult {
+  requestedMode: string;
+  authorizedMode: string;
+  outputRoot: string;
+  phases: ExecutedPhase[];
+  artifacts: ExecutedArtifact[];
+  attestations: ExecutedAttestation[];
+  blockers: string[];
 }
 
 export interface RunFields {

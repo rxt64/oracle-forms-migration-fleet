@@ -111,6 +111,16 @@ public sealed class SourceWorkspaceService : IDisposable
             ? record.Summary
             : null;
 
+    /// <summary>
+    /// Absolute path of a workspace the caller owns, for server-side work only. The value is never
+    /// returned to a browser, and a caller who does not own the workspace gets null rather than a path.
+    /// </summary>
+    public string? ResolveRoot(string owner, string workspaceId) =>
+        _workspaces.TryGetValue(workspaceId, out WorkspaceRecord? record) &&
+        string.Equals(record.Owner, owner, StringComparison.Ordinal)
+            ? record.Path
+            : null;
+
     public bool Release(string owner, string workspaceId)
     {
         if (!_workspaces.TryGetValue(workspaceId, out WorkspaceRecord? record) ||
