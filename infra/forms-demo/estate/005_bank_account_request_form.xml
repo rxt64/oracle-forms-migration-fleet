@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Synthetic Oracle Forms XML export for the demo legacy estate.
+
+  This file is hand-authored in the shape the frmf2xml converter produces. It is not a conversion of,
+  a transcription of, or derived from any real or unlicensed Forms module. It describes the same
+  synthetic banking estate as the accompanying schema, and nothing here corresponds to a real person,
+  account, or customer application.
+-->
+<Module xmlns="http://xmlns.oracle.com/Forms" version="12.2.1.4" FormsVersion="12.2.1.4">
+  <FormModule Name="BANK_ACCOUNT_REQUEST_FORM" Title="Account Opening Requests" ConsoleWindow="MAIN_WINDOW">
+
+    <Trigger Name="WHEN-NEW-FORM-INSTANCE" TriggerText="BEGIN GO_BLOCK('REQUEST_BLOCK'); EXECUTE_QUERY; END;"/>
+
+    <Block Name="REQUEST_BLOCK" QueryDataSourceName="BANK_ACCOUNT_REQUEST" RecordsDisplayCount="10"
+           QueryAllowed="true" InsertAllowed="true" UpdateAllowed="true" DeleteAllowed="false">
+
+      <Item Name="REQUEST_ID" ItemType="Text Item" DataType="Number" ColumnName="REQUEST_ID"
+            Prompt="Request" Required="true" Visible="true" MaximumLength="10" Enabled="false"/>
+      <Item Name="REQUEST_STATUS" ItemType="Text Item" DataType="Char" ColumnName="REQUEST_STATUS"
+            Prompt="Status" Required="true" Visible="true" MaximumLength="12"/>
+      <Item Name="FAMILY_NAME" ItemType="Text Item" DataType="Char" ColumnName="FAMILY_NAME"
+            Prompt="Surname" Required="true" Visible="true" MaximumLength="60"/>
+      <Item Name="GIVEN_NAME" ItemType="Text Item" DataType="Char" ColumnName="GIVEN_NAME"
+            Prompt="First name" Required="true" Visible="true" MaximumLength="60"/>
+      <Item Name="HONORIFIC" ItemType="Text Item" DataType="Char" ColumnName="HONORIFIC"
+            Prompt="Title" Required="false" Visible="true" MaximumLength="8"/>
+      <Item Name="DATE_OF_BIRTH" ItemType="Text Item" DataType="Date" ColumnName="DATE_OF_BIRTH"
+            Prompt="Date of birth" Required="true" Visible="true"/>
+      <Item Name="BRANCH_CODE" ItemType="Text Item" DataType="Char" ColumnName="BRANCH_CODE"
+            Prompt="Branch" Required="true" Visible="true" MaximumLength="10" LOVName="BRANCH_LOV"/>
+      <Item Name="ACCOUNT_KIND" ItemType="Text Item" DataType="Char" ColumnName="ACCOUNT_KIND"
+            Prompt="Account type" Required="true" Visible="true" MaximumLength="12"/>
+      <Item Name="EMAIL_ADDRESS" ItemType="Text Item" DataType="Char" ColumnName="EMAIL_ADDRESS"
+            Prompt="Email" Required="false" Visible="true" MaximumLength="120"/>
+      <Item Name="WORK_PHONE" ItemType="Text Item" DataType="Char" ColumnName="WORK_PHONE"
+            Prompt="Work phone" Required="false" Visible="true" MaximumLength="24"/>
+      <Item Name="HOME_PHONE" ItemType="Text Item" DataType="Char" ColumnName="HOME_PHONE"
+            Prompt="Home phone" Required="false" Visible="true" MaximumLength="24"/>
+      <Item Name="SUBMITTED_AT" ItemType="Text Item" DataType="Date" ColumnName="SUBMITTED_AT"
+            Prompt="Submitted" Required="false" Visible="true" Enabled="false"/>
+      <Item Name="STREET_ADDRESS" ItemType="Text Item" DataType="Char" ColumnName="STREET_ADDRESS"
+            Prompt="Address" Required="false" Visible="false" MaximumLength="120"/>
+      <Item Name="APPROVE_BUTTON" ItemType="Push Button" Prompt="Approve" Visible="true"/>
+
+      <Trigger Name="WHEN-BUTTON-PRESSED" TriggerText="LEGACY_BANKING_API.APPROVE_REQUEST(:REQUEST_BLOCK.REQUEST_ID, :GLOBAL.NEW_ACCOUNT_ID);"/>
+      <Trigger Name="WHEN-VALIDATE-RECORD" TriggerText="IF :REQUEST_BLOCK.DATE_OF_BIRTH &gt; SYSDATE THEN RAISE FORM_TRIGGER_FAILURE; END IF;"/>
+      <Trigger Name="POST-QUERY" TriggerText="NULL;"/>
+    </Block>
+
+    <Block Name="SUMMARY_BLOCK" RecordsDisplayCount="1" QueryAllowed="false">
+      <Item Name="TOTAL_PENDING" ItemType="Display Item" DataType="Number" Prompt="Pending" Visible="true"/>
+    </Block>
+
+    <LOV Name="BRANCH_LOV" RecordGroupName="BRANCH_RG" Title="Branches"/>
+    <RecordGroup Name="BRANCH_RG" RecordGroupQuery="SELECT DISTINCT BRANCH_CODE FROM BANK_ACCOUNT_REQUEST"/>
+
+    <ProgramUnit Name="REFRESH_SUMMARY" ProgramUnitType="Procedure"
+                 ProgramUnitText="PROCEDURE REFRESH_SUMMARY IS BEGIN NULL; END;"/>
+
+    <Window Name="MAIN_WINDOW" Title="Account Opening Requests"/>
+    <Canvas Name="MAIN_CANVAS" CanvasType="Content"/>
+  </FormModule>
+</Module>

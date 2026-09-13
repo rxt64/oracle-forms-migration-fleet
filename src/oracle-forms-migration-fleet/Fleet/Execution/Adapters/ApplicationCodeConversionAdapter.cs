@@ -31,6 +31,8 @@ public sealed class ApplicationCodeConversionAdapter(IArtifactReviewer? reviewer
         }
 
         List<OracleSchema> schemas = [];
+        List<FormsModule> forms = [];
+        List<ConversionFinding> formsFindings = [];
         int formsModules = 0;
 
         foreach (WorkspaceFile file in context.Workspace.EnumerateFiles(sourceRoot, MaxFiles))
@@ -41,6 +43,26 @@ public sealed class ApplicationCodeConversionAdapter(IArtifactReviewer? reviewer
             if (extension.Equals(".fmb", StringComparison.OrdinalIgnoreCase))
             {
                 formsModules++;
+                continue;
+            }
+
+            if (extension.Equals(".xml", StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    FormsModuleParse parsed = FormsModuleParser.Parse(context.Workspace.ReadText(file.RelativePath, MaxTextBytes));
+                    if (parsed.Modules.Count > 0)
+                    {
+                        forms.AddRange(parsed.Modules);
+                        formsFindings.AddRange(parsed.Findings);
+                        context.Info($"Read Forms module {string.Join(", ", parsed.Modules.Select(module => module.Name))} from {file.RelativePath}.");
+                    }
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                {
+                    context.Warn($"{file.RelativePath} could not be read and was skipped.");
+                }
+
                 continue;
             }
 
@@ -68,7 +90,9 @@ public sealed class ApplicationCodeConversionAdapter(IArtifactReviewer? reviewer
 
         OracleSchema schema = OracleSchema.Merge(schemas);
         ApplicationConversion conversion = ApplicationCodeEmitter.Convert(
-            schema, context.Request.ApplicationName, context.Request.Target.Database);
+            schema, context.Request.ApplicationName, context.Request.Target.Database, forms);
+
+        conversion = conversion with { Findings = [.. formsFindings, .. conversion.Findings] };
 
         if (conversion.Files.Count == 0)
         {

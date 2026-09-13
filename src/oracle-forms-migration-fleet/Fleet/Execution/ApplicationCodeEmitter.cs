@@ -25,7 +25,11 @@ public static class ApplicationCodeEmitter
 {
     private const string BasePackage = "com.northstar.migrated";
 
-    public static ApplicationConversion Convert(OracleSchema schema, string applicationName, DatabaseTarget target)
+    public static ApplicationConversion Convert(
+        OracleSchema schema,
+        string applicationName,
+        DatabaseTarget target,
+        IReadOnlyList<FormsModule>? forms = null)
     {
         ArgumentNullException.ThrowIfNull(schema);
 
@@ -69,7 +73,18 @@ public static class ApplicationCodeEmitter
 
         files.Add(BuildReactTypes(tables));
         files.Add(BuildReactClient(tables));
-        files.Add(BuildReactApp(tables));
+
+        IReadOnlyList<FormsBlock> screens =
+            [.. (forms ?? []).SelectMany(module => module.Blocks).Where(block => block.BaseTable is not null)];
+
+        if (screens.Count > 0)
+        {
+            files.Add(BuildReactAppFromForms(screens, tables, findings));
+        }
+        else
+        {
+            files.Add(BuildReactApp(tables));
+        }
         files.Add(BuildDockerfile());
         files.Add(BuildDockerIgnore());
         files.Add(BuildReadme(applicationName, tables));
@@ -98,9 +113,13 @@ public static class ApplicationCodeEmitter
             ConversionSeverity.ManualReview,
             "User interface",
             "Screen layout and navigation",
-            "The React screens are generated from table structure, not from the original Forms modules, whose binary " +
-            "contents this build cannot read. Field order, grouping, navigation, and any trigger-driven behaviour must " +
-            "be rebuilt against the real application before this replaces it."));
+            forms is { Count: > 0 }
+                ? "The React screens follow the blocks, item order, and prompts in the Forms XML export. Layout " +
+                  "geometry, canvases, navigation between windows, and every trigger-driven behaviour are not carried " +
+                  "across and must be rebuilt against the real application before this replaces it."
+                : "The React screens are generated from table structure, not from the original Forms modules, whose binary " +
+                  "contents this build cannot read. Field order, grouping, navigation, and any trigger-driven behaviour must " +
+                  "be rebuilt against the real application before this replaces it."));
 
         findings.Add(new ConversionFinding(
             ConversionSeverity.ManualReview,
@@ -377,6 +396,117 @@ public static class ApplicationCodeEmitter
 
         return new GeneratedFile("frontend/src/api.ts", builder.ToString(), "Typed fetch client for the generated endpoints.");
     }
+
+    /// <summary>
+    /// Builds the screen from the Forms block: its item order, prompts, and required flags, not the table's.
+    /// </summary>
+    private static GeneratedFile BuildReactAppFromForms(
+        IReadOnlyList<FormsBlock> screens, IReadOnlyList<OracleTable> tables, List<ConversionFinding> findings)
+    {
+        FormsBlock block = screens[0];
+        OracleTable? table = tables.FirstOrDefault(candidate =>
+            string.Equals(candidate.Name, block.BaseTable, StringComparison.OrdinalIgnoreCase));
+
+        if (table is null)
+        {
+            findings.Add(new ConversionFinding(
+                ConversionSeverity.Unsupported,
+                "Forms module",
+                $"{block.Name} over {block.BaseTable}",
+                "The block's base table was not found in the supplied schema, so the screen fell back to table structure."));
+
+            return BuildReactApp(tables);
+        }
+
+        HashSet<string> columns = new(table.Columns.Select(column => column.Name), StringComparer.OrdinalIgnoreCase);
+
+        // Only displayed items that map to a real column can be rendered from the API response.
+        List<FormsItem> rendered = [];
+        foreach (FormsItem item in block.Items.Where(item => item.Visible))
+        {
+            if (item.ColumnName is { Length: > 0 } column && columns.Contains(column))
+            {
+                rendered.Add(item);
+            }
+            else
+            {
+                findings.Add(new ConversionFinding(
+                    ConversionSeverity.ManualReview,
+                    "Forms module",
+                    $"{block.Name}.{item.Name}",
+                    "The item is not backed by a column in the supplied schema, so it was left off the screen. It was " +
+                    "populated by Forms logic that has not been translated."));
+            }
+        }
+
+        if (rendered.Count == 0)
+        {
+            return BuildReactApp(tables);
+        }
+
+        string className = ClassName(table.Name);
+        StringBuilder builder = new();
+
+        builder.AppendLine("import { useEffect, useState } from \"react\";");
+        builder.AppendLine($"import {{ list{className} }} from \"./api\";");
+        builder.AppendLine($"import type {{ {className} }} from \"./types\";").AppendLine();
+        builder.AppendLine($"// Generated from Forms block {block.Name} over {block.BaseTable}.");
+        builder.AppendLine("// Column order and labels follow the form; trigger behaviour does not.");
+        builder.AppendLine("export default function App() {");
+        builder.AppendLine($"  const [rows, setRows] = useState<{className}[]>([]);");
+        builder.AppendLine("  const [error, setError] = useState<string | null>(null);").AppendLine();
+        builder.AppendLine("  useEffect(() => {");
+        builder.AppendLine($"    list{className}().then(setRows).catch((cause: Error) => setError(cause.message));");
+        builder.AppendLine("  }, []);").AppendLine();
+        builder.AppendLine("  if (error) {");
+        builder.AppendLine("    return <p role=\"alert\">{error}</p>;");
+        builder.AppendLine("  }").AppendLine();
+        builder.AppendLine("  return (");
+        builder.AppendLine("    <section>");
+        builder.AppendLine($"      <h1>{JsxText(block.Name)}</h1>");
+        builder.AppendLine("      <table>");
+        builder.AppendLine("        <thead>");
+        builder.AppendLine("          <tr>");
+
+        foreach (FormsItem item in rendered)
+        {
+            string label = JsxText(item.Prompt ?? item.Name);
+            string required = item.Required ? " <abbr title=\"Required\">*</abbr>" : string.Empty;
+            builder.AppendLine($"            <th scope=\"col\">{label}{required}</th>");
+        }
+
+        builder.AppendLine("          </tr>");
+        builder.AppendLine("        </thead>");
+        builder.AppendLine("        <tbody>");
+        builder.AppendLine("          {rows.map((row, index) => (");
+        builder.AppendLine("            <tr key={index}>");
+
+        foreach (FormsItem item in rendered)
+        {
+            builder.AppendLine($"              <td>{{String(row.{FieldName(item.ColumnName!)} ?? \"\")}}</td>");
+        }
+
+        builder.AppendLine("            </tr>");
+        builder.AppendLine("          ))}");
+        builder.AppendLine("        </tbody>");
+        builder.AppendLine("      </table>");
+        builder.AppendLine("    </section>");
+        builder.AppendLine("  );");
+        builder.AppendLine("}");
+
+        return new GeneratedFile(
+            "frontend/src/App.tsx",
+            builder.ToString(),
+            $"React screen generated from Forms block {block.Name}.");
+    }
+
+    /// <summary>Escapes for JSX text, where a brace opens an expression.</summary>
+    private static string JsxText(string text) => text
+        .Replace("&", "&amp;", StringComparison.Ordinal)
+        .Replace("<", "&lt;", StringComparison.Ordinal)
+        .Replace(">", "&gt;", StringComparison.Ordinal)
+        .Replace("{", "&#123;", StringComparison.Ordinal)
+        .Replace("}", "&#125;", StringComparison.Ordinal);
 
     private static GeneratedFile BuildReactApp(IReadOnlyList<OracleTable> tables)
     {

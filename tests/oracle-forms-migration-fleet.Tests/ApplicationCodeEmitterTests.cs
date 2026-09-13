@@ -67,6 +67,57 @@ public class ApplicationCodeEmitterTests
     }
 
     [Fact]
+    public void The_screen_follows_the_forms_block_when_an_export_was_read()
+    {
+        OracleSchema schema = OracleSchemaParser.Parse(OracleSamples.Schema);
+        OracleTable table = schema.Tables[0];
+
+        // Deliberately the reverse of the table's column order, so a pass can only come from the form.
+        IReadOnlyList<FormsItem> items =
+        [
+            .. table.Columns.Reverse().Select((column, index) => new FormsItem(
+                column.Name, "Text Item", null, column.Name, $"Label {index}", index == 0, true, null)),
+            new FormsItem("APPROVE_BUTTON", "Push Button", null, null, "Approve", false, true, null),
+        ];
+
+        FormsModule module = new(
+            "ORDERS_FORM", "Orders",
+            [new FormsBlock("ORDER_BLOCK", table.Name, 10, items, [])],
+            [], [], []);
+
+        ApplicationConversion conversion = ApplicationCodeEmitter.Convert(
+            schema, "ORDERS", DatabaseTarget.PostgreSql, [module]);
+
+        GeneratedFile app = conversion.Files.Single(file => file.Path == "frontend/src/App.tsx");
+
+        Assert.Contains("Generated from Forms block ORDER_BLOCK", app.Contents, StringComparison.Ordinal);
+        Assert.Contains("Label 0", app.Contents, StringComparison.Ordinal);
+        Assert.True(
+            app.Contents.IndexOf("Label 0", StringComparison.Ordinal) < app.Contents.IndexOf("Label 1", StringComparison.Ordinal),
+            "Columns should be rendered in the form's order.");
+
+        // A push button is not a column and cannot be read off the API response.
+        Assert.DoesNotContain("APPROVE_BUTTON", app.Contents, StringComparison.Ordinal);
+        Assert.Contains(
+            conversion.Findings,
+            finding => finding.Construct.Contains("APPROVE_BUTTON", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Without_an_export_the_screen_still_falls_back_to_table_structure()
+    {
+        OracleSchema schema = OracleSchemaParser.Parse(OracleSamples.Schema);
+
+        ApplicationConversion conversion = ApplicationCodeEmitter.Convert(schema, "ORDERS", DatabaseTarget.PostgreSql);
+        GeneratedFile app = conversion.Files.Single(file => file.Path == "frontend/src/App.tsx");
+
+        Assert.DoesNotContain("Generated from Forms block", app.Contents, StringComparison.Ordinal);
+        Assert.Contains(
+            conversion.Findings,
+            finding => finding.Reason.Contains("generated from table structure", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void The_output_never_claims_to_have_read_a_forms_module()
     {
         ApplicationConversion conversion = Convert();
