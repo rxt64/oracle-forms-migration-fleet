@@ -166,6 +166,28 @@ public class PlSqlTranslatorTests
     }
 
     [Fact]
+    public void A_view_does_not_swallow_whatever_source_file_follows_it()
+    {
+        // Sources are concatenated before translation, so an unterminated view would absorb the next file.
+        PlSqlTranslation translation = PlSqlTranslator.Translate("""
+            CREATE OR REPLACE VIEW BANK_ACCOUNT_STATEMENT AS
+            SELECT a.ACCOUNT_ID FROM BANK_ACCOUNT a;
+
+            DECLARE
+                v_accounts PLS_INTEGER;
+            BEGIN
+                DBMS_OUTPUT.PUT_LINE('verifying');
+            END;
+            """);
+
+        string view = Unit(translation, "bank_account_statement").Sql;
+
+        Assert.DoesNotContain("DBMS_OUTPUT", view, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("v_accounts", view, StringComparison.OrdinalIgnoreCase);
+        Assert.EndsWith("FROM BANK_ACCOUNT a;", view, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void An_unrecognised_program_unit_is_reported_rather_than_half_translated()
     {
         PlSqlTranslation translation = PlSqlTranslator.Translate("""

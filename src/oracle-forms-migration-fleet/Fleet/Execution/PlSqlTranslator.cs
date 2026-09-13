@@ -64,11 +64,21 @@ public static partial class PlSqlTranslator
             }
             else if (ViewPattern().Match(trimmed) is { Success: true } view)
             {
+                // Sources are concatenated before they reach here, so a view that is not followed by a
+                // slash would otherwise swallow whatever file came next.
+                string select = FirstStatement(view.Groups["body"].Value);
+
                 units.Add(new PlSqlUnit(
                     PlSqlUnitKind.View,
                     view.Groups["name"].Value.ToLowerInvariant(),
                     $"CREATE OR REPLACE VIEW {view.Groups["name"].Value.ToLowerInvariant()} AS\n" +
-                    $"{Rewrite(view.Groups["body"].Value.TrimEnd(';', '\n', ' ')).Trim()};"));
+                    $"{Rewrite(select).Trim()};"));
+            }
+            else if (SchemaObjectPattern().IsMatch(trimmed))
+            {
+                // Tables, sequences and indexes are the schema emitter's job, not a program unit this
+                // translator failed to understand.
+                continue;
             }
             else
             {
@@ -475,6 +485,26 @@ public static partial class PlSqlTranslator
         }
     }
 
+    /// <summary>Text up to the first semicolon that is outside a string literal.</summary>
+    private static string FirstStatement(string text)
+    {
+        bool inString = false;
+
+        for (int index = 0; index < text.Length; index++)
+        {
+            if (text[index] == '\'')
+            {
+                inString = !inString;
+            }
+            else if (text[index] == ';' && !inString)
+            {
+                return text[..index];
+            }
+        }
+
+        return text;
+    }
+
     private static string Head(string text)
     {
         string head = text.Split('\n')[0].Trim();
@@ -523,6 +553,9 @@ public static partial class PlSqlTranslator
     // RAISE with a bare name only; RAISE EXCEPTION / NOTICE and a bare re-RAISE are already valid.
     [GeneratedRegex(@"\bRAISE\s+(?!EXCEPTION|NOTICE|WARNING|INFO|DEBUG|LOG)(?<name>\w+)\s*(?=;)", RegexOptions.IgnoreCase, 2000)]
     private static partial Regex RaisePattern();
+
+    [GeneratedRegex(@"^CREATE\s+(?:OR\s+REPLACE\s+)?(?:GLOBAL\s+TEMPORARY\s+|UNIQUE\s+|BITMAP\s+)?(?:TABLE|SEQUENCE|INDEX|SYNONYM|USER|ROLE|TABLESPACE|DATABASE\s+LINK|MATERIALIZED\s+VIEW)\b", RegexOptions.IgnoreCase, 2000)]
+    private static partial Regex SchemaObjectPattern();
 
     [GeneratedRegex(@"^(?<name>[\w\s]+?)\s*\(\s*(?<size>[^)]*)\s*\)$", RegexOptions.IgnoreCase, 2000)]
     private static partial Regex SizedTypePattern();
