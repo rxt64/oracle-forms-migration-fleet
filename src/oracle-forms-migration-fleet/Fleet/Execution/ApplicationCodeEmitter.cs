@@ -85,11 +85,12 @@ public static class ApplicationCodeEmitter
             if (LooksLikeProgramUnit(unparsed))
             {
                 findings.Add(new ConversionFinding(
-                    ConversionSeverity.Unsupported,
+                    ConversionSeverity.ManualReview,
                     "Server-side logic",
                     head,
-                    "Business logic in a PL/SQL program unit was not translated. The generated back end exposes CRUD " +
-                    "over the tables only; this rule has no equivalent in it yet and must be reimplemented in Java or PL/pgSQL."));
+                    "The database conversion translates this program unit into PL/pgSQL, so the rule moves with the " +
+                    "schema rather than into Java. The generated back end exposes CRUD over the tables and does not " +
+                    "call it yet; wire it up, or reimplement it here, before this tier replaces the Forms client."));
             }
         }
 

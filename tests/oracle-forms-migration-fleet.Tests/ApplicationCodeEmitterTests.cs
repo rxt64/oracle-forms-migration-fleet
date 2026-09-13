@@ -53,14 +53,17 @@ public class ApplicationCodeEmitterTests
     }
 
     [Fact]
-    public void Plsql_program_units_are_reported_as_untranslated()
+    public void Plsql_program_units_are_flagged_as_living_in_the_database_not_in_this_tier()
     {
         OracleSchema schema = OracleSchemaParser.Parse(OracleSamples.Schema + "\n" + OracleSamples.PlSql);
         ApplicationConversion conversion = ApplicationCodeEmitter.Convert(schema, "ORDERS", DatabaseTarget.PostgreSql);
 
-        Assert.Contains(
-            conversion.Findings,
-            finding => finding.Category == "Server-side logic" && finding.Severity == ConversionSeverity.Unsupported);
+        // The database conversion translates these, so calling them untranslated here would contradict it.
+        ConversionFinding finding = Assert.Single(
+            conversion.Findings, candidate => candidate.Category == "Server-side logic");
+
+        Assert.Equal(ConversionSeverity.ManualReview, finding.Severity);
+        Assert.Contains("does not call it yet", finding.Reason, StringComparison.Ordinal);
     }
 
     [Fact]

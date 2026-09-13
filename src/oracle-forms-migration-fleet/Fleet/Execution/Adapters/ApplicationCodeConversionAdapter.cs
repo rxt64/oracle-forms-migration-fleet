@@ -185,8 +185,9 @@ public sealed class ApplicationCodeConversionAdapter(IArtifactReviewer? reviewer
         builder.AppendLine("1. Compile and run it. Generated code that has never been built is not working software, and this");
         builder.AppendLine("   phase deliberately produces no attestation for that reason.");
         builder.AppendLine("2. Add authentication and authorization. Every endpoint is currently open.");
-        builder.AppendLine("3. Reimplement the PL/SQL rules listed above, then test them against the original behaviour.");
-        builder.AppendLine("4. Migrate and reconcile the data; the target schema starts empty.");
+        builder.AppendLine("3. Test the translated PL/pgSQL against the original behaviour, then decide for each rule");
+        builder.AppendLine("   whether it stays in the database or moves into this tier. Nothing here calls it yet.");
+        builder.AppendLine("4. Reconcile the migrated data against the source. Row counts are not a reconciliation.");
 
         if (schema.Unparsed.Count > 0)
         {
