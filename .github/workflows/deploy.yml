@@ -25,6 +25,11 @@ env:
   SANDBOX_PGHOST: pg-ofmfleet-dev-ykbpnrpd.postgres.database.azure.com
   SANDBOX_PGUSER: id-ofmfleet-web-dev-ykbpnrpd
   SANDBOX_PGDATABASE: postgres
+  # Without these the reviewer and repair agents are never registered, and the fleet silently degrades
+  # to single-pass deterministic conversion with no critique round.
+  AZURE_OPENAI_ENDPOINT: https://cog-czusrhcg4gpm2.openai.azure.com/
+  AZURE_AI_MODEL_DEPLOYMENT_NAME: gpt-5.4-mini
+  AZURE_AI_REVIEW_MODEL_DEPLOYMENT_NAME: gpt-5.6-sol
 
 jobs:
   deploy:
@@ -77,6 +82,17 @@ jobs:
               "SANDBOX_PGHOST=$SANDBOX_PGHOST" \
               "SANDBOX_PGUSER=$SANDBOX_PGUSER" \
               "SANDBOX_PGDATABASE=$SANDBOX_PGDATABASE" \
+            --output none
+
+      - name: Configure the review and repair agents
+        run: |
+          az containerapp update \
+            --name "$CONTAINER_APP" \
+            --resource-group "$RESOURCE_GROUP" \
+            --set-env-vars \
+              "AZURE_OPENAI_ENDPOINT=$AZURE_OPENAI_ENDPOINT" \
+              "AZURE_AI_MODEL_DEPLOYMENT_NAME=$AZURE_AI_MODEL_DEPLOYMENT_NAME" \
+              "AZURE_AI_REVIEW_MODEL_DEPLOYMENT_NAME=$AZURE_AI_REVIEW_MODEL_DEPLOYMENT_NAME" \
             --output none
 
       - name: Deploy the image

@@ -250,6 +250,14 @@ public static class MigrationRunPlanner
             MigrationPhase.SourceAnalysis or MigrationPhase.SourceAcquisition =>
                 [EvidenceKind.FormsModuleSource, EvidenceKind.FormsXmlExport, EvidenceKind.PlSqlProgramUnit, EvidenceKind.DatabaseSchemaExport],
 
+            // Loads rows from the supplied data export into the converted schema. It opens no Forms module,
+            // and its own approval gate is what authorizes the write.
+            MigrationPhase.SandboxDataMigration => [EvidenceKind.DatabaseSchemaExport],
+
+            // Compares what landed against the source, so it needs the baseline it compares against.
+            MigrationPhase.DataReconciliation or MigrationPhase.DifferentialBehaviorTesting =>
+                [EvidenceKind.DatabaseSchemaExport, EvidenceKind.TestBaseline],
+
             _ => [],
         };
 
@@ -286,20 +294,20 @@ public static class MigrationRunPlanner
                     Status = PhaseStatus.BlockedOnEvidence,
                     Blockers = RelevantTo(phase.Phase, generationBlockers),
                 },
-            ExecutionMode.SandboxMigration when generationBlockers.Count > 0 => phase with
+            ExecutionMode.SandboxMigration when RelevantTo(phase.Phase, generationBlockers) is { Count: > 0 } sandboxEvidence => phase with
             {
                 Status = PhaseStatus.BlockedOnEvidence,
-                Blockers = generationBlockers,
+                Blockers = sandboxEvidence,
             },
             ExecutionMode.SandboxMigration => phase with
             {
                 Status = PhaseStatus.BlockedOnApproval,
                 Blockers = sandboxBlockers,
             },
-            _ when generationBlockers.Count > 0 => phase with
+            _ when RelevantTo(phase.Phase, generationBlockers) is { Count: > 0 } productionEvidence => phase with
             {
                 Status = PhaseStatus.BlockedOnEvidence,
-                Blockers = generationBlockers,
+                Blockers = productionEvidence,
             },
             _ when sandboxBlockers.Count > 0 => phase with
             {

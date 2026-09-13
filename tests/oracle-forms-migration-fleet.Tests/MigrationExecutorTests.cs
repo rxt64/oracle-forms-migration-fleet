@@ -141,6 +141,28 @@ public class MigrationExecutorTests
         Assert.Equal(1, adapter.Invocations);
     }
 
+    [Theory]
+    [InlineData(MigrationPhase.DatabaseConversion)]
+    [InlineData(MigrationPhase.ApplicationCodeConversion)]
+    [InlineData(MigrationPhase.SandboxDataMigration)]
+    [InlineData(MigrationPhase.DataReconciliation)]
+    public void No_phase_that_ignores_forms_modules_is_gated_on_them(MigrationPhase phase)
+    {
+        IReadOnlyList<EvidenceItem> noForms =
+            [.. FullEvidence().Where(item => item.Kind is not (EvidenceKind.FormsModuleSource or EvidenceKind.FormsXmlExport))];
+
+        MigrationRunPlan plan = MigrationRunPlanner.Plan(Request(
+            mode: ExecutionMode.ProductionCutover,
+            evidence: noForms,
+            executionApproval: Requests.Approved("release-manager@contoso.com")));
+
+        PhasePlan resolved = plan.Phases.Single(candidate => candidate.Phase == phase);
+
+        Assert.DoesNotContain(
+            resolved.Blockers,
+            blocker => blocker.Contains("FormsModuleSource", StringComparison.Ordinal));
+    }
+
     [Fact]
     public async Task A_planned_phase_with_an_adapter_runs_and_writes_the_declared_artifacts()
     {
