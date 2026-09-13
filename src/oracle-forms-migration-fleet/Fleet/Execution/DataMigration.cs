@@ -15,7 +15,16 @@ public sealed record DataMigrationOutcome(
     int StatementsExecuted,
     int StatementsFailed,
     IReadOnlyList<string> Failures,
-    IReadOnlyList<TableRowCount> RowCounts);
+    IReadOnlyList<TableRowCount> RowCounts)
+{
+    /// <summary>
+    /// Rows the target already held under the same key.
+    ///
+    /// Counted apart from executed rows because this run did not insert them. A sandbox is loaded more
+    /// than once, and a re-run that reported every existing row as a failure would bury a real one.
+    /// </summary>
+    public int RowsAlreadyPresent { get; init; }
+}
 
 /// <summary>
 /// Outcome of applying the converted schema to the sandbox.
@@ -234,6 +243,13 @@ public static class DataMigrationReport
         builder.AppendLine();
         builder.Append("Statements executed: ").Append(outcome.StatementsExecuted.ToString(CultureInfo.InvariantCulture));
         builder.Append(", failed: ").AppendLine(outcome.StatementsFailed.ToString(CultureInfo.InvariantCulture));
+        if (outcome.RowsAlreadyPresent > 0)
+        {
+            builder.AppendLine();
+            builder.Append("Already present under the same key, so not inserted by this run: ")
+                   .AppendLine(outcome.RowsAlreadyPresent.ToString(CultureInfo.InvariantCulture));
+        }
+
         builder.AppendLine();
 
         builder.AppendLine("## Rows in the target after the run").AppendLine();

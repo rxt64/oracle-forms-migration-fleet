@@ -136,6 +136,13 @@ public sealed class SandboxDataMigrationAdapter(IDataMigrationGateway? gateway =
         string reportPath = $"{outputRoot}/data/migration-report.md";
         context.Workspace.WriteText(reportPath, DataMigrationReport.Render(context.Request.ApplicationName, outcome, skipped));
 
+        if (outcome.RowsAlreadyPresent > 0)
+        {
+            context.Info(
+                $"{outcome.RowsAlreadyPresent.ToString(CultureInfo.InvariantCulture)} rows were already in the target " +
+                "under the same key and were not inserted by this run.");
+        }
+
         foreach (TableRowCount count in outcome.RowCounts)
         {
             context.Info($"{count.Table}: {count.Rows.ToString(CultureInfo.InvariantCulture)} rows in the target.");

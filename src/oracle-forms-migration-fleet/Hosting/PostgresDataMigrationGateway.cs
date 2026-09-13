@@ -71,6 +71,7 @@ public sealed class PostgresDataMigrationGateway(
         await using NpgsqlConnection connection = await ConnectAsync(cancellationToken).ConfigureAwait(false);
 
         int executed = 0;
+        int alreadyPresent = 0;
         List<string> failures = [];
 
         foreach (DataMigrationStatement statement in statements)
@@ -82,6 +83,12 @@ public sealed class PostgresDataMigrationGateway(
                 await using NpgsqlCommand command = new(statement.Sql, connection);
                 await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
                 executed++;
+            }
+            catch (PostgresException exception) when (exception.SqlState == "23505")
+            {
+                // The target already holds this key. Re-running a sandbox load is expected, so this is
+                // reported apart from both success and failure rather than counted as either.
+                alreadyPresent++;
             }
             catch (PostgresException exception)
             {
@@ -105,7 +112,7 @@ public sealed class PostgresDataMigrationGateway(
             }
         }
 
-        return new DataMigrationOutcome(executed, failures.Count, failures, counts);
+        return new DataMigrationOutcome(executed, failures.Count, failures, counts) { RowsAlreadyPresent = alreadyPresent };
     }
 
     /// <summary>Quotes a table name so it is read as an identifier rather than parsed as SQL.</summary>
