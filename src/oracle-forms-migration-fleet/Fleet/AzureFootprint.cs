@@ -107,7 +107,7 @@ public static class AzureFootprintCalculator
                 "Production and sandbox are separate grants. Approving a sandbox migration never authorizes a production cutover.",
             ],
             [
-                "Nothing in this list has been created, and this build cannot create it: no adapter in this service provisions an Azure resource or opens a database connection.",
+                "Nothing in this list has been created, and this build cannot create it: no adapter in this service provisions an Azure resource. The sandbox data load is the only step that reaches a database, and only the one the host was configured with.",
                 "This is the footprint of the plan, not an estimate of cost. Sizing, SKU, and redundancy are decisions for whoever deploys it.",
                 "Least privilege is stated at the resource group. Granting Contributor at subscription scope would satisfy these requirements and is not what they ask for.",
             ]);

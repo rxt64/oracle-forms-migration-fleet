@@ -70,10 +70,50 @@ public class DataMigrationTranslatorTests
 
         Assert.Contains("'O''Brien'", statement.Sql, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void An_insert_inside_a_plsql_body_is_not_treated_as_data()
+    {
+        // It references procedure parameters, so running it moves no row and fails on a name that is
+        // not a column. Reporting that as a failed row makes a load look broken when nothing was lost.
+        const string script = """
+            CREATE OR REPLACE PACKAGE BODY legacy_api AS
+              PROCEDURE open_account(p_account_id NUMBER) IS
+              BEGIN
+                INSERT INTO bank_account (account_id) VALUES (p_account_id);
+              END;
+            END legacy_api;
+            /
+            INSERT INTO bank_account (account_id) VALUES (500001);
+            """;
+
+        DataMigrationStatement statement = Assert.Single(Translate(script));
+
+        Assert.Contains("500001", statement.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("p_account_id", statement.Sql, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Standard_hash_becomes_the_postgres_digest_of_the_same_bytes()
+    {
+        DataMigrationStatement statement = Assert.Single(
+            Translate("INSERT INTO t (h) VALUES (STANDARD_HASH('demo1234', 'SHA256'));"));
+
+        Assert.DoesNotContain("STANDARD_HASH", statement.Sql, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("sha256(convert_to('demo1234', 'UTF8'))", statement.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void An_unrecognised_hash_algorithm_is_left_alone_rather_than_guessed()
+    {
+        DataMigrationStatement statement = Assert.Single(
+            Translate("INSERT INTO t (h) VALUES (STANDARD_HASH('x', 'SHA3-256'));"));
+
+        Assert.Contains("STANDARD_HASH", statement.Sql, StringComparison.OrdinalIgnoreCase);
+    }
 }
 
-internal sealed class StubDataGateway(DataMigrationOutcome outcome) : IDataMigrationGateway
-{
+internal sealed class StubDataGateway(DataMigrationOutcome outcome) : IDataMigrationGateway{
     public IReadOnlyList<DataMigrationStatement>? Applied { get; private set; }
 
     public IReadOnlyList<string>? Prepared { get; private set; }

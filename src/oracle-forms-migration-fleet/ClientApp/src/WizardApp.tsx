@@ -359,10 +359,11 @@ function AzureFootprintSection({ footprint }: { footprint: AzureFootprint }) {
         <AlertTriangle />
         <p>
           <strong>There is no deploy button, deliberately.</strong>
-          This build has no adapter that provisions an Azure resource or opens a database connection, so a
-          sign-in here could not deploy anything. Wiring one before the cross-tenant consent, scoping, and
-          audit trail above are agreed would create a path to write into a customer subscription that nobody
-          had reviewed. Take this list to whoever owns the subscription instead.
+          No adapter here provisions an Azure resource, so a sign-in could not deploy this list. The sandbox
+          load is the one thing that does reach a database, and it writes only to the sandbox the host was
+          configured with, after a named execution approval. Wiring provisioning before the cross-tenant
+          consent, scoping, and audit trail above are agreed would create a path to write into a customer
+          subscription that nobody had reviewed. Take this list to whoever owns the subscription instead.
         </p>
       </div>
 

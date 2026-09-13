@@ -61,13 +61,50 @@ public static partial class DataMigrationTranslator
     private static readonly Regex s_toDate = ToDatePattern();
     private static readonly Regex s_toTimestamp = ToTimestampPattern();
     private static readonly Regex s_hexToRaw = HexToRawPattern();
+    private static readonly Regex s_standardHash = StandardHashPattern();
+    private static readonly Regex s_programBody = ProgramBodyPattern();
+
+    /// <summary>
+    /// Removes PL/SQL program bodies before any INSERT is looked for.
+    ///
+    /// An INSERT inside a package, procedure, or trigger is code, not data. Running one moves no row and
+    /// fails on the parameters it references, so the load reports failures that were never rows to begin
+    /// with. Oracle terminates these blocks with a lone slash, which is what bounds the region here.
+    /// </summary>
+    private static string StripProgramBodies(string script, List<string> skipped)
+    {
+        return s_programBody.Replace(script, match =>
+        {
+            string head = match.Value.Split('\n')[0].Trim();
+            skipped.Add($"PL/SQL program body, not data: {(head.Length > 100 ? head[..100] : head)}");
+
+            // Keep the line count stable so nothing downstream silently rejoins two statements.
+            return string.Concat(Enumerable.Repeat("\n", match.Value.Count(character => character == '\n')));
+        });
+    }
+
+    private static string RewriteStandardHash(Match match)
+    {
+        string value = match.Groups["value"].Value.Trim();
+        string algorithm = match.Groups["algorithm"].Value.Trim().Trim('\'').ToUpperInvariant();
+
+        // Oracle returns uppercase hex; encode() returns lowercase, so the digests differ in case only.
+        return algorithm switch
+        {
+            "SHA256" or "SHA-256" => $"upper(encode(sha256(convert_to({value}, 'UTF8')), 'hex'))",
+            "SHA384" or "SHA-384" => $"upper(encode(sha384(convert_to({value}, 'UTF8')), 'hex'))",
+            "SHA512" or "SHA-512" => $"upper(encode(sha512(convert_to({value}, 'UTF8')), 'hex'))",
+            "MD5" => $"upper(md5({value}))",
+            _ => match.Value,
+        };
+    }
 
     public static IReadOnlyList<DataMigrationStatement> Translate(string oracleScript, out IReadOnlyList<string> skipped)
     {
         List<DataMigrationStatement> statements = [];
         List<string> ignored = [];
 
-        foreach (string raw in SplitStatements(oracleScript ?? string.Empty))
+        foreach (string raw in SplitStatements(StripProgramBodies(oracleScript ?? string.Empty, ignored)))
         {
             string statement = raw.Trim();
             if (statement.Length == 0)
@@ -99,6 +136,7 @@ public static partial class DataMigrationTranslator
         sql = s_toTimestamp.Replace(sql, match => $"TIMESTAMP {match.Groups["value"].Value}");
         sql = s_toDate.Replace(sql, match => $"DATE {match.Groups["value"].Value}");
         sql = s_hexToRaw.Replace(sql, match => $"decode({match.Groups["value"].Value}, 'hex')");
+        sql = s_standardHash.Replace(sql, RewriteStandardHash);
 
         sql = Regex.Replace(sql, @"\bSYSTIMESTAMP\b", "now()", RegexOptions.IgnoreCase, TimeSpan.FromSeconds(2));
         sql = Regex.Replace(sql, @"\bSYSDATE\b", "CURRENT_DATE", RegexOptions.IgnoreCase, TimeSpan.FromSeconds(2));
@@ -172,6 +210,15 @@ public static partial class DataMigrationTranslator
 
     [GeneratedRegex(@"HEXTORAW\s*\(\s*(?<value>'[^']*')\s*\)", RegexOptions.IgnoreCase, 2000)]
     private static partial Regex HexToRawPattern();
+
+    [GeneratedRegex(@"STANDARD_HASH\s*\(\s*(?<value>'[^']*'|[\w$#.]+)\s*,\s*(?<algorithm>'[^']*')\s*\)", RegexOptions.IgnoreCase, 2000)]
+    private static partial Regex StandardHashPattern();
+
+    [GeneratedRegex(
+        @"^[ \t]*CREATE(\s+OR\s+REPLACE)?\s+(PACKAGE\s+BODY|PACKAGE|PROCEDURE|FUNCTION|TRIGGER|TYPE\s+BODY)\b.*?^[ \t]*/[ \t]*$",
+        RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.Multiline,
+        4000)]
+    private static partial Regex ProgramBodyPattern();
 }
 
 /// <summary>Renders the reconciliation a data migration produced.</summary>
