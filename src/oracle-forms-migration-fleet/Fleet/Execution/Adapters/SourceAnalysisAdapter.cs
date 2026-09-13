@@ -154,7 +154,7 @@ public sealed class SourceAnalysisAdapter : IPhaseAdapter
                 continue;
             }
 
-            if (!extension.Equals(".sql", StringComparison.OrdinalIgnoreCase))
+            if (!OracleSourceFile.IsSqlText(file.RelativePath))
             {
                 continue;
             }

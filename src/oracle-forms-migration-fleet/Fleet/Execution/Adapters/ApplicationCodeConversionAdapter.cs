@@ -66,7 +66,7 @@ public sealed class ApplicationCodeConversionAdapter(IArtifactReviewer? reviewer
                 continue;
             }
 
-            if (!extension.Equals(".sql", StringComparison.OrdinalIgnoreCase))
+            if (!OracleSourceFile.IsSqlText(file.RelativePath))
             {
                 continue;
             }

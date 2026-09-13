@@ -51,7 +51,7 @@ public sealed class SandboxDataMigrationAdapter(IDataMigrationGateway? gateway =
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            if (!Path.GetExtension(file.RelativePath).Equals(".sql", StringComparison.OrdinalIgnoreCase))
+            if (!OracleSourceFile.IsSqlText(file.RelativePath))
             {
                 continue;
             }

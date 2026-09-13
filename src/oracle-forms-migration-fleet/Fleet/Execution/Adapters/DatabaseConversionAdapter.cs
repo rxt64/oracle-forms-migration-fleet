@@ -53,7 +53,7 @@ public sealed class DatabaseConversionAdapter(
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            if (!Path.GetExtension(file.RelativePath).Equals(".sql", StringComparison.OrdinalIgnoreCase))
+            if (!OracleSourceFile.IsSqlText(file.RelativePath))
             {
                 continue;
             }
