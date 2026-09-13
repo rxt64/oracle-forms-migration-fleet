@@ -21,6 +21,45 @@ public sealed class PostgresDataMigrationGateway(
 {
     private static readonly string[] s_scope = ["https://ossrdbms-aad.database.windows.net/.default"];
 
+    // An object that already exists is not an error here: the phase is meant to be safe to re-run.
+    private static readonly HashSet<string> s_alreadyPresent =
+        ["42P07", "42P06", "42710", "42701", "42P16"];
+
+    public async Task<SchemaDeploymentOutcome> PrepareAsync(
+        IReadOnlyList<string> statements,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(statements);
+
+        await using NpgsqlConnection connection = await ConnectAsync(cancellationToken).ConfigureAwait(false);
+
+        int applied = 0;
+        int alreadyPresent = 0;
+        List<string> failures = [];
+
+        foreach (string statement in statements)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            try
+            {
+                await using NpgsqlCommand command = new(statement, connection);
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                applied++;
+            }
+            catch (PostgresException exception) when (s_alreadyPresent.Contains(exception.SqlState))
+            {
+                alreadyPresent++;
+            }
+            catch (PostgresException exception)
+            {
+                failures.Add($"{exception.SqlState} {exception.MessageText}");
+            }
+        }
+
+        return new SchemaDeploymentOutcome(applied, alreadyPresent, failures);
+    }
+
     public async Task<DataMigrationOutcome> ApplyAsync(
         IReadOnlyList<DataMigrationStatement> statements,
         IReadOnlyList<string> tables,
@@ -29,23 +68,7 @@ public sealed class PostgresDataMigrationGateway(
         ArgumentNullException.ThrowIfNull(statements);
         ArgumentNullException.ThrowIfNull(tables);
 
-        AccessToken token = await credential
-            .GetTokenAsync(new TokenRequestContext(s_scope), cancellationToken)
-            .ConfigureAwait(false);
-
-        NpgsqlConnectionStringBuilder builder = new()
-        {
-            Host = host,
-            Port = 5432,
-            Database = database,
-            Username = user,
-            Password = token.Token,
-            SslMode = SslMode.Require,
-            Timeout = 30,
-        };
-
-        await using NpgsqlConnection connection = new(builder.ConnectionString);
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using NpgsqlConnection connection = await ConnectAsync(cancellationToken).ConfigureAwait(false);
 
         int executed = 0;
         List<string> failures = [];
@@ -88,4 +111,26 @@ public sealed class PostgresDataMigrationGateway(
     /// <summary>Quotes a table name so it is read as an identifier rather than parsed as SQL.</summary>
     private static string QuoteIdentifier(string identifier) =>
         "\"" + identifier.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
+
+    private async Task<NpgsqlConnection> ConnectAsync(CancellationToken cancellationToken)
+    {
+        AccessToken token = await credential
+            .GetTokenAsync(new TokenRequestContext(s_scope), cancellationToken)
+            .ConfigureAwait(false);
+
+        NpgsqlConnectionStringBuilder builder = new()
+        {
+            Host = host,
+            Port = 5432,
+            Database = database,
+            Username = user,
+            Password = token.Token,
+            SslMode = SslMode.Require,
+            Timeout = 30,
+        };
+
+        NpgsqlConnection connection = new(builder.ConnectionString);
+        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        return connection;
+    }
 }

@@ -67,6 +67,9 @@ public sealed class WorkspaceWriter
     public bool DirectoryExists(string relativePath) =>
         TryResolve(relativePath, out string absolutePath, out _) && Directory.Exists(absolutePath);
 
+    public bool FileExists(string relativePath) =>
+        TryResolve(relativePath, out string absolutePath, out _) && File.Exists(absolutePath);
+
     /// <summary>Writes UTF-8 text with LF endings so repeated runs produce byte-identical artifacts.</summary>
     public void WriteText(string relativePath, string content)
     {

@@ -76,6 +76,18 @@ internal sealed class StubDataGateway(DataMigrationOutcome outcome) : IDataMigra
 {
     public IReadOnlyList<DataMigrationStatement>? Applied { get; private set; }
 
+    public IReadOnlyList<string>? Prepared { get; private set; }
+
+    public SchemaDeploymentOutcome PrepareOutcome { get; set; } = new(0, 0, []);
+
+    public Task<SchemaDeploymentOutcome> PrepareAsync(
+        IReadOnlyList<string> statements,
+        CancellationToken cancellationToken)
+    {
+        Prepared = statements;
+        return Task.FromResult(PrepareOutcome);
+    }
+
     public Task<DataMigrationOutcome> ApplyAsync(
         IReadOnlyList<DataMigrationStatement> statements,
         IReadOnlyList<string> tables,
@@ -138,6 +150,42 @@ public class SandboxDataMigrationPhaseTests
         Assert.Equal(PhaseExecutionState.Executed, Outcome(result).State);
         Assert.Equal(2, gateway.Applied!.Count);
         Assert.Contains("orders", workspace.Read("out/orders/data/migration-report.md"), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task The_converted_schema_is_applied_before_rows_are_loaded()
+    {
+        using TemporaryWorkspace workspace = SeededWorkspace();
+        StubDataGateway gateway = new(new DataMigrationOutcome(2, 0, [], [new TableRowCount("orders", 2)]));
+
+        MigrationExecutionResult result = await RunAsync(workspace, gateway);
+
+        // The DDL comes from this run's own conversion phase. Without this the target has to be prepared
+        // by hand, and a hand-prepared target is untracked.
+        Assert.Equal(PhaseExecutionState.Executed, Outcome(result).State);
+        Assert.NotEmpty(gateway.Prepared!);
+        Assert.Contains(gateway.Prepared!, statement => statement.Contains("create table", StringComparison.OrdinalIgnoreCase));
+
+        // A comment-only trailer would be an empty query, not a statement worth sending.
+        Assert.DoesNotContain(
+            gateway.Prepared!,
+            statement => statement.Split('\n').All(line => line.Trim().Length == 0 || line.TrimStart().StartsWith("--", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public async Task A_schema_that_will_not_apply_stops_the_load()
+    {
+        using TemporaryWorkspace workspace = SeededWorkspace();
+        workspace.WriteFile("out/orders/database/postgresql/schema/schema.sql", "create table orders (id bigint);");
+        StubDataGateway gateway = new(new DataMigrationOutcome(2, 0, [], [new TableRowCount("orders", 2)]))
+        {
+            PrepareOutcome = new SchemaDeploymentOutcome(0, 0, ["42601 syntax error"]),
+        };
+
+        MigrationExecutionResult result = await RunAsync(workspace, gateway);
+
+        Assert.Equal(PhaseExecutionState.Failed, Outcome(result).State);
+        Assert.Null(gateway.Applied);
     }
 
     [Fact]

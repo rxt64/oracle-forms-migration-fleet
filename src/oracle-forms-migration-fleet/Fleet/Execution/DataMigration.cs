@@ -18,6 +18,17 @@ public sealed record DataMigrationOutcome(
     IReadOnlyList<TableRowCount> RowCounts);
 
 /// <summary>
+/// Outcome of applying the converted schema to the sandbox.
+///
+/// <c>AlreadyPresent</c> is counted separately from <c>Applied</c> so a re-run reads as idempotent rather
+/// than as a success it did not earn: an object that already existed was not created by this run.
+/// </summary>
+public sealed record SchemaDeploymentOutcome(
+    int Applied,
+    int AlreadyPresent,
+    IReadOnlyList<string> Failures);
+
+/// <summary>
 /// Writes rows into the sandbox target.
 ///
 /// Adapters never hold a connection string. The host supplies this, already bound to the configured
@@ -26,6 +37,11 @@ public sealed record DataMigrationOutcome(
 /// </summary>
 public interface IDataMigrationGateway
 {
+    /// <summary>Applies the DDL this fleet generated. Never source DDL, which is not vetted.</summary>
+    Task<SchemaDeploymentOutcome> PrepareAsync(
+        IReadOnlyList<string> statements,
+        CancellationToken cancellationToken);
+
     Task<DataMigrationOutcome> ApplyAsync(
         IReadOnlyList<DataMigrationStatement> statements,
         IReadOnlyList<string> tables,
@@ -93,6 +109,26 @@ public static partial class DataMigrationTranslator
     }
 
     /// <summary>Splits on semicolons outside string literals, so a value containing one is not cut in half.</summary>
+    /// <summary>
+    /// Splits generated DDL into executable statements.
+    ///
+    /// This is only ever applied to schema this fleet produced. Source DDL stays untranslated and unrun.
+    /// </summary>
+    public static IReadOnlyList<string> SplitSchema(string script)
+    {
+        ArgumentNullException.ThrowIfNull(script);
+
+        return [.. SplitStatements(script)
+            .Select(statement => statement.Trim())
+            .Where(statement => statement.Length > 0 && !IsOnlyComments(statement))];
+    }
+
+    private static bool IsOnlyComments(string statement) =>
+        statement
+            .Split('\n')
+            .Select(line => line.Trim())
+            .All(line => line.Length == 0 || line.StartsWith("--", StringComparison.Ordinal));
+
     private static IEnumerable<string> SplitStatements(string script)
     {
         StringBuilder current = new();

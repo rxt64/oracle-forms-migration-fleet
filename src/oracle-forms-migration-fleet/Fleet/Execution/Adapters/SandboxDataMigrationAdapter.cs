@@ -83,6 +83,42 @@ public sealed class SandboxDataMigrationAdapter(IDataMigrationGateway? gateway =
 
         string[] tables = [.. statements.Select(statement => statement.Table).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)];
 
+        // Rows cannot land in tables that do not exist, and the converted schema is this fleet's own output
+        // from the conversion phase. Applying it here is what keeps a migration reproducible by the tool
+        // alone: without it the target has to be prepared by hand, and a hand-prepared target is untracked.
+        string schemaPath = $"{outputRoot}/database/postgresql/schema/schema.sql";
+        if (context.Workspace.FileExists(schemaPath))
+        {
+            IReadOnlyList<string> ddl = DataMigrationTranslator.SplitSchema(
+                context.Workspace.ReadText(schemaPath, MaxTextBytes));
+
+            try
+            {
+                SchemaDeploymentOutcome prepared = await gateway.PrepareAsync(ddl, cancellationToken).ConfigureAwait(false);
+
+                context.Info(
+                    $"Schema: {prepared.Applied.ToString(CultureInfo.InvariantCulture)} objects created, " +
+                    $"{prepared.AlreadyPresent.ToString(CultureInfo.InvariantCulture)} already present.");
+
+                if (prepared.Failures.Count > 0)
+                {
+                    return PhaseExecutionResult.Failure(
+                        $"{prepared.Failures.Count.ToString(CultureInfo.InvariantCulture)} schema statements failed, so " +
+                        "no rows were loaded into a target that does not match the converted schema.",
+                        [.. prepared.Failures]);
+                }
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                return PhaseExecutionResult.Failure($"The sandbox schema could not be applied: {exception.Message}");
+            }
+        }
+        else
+        {
+            context.Warn(
+                $"No converted schema was found at {schemaPath}. Rows will only load if the target was already prepared.");
+        }
+
         context.Info(
             $"Loading {statements.Count.ToString(CultureInfo.InvariantCulture)} rows into " +
             $"{tables.Length.ToString(CultureInfo.InvariantCulture)} tables.");
