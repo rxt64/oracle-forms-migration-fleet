@@ -84,7 +84,7 @@ public static class FormsModuleParser
             return new FormsModuleParse(modules, findings);
         }
 
-        foreach (XElement module in Descendants(document.Root, "FormModule"))
+        foreach (XElement module in Elements(document.Root, "FormModule"))
         {
             modules.Add(ReadModule(module, findings));
         }
@@ -109,7 +109,13 @@ public static class FormsModuleParser
         foreach (XElement block in Descendants(module, "Block"))
         {
             string blockName = Attribute(block, "Name") ?? "UNNAMED";
-            string? baseTable = Attribute(block, "QueryDataSourceName");
+
+            // Exports qualify the table with its owner; the converted schema is not owner-qualified.
+            string? baseTable = Attribute(block, "QueryDataSourceName") ?? Attribute(block, "DMLDataTargetName");
+            if (baseTable is { Length: > 0 } qualified && qualified.Contains('.', StringComparison.Ordinal))
+            {
+                baseTable = qualified[(qualified.LastIndexOf('.') + 1)..];
+            }
 
             List<FormsItem> items = [];
             foreach (XElement item in Descendants(block, "Item"))
@@ -117,14 +123,18 @@ public static class FormsModuleParser
                 string itemName = Attribute(item, "Name") ?? "UNNAMED";
                 string itemType = Attribute(item, "ItemType") ?? "Text Item";
 
+                // Only a database item maps to a column; the rest are populated by Forms logic.
+                bool databaseItem = Flag(item, "DatabaseItem", @default: true);
+                string? column = databaseItem ? Attribute(item, "ColumnName") ?? itemName : null;
+
                 items.Add(new FormsItem(
                     itemName,
                     itemType,
                     Attribute(item, "DataType"),
-                    Attribute(item, "ColumnName") ?? (baseTable is null ? null : itemName),
-                    Attribute(item, "Prompt"),
-                    Flag(item, "Required"),
-                    Attribute(item, "Visible") is not "false",
+                    baseTable is null ? null : column,
+                    Label(Attribute(item, "Prompt")),
+                    Flag(item, "Required", @default: false),
+                    Flag(item, "Visible", @default: true),
                     Number(item, "MaximumLength")));
             }
 
@@ -145,7 +155,7 @@ public static class FormsModuleParser
             blocks.Add(new FormsBlock(
                 blockName,
                 baseTable,
-                Number(block, "RecordsDisplayCount") ?? 1,
+                Number(block, "RecordsDisplayed") ?? Number(block, "RecordsDisplayCount") ?? 1,
                 items,
                 triggers));
         }
@@ -162,6 +172,7 @@ public static class FormsModuleParser
             [.. Descendants(module, "LOV").Select(lov => Attribute(lov, "Name") ?? "UNNAMED")];
 
         ReportBehaviour(name, blocks, moduleTriggers, programUnits, lovs, findings);
+        ReportAttachments(name, module, findings);
 
         return new FormsModule(name, Attribute(module, "Title"), blocks, moduleTriggers, programUnits, lovs);
     }
@@ -204,8 +215,54 @@ public static class FormsModuleParser
         }
     }
 
+    private static void ReportAttachments(string module, XElement element, List<ConversionFinding> findings)
+    {
+        foreach (XElement library in Descendants(element, "AttachedLibrary"))
+        {
+            findings.Add(new ConversionFinding(
+                ConversionSeverity.Unsupported,
+                "Forms behaviour",
+                $"{module}.{Attribute(library, "Name") ?? "UNNAMED"}",
+                "An attached PL/SQL library (.pll) is shared code this export does not contain, so its contents were " +
+                "never seen. Anything the form relied on from it is absent."));
+        }
+
+        foreach (XElement relation in Descendants(element, "Relation"))
+        {
+            findings.Add(new ConversionFinding(
+                ConversionSeverity.ManualReview,
+                "Forms behaviour",
+                $"{module}.{Attribute(relation, "Name") ?? "UNNAMED"}",
+                $"A master-detail relation to {Attribute(relation, "DetailBlock") ?? "a detail block"} coordinated two " +
+                "blocks. The generated screen renders one block and does not synchronise them."));
+        }
+    }
+
+    private static IEnumerable<XElement> Elements(XElement? root, string localName)
+    {
+        if (root is null)
+        {
+            yield break;
+        }
+
+        // An export often has FormModule as its root, which Descendants alone would skip.
+        if (root.Name.LocalName == localName)
+        {
+            yield return root;
+        }
+
+        foreach (XElement element in root.Descendants().Where(element => element.Name.LocalName == localName))
+        {
+            yield return element;
+        }
+    }
+
     private static IEnumerable<XElement> Descendants(XElement? root, string localName) =>
         root is null ? [] : root.Descendants().Where(element => element.Name.LocalName == localName);
+
+    /// <summary>Prompts carry their punctuation; a column heading should not.</summary>
+    private static string? Label(string? prompt) =>
+        prompt?.TrimEnd(':', ' ') is { Length: > 0 } trimmed ? trimmed : null;
 
     private static string? Attribute(XElement element, string name) =>
         element.Attributes().FirstOrDefault(attribute =>
@@ -213,8 +270,13 @@ public static class FormsModuleParser
             ? value
             : null;
 
-    private static bool Flag(XElement element, string name) =>
-        string.Equals(Attribute(element, name), "true", StringComparison.OrdinalIgnoreCase);
+    /// <summary>Exports write booleans as Yes/No, not true/false.</summary>
+    private static bool Flag(XElement element, string name, bool @default) => Attribute(element, name) switch
+    {
+        null => @default,
+        "Yes" or "yes" or "YES" or "Y" or "y" or "true" or "True" or "TRUE" or "1" => true,
+        _ => false,
+    };
 
     private static int? Number(XElement element, string name) =>
         int.TryParse(Attribute(element, name), out int value) ? value : null;
