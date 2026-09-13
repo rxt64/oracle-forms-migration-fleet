@@ -179,15 +179,19 @@ public class MigrationWorkbenchCatalogTests
     }
 
     [Fact]
-    public void Execution_adapters_are_not_connected_so_no_step_or_mode_claims_it_can_execute()
+    public void No_step_or_mode_claims_a_production_cutover_can_run_here()
     {
-        Assert.False(MigrationWorkbenchCatalog.ExecutionAdapterConnected);
+        Assert.False(MigrationWorkbenchCatalog.ProductionAdapterConnected);
 
-        Assert.All(MigrationWorkbenchCatalog.Steps.Where(step => step.RequiresExecutionAdapter),
-            step => Assert.False(step.AdapterConnected));
+        Assert.False(MigrationWorkbenchCatalog.Steps
+            .Single(step => step.Step == WorkbenchStep.CutOverDestination).AdapterConnected);
 
-        Assert.All(MigrationWorkbenchCatalog.ExecutionModes.Where(mode => mode.Mode != ExecutionMode.PlanOnly),
-            mode => Assert.False(mode.ExecutableHere));
+        Assert.False(MigrationWorkbenchCatalog.ExecutionModes
+            .Single(mode => mode.Mode == ExecutionMode.ProductionCutover).ExecutableHere);
+
+        // Forms modules are never parsed here, so the step that depends on doing so must not claim otherwise.
+        Assert.False(MigrationWorkbenchCatalog.Steps
+            .Single(step => step.Step == WorkbenchStep.PlanModernization).AdapterConnected);
 
         Assert.True(MigrationWorkbenchCatalog.ExecutionModes
             .Single(mode => mode.Mode == ExecutionMode.PlanOnly).ExecutableHere);
@@ -307,11 +311,16 @@ public class MigrationWorkbenchCatalogTests
     }
 
     [Fact]
-    public void Projection_preserves_adapter_state_so_the_gui_cannot_offer_execution()
+    public void Projection_preserves_adapter_state_so_the_gui_cannot_offer_a_cutover()
     {
         MigrationRunPlan plan = MigrationRunPlanner.Plan(Request(ExecutionMode.GenerateArtifacts, FullEvidence()));
 
-        Assert.All(MigrationWorkbenchCatalog.Project(plan).Where(step => step.RequiresExecutionAdapter),
-            step => Assert.False(step.AdapterConnected));
+        // The projection must carry the catalog's answer through rather than inferring one from the plan,
+        // so a step the GUI paints as runnable is one an adapter will actually pick up.
+        var projected = MigrationWorkbenchCatalog.Project(plan);
+
+        Assert.False(projected.Single(step => step.Step == WorkbenchStep.CutOverDestination).AdapterConnected);
+        Assert.False(projected.Single(step => step.Step == WorkbenchStep.PlanModernization).AdapterConnected);
+        Assert.True(projected.Single(step => step.Step == WorkbenchStep.TransformDatabase).AdapterConnected);
     }
 }

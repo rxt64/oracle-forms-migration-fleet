@@ -464,8 +464,11 @@ public static class MigrationRunPlanner
 
             new(MigrationPhase.SandboxDataMigration, FleetRole.DataMigrationEngineer, PhaseStatus.Planned,
                 MutationClass.SandboxDatabaseWrite, ExecutionMode.SandboxMigration, RequiresApproval: true,
-                $"Move a representative data set from Oracle into the {database} sandbox and record row counts, failures, and duration.",
-                [nameof(EvidenceKind.DataProfile)],
+                $"Apply the converted schema to the {database} sandbox, load the INSERT statements found in the supplied export, and read row counts back from the target.",
+                // The adapter loads what the export contains; it does not sample, so it never reads a
+                // DataProfile. Requiring one would only teach an operator to tick a box for a document
+                // nothing opens.
+                [nameof(EvidenceKind.DatabaseSchemaExport)],
                 [
                     new ArtifactReference($"{root}/database/{dbFolder}/data-migration", ArtifactKind.DataMigrationScript, "Data movement definitions executed by the adapter against the sandbox only."),
                     new ArtifactReference($"{root}/reports/sandbox-data-migration.json", ArtifactKind.ValidationReport, "Sandbox load results, rejected rows, and duration."),

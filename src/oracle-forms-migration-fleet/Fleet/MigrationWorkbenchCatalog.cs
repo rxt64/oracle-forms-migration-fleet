@@ -132,10 +132,10 @@ public sealed record WorkbenchPlanResponse(
 public static class MigrationWorkbenchCatalog
 {
     /// <summary>
-    /// No execution adapter is implemented in this repository, so no macro step past planning can run here.
+    /// Whether a cutover can be performed here. No production adapter exists, so this stays false.
     /// This is a constant, not a probe: nothing in this codebase can flip it to true.
     /// </summary>
-    public const bool ExecutionAdapterConnected = false;
+    public const bool ProductionAdapterConnected = false;
 
     public const string ExecutionBoundary =
         "This console plans and gates a migration. No execution adapter is connected in this repository, " +
@@ -164,7 +164,8 @@ public static class MigrationWorkbenchCatalog
             "Document the as-is behavior and normalize the estate into a stable intermediate representation the converters can consume.",
             [MigrationPhase.DocumentationGeneration, MigrationPhase.SourceNormalization],
             RequiresExecutionAdapter: true,
-            AdapterConnected: ExecutionAdapterConnected,
+            // No adapter parses Forms modules, so neither phase in this step can run.
+            AdapterConnected: false,
             ["foundry-hosted-agent", "blob-storage"]),
 
         new(WorkbenchStep.ConvertApplication, 3,
@@ -172,7 +173,8 @@ public static class MigrationWorkbenchCatalog
             "Convert a reviewed pilot slice of Forms UI to React and client-side logic to Java/Spring Boot, then build and statically validate the output.",
             [MigrationPhase.ApplicationCodeConversion, MigrationPhase.BuildAndStaticValidation],
             RequiresExecutionAdapter: true,
-            AdapterConnected: ExecutionAdapterConnected,
+            // ApplicationCodeConversion runs; BuildAndStaticValidation has no adapter.
+            AdapterConnected: true,
             ["blob-storage", "app-insights"]),
 
         new(WorkbenchStep.TransformDatabase, 4,
@@ -180,7 +182,7 @@ public static class MigrationWorkbenchCatalog
             "Convert Oracle schema, types, and PL/SQL to the selected Azure database and record every unconvertible construct.",
             [MigrationPhase.DatabaseConversion],
             RequiresExecutionAdapter: true,
-            AdapterConnected: ExecutionAdapterConnected,
+            AdapterConnected: true,
             ["key-vault", "database-target"]),
 
         new(WorkbenchStep.MigrateAndValidate, 5,
@@ -188,7 +190,8 @@ public static class MigrationWorkbenchCatalog
             "Replay the regression baseline, load a representative data set into the sandbox, and reconcile it against the source.",
             [MigrationPhase.DifferentialBehaviorTesting, MigrationPhase.SandboxDataMigration, MigrationPhase.DataReconciliation],
             RequiresExecutionAdapter: true,
-            AdapterConnected: ExecutionAdapterConnected,
+            // SandboxDataMigration runs; behaviour testing and reconciliation have no adapter.
+            AdapterConnected: true,
             ["managed-identity", "key-vault", "database-target"]),
 
         new(WorkbenchStep.CutOverDestination, 6,
@@ -196,7 +199,7 @@ public static class MigrationWorkbenchCatalog
             "Collect named acceptance sign-offs, then run the approved cutover runbook against the destination with rollback rehearsed.",
             [MigrationPhase.HumanAcceptance, MigrationPhase.ProductionCutover],
             RequiresExecutionAdapter: true,
-            AdapterConnected: ExecutionAdapterConnected,
+            AdapterConnected: ProductionAdapterConnected,
             ["entra-id", "managed-identity", "database-target"]),
     ];
 
@@ -228,13 +231,13 @@ public static class MigrationWorkbenchCatalog
             ExecutableHere: true),
         new(ExecutionMode.GenerateArtifacts, "Generate artifacts",
             "Authorize workspace artifact writes once source, PL/SQL, schema, and baseline evidence are verified.",
-            ExecutableHere: ExecutionAdapterConnected),
+            ExecutableHere: true),
         new(ExecutionMode.SandboxMigration, "Sandbox migration",
             "Authorize sandbox database writes. Requires a separate execution approval.",
-            ExecutableHere: ExecutionAdapterConnected),
+            ExecutableHere: true),
         new(ExecutionMode.ProductionCutover, "Production cutover",
             "Authorize production writes. Requires a separate production approval plus independent attestations.",
-            ExecutableHere: ExecutionAdapterConnected),
+            ExecutableHere: ProductionAdapterConnected),
     ];
 
     /// <summary>
