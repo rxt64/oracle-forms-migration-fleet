@@ -201,6 +201,41 @@ public class PlSqlTranslatorTests
         Assert.Contains(translation.Findings, finding => finding.Severity == ConversionSeverity.Unsupported);
     }
 
+    [Theory]
+    [InlineData("RAISE_APPLICATION_ERROR(-20001, 'bad');")]
+    [InlineData("PRAGMA AUTONOMOUS_TRANSACTION; v NUMBER;")]
+    [InlineData("DBMS_OUTPUT.PUT_LINE('x');")]
+    [InlineData("EXECUTE IMMEDIATE 'select 1';")]
+    [InlineData("EXCEPTION WHEN VALUE_ERROR THEN NULL;")]
+    public void A_routine_postgres_cannot_take_is_refused_rather_than_emitted(string body)
+    {
+        // Emitting it does not degrade gracefully: the CREATE fails, and that failure blocks the data
+        // load behind it. Refusing one routine costs a line on the remediation list.
+        PlSqlTranslation translation = PlSqlTranslator.Translate($"""
+            CREATE OR REPLACE PACKAGE BODY PKG_X AS
+                PROCEDURE DO_IT IS
+                BEGIN
+                    {body}
+                END DO_IT;
+            END PKG_X;
+            /
+            """);
+
+        Assert.DoesNotContain(translation.Units, unit => unit.Name.Contains("do_it", StringComparison.Ordinal));
+        Assert.Contains(
+            translation.Findings,
+            finding => finding.Severity == ConversionSeverity.Unsupported
+                       && finding.Reason.StartsWith("Not translated because of", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Translated_units_are_marked_so_they_can_be_applied_apart_from_the_tables()
+    {
+        string rendered = PlSqlTranslator.Render(PlSqlTranslator.Translate(Package).Units);
+
+        Assert.Contains(PlSqlTranslator.ProgramUnitsMarker, rendered, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Routines_are_rendered_before_the_triggers_and_views_that_may_use_them()
     {

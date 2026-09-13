@@ -89,12 +89,19 @@ public sealed class SandboxDataMigrationAdapter(IDataMigrationGateway? gateway =
         string schemaPath = $"{outputRoot}/database/postgresql/schema/schema.sql";
         if (context.Workspace.FileExists(schemaPath))
         {
-            IReadOnlyList<string> ddl = DataMigrationTranslator.SplitSchema(
-                context.Workspace.ReadText(schemaPath, MaxTextBytes));
+            string schema = context.Workspace.ReadText(schemaPath, MaxTextBytes);
+
+            // Tables must be right before rows can land. A translated routine that will not compile is
+            // remediation work, not a reason to refuse the data, so the two are applied and judged apart.
+            int split = schema.IndexOf(PlSqlTranslator.ProgramUnitsMarker, StringComparison.Ordinal);
+            string structural = split < 0 ? schema : schema[..split];
+            string programmable = split < 0 ? string.Empty : schema[split..];
 
             try
             {
-                SchemaDeploymentOutcome prepared = await gateway.PrepareAsync(ddl, cancellationToken).ConfigureAwait(false);
+                SchemaDeploymentOutcome prepared = await gateway
+                    .PrepareAsync(DataMigrationTranslator.SplitSchema(structural), cancellationToken)
+                    .ConfigureAwait(false);
 
                 context.Info(
                     $"Schema: {prepared.Applied.ToString(CultureInfo.InvariantCulture)} objects created, " +
@@ -106,6 +113,30 @@ public sealed class SandboxDataMigrationAdapter(IDataMigrationGateway? gateway =
                         $"{prepared.Failures.Count.ToString(CultureInfo.InvariantCulture)} schema statements failed, so " +
                         "no rows were loaded into a target that does not match the converted schema.",
                         [.. prepared.Failures]);
+                }
+
+                if (programmable.Length > 0)
+                {
+                    SchemaDeploymentOutcome units = await gateway
+                        .PrepareAsync(DataMigrationTranslator.SplitSchema(programmable), cancellationToken)
+                        .ConfigureAwait(false);
+
+                    context.Info(
+                        $"Program units: {units.Applied.ToString(CultureInfo.InvariantCulture)} created, " +
+                        $"{units.AlreadyPresent.ToString(CultureInfo.InvariantCulture)} already present.");
+
+                    foreach (string failure in units.Failures)
+                    {
+                        context.Warn($"Program unit rejected by the target: {failure}");
+                    }
+
+                    if (units.Failures.Count > 0)
+                    {
+                        context.Warn(
+                            $"{units.Failures.Count.ToString(CultureInfo.InvariantCulture)} translated program units did " +
+                            "not compile. The tables are correct and the rows below were still loaded, but that logic is " +
+                            "absent from the target.");
+                    }
                 }
             }
             catch (Exception exception) when (exception is not OperationCanceledException)

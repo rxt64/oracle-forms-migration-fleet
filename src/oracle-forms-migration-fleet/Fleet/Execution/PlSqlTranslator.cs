@@ -32,6 +32,49 @@ public static partial class PlSqlTranslator
 {
     private const string Delimiter = "$legacy$";
 
+    /// <summary>Marks where translated program units begin, so they can be applied apart from the tables.</summary>
+    public const string ProgramUnitsMarker = "-- Program units translated from PL/SQL.";
+
+    /// <summary>
+    /// Constructs with no PostgreSQL equivalent. A routine containing one is not emitted at all.
+    ///
+    /// Emitting it anyway does not degrade gracefully: the CREATE fails, and because the schema is applied
+    /// as a unit that failure blocks the data load behind it. Refusing one routine costs a line on the
+    /// remediation list; emitting it costs the whole migration.
+    /// </summary>
+    private static readonly (string Token, string Reason)[] s_untranslatable =
+    [
+        ("RAISE_APPLICATION_ERROR", "RAISE_APPLICATION_ERROR is an Oracle built-in. PostgreSQL uses RAISE EXCEPTION with its own SQLSTATE, and the -20000 range does not carry across."),
+        ("PRAGMA", "A PRAGMA such as AUTONOMOUS_TRANSACTION has no PostgreSQL equivalent; autonomous work needs a separate connection or dblink."),
+        ("SYS_REFCURSOR", "A REF CURSOR return has no direct equivalent; PostgreSQL returns a refcursor or a set, and the caller changes with it."),
+        ("REF CURSOR", "A REF CURSOR declaration has no direct equivalent in PL/pgSQL."),
+        ("DBMS_OUTPUT", "DBMS_OUTPUT is an Oracle built-in package. PostgreSQL uses RAISE NOTICE, which a client consumes differently."),
+        ("DBMS_", "An Oracle DBMS_ built-in package was called and has no PostgreSQL equivalent."),
+        ("UTL_FILE", "UTL_FILE reads and writes server files; PostgreSQL has no equivalent available to a plain function."),
+        ("UTL_MAIL", "UTL_MAIL sends mail from the database; PostgreSQL has no equivalent."),
+        ("UTL_HTTP", "UTL_HTTP makes outbound calls from the database; PostgreSQL has no equivalent."),
+        ("EXECUTE IMMEDIATE", "Dynamic SQL differs in binding and privilege handling; it is not translated automatically."),
+        ("VALUE_ERROR", "VALUE_ERROR is an Oracle predefined exception with no PostgreSQL condition of that name."),
+        ("BULK COLLECT", "BULK COLLECT has no PL/pgSQL equivalent; the set has to be handled differently."),
+        ("FORALL", "FORALL has no PL/pgSQL equivalent."),
+        ("%NOTFOUND", "Explicit cursor attributes differ in PL/pgSQL and are not translated automatically."),
+        ("%ISOPEN", "Explicit cursor attributes differ in PL/pgSQL and are not translated automatically."),
+    ];
+
+    /// <summary>The first construct in <paramref name="body"/> that has no PostgreSQL equivalent.</summary>
+    private static (string Token, string Reason)? Untranslatable(string body)
+    {
+        foreach ((string token, string reason) in s_untranslatable)
+        {
+            if (body.Contains(token, StringComparison.OrdinalIgnoreCase))
+            {
+                return (token, reason);
+            }
+        }
+
+        return null;
+    }
+
     public static PlSqlTranslation Translate(string? oracleScript)
     {
         List<PlSqlUnit> units = [];
@@ -105,7 +148,7 @@ public static partial class PlSqlTranslator
         }
 
         StringBuilder builder = new();
-        builder.Append("\n-- Program units translated from PL/SQL. Translated, not verified: no test has been\n");
+        builder.Append('\n').Append(ProgramUnitsMarker).Append(" Translated, not verified: no test has been\n");
         builder.Append("-- run against the original behaviour.\n");
 
         foreach (PlSqlUnit unit in emitted.OrderBy(unit => unit.Kind switch
@@ -151,6 +194,16 @@ public static partial class PlSqlTranslator
             string inner = block.Substring(
                 routine.Index + routine.Length,
                 terminator.Index - routine.Length);
+
+            if (Untranslatable(inner) is { } blocker)
+            {
+                findings.Add(new ConversionFinding(
+                    ConversionSeverity.Unsupported,
+                    "Program unit",
+                    $"{package}.{name}",
+                    $"Not translated because of {blocker.Token}. {blocker.Reason}"));
+                continue;
+            }
 
             int begin = TopLevelBeginIndex(inner);
             if (begin < 0)
@@ -221,6 +274,15 @@ public static partial class PlSqlTranslator
         bool forEachRow = trigger.Groups["row"].Success;
 
         string raw = trigger.Groups["body"].Value.Trim();
+
+        if (Untranslatable(raw) is { } blocker)
+        {
+            findings.Add(new ConversionFinding(
+                ConversionSeverity.Unsupported, "Program unit", $"TRIGGER {name}",
+                $"Not translated because of {blocker.Token}. {blocker.Reason}"));
+            return;
+        }
+
         int begin = TopLevelBeginIndex(raw);
         if (begin < 0)
         {
