@@ -72,6 +72,7 @@ public static partial class DataMigrationTranslator
     private static readonly Regex s_hexToRaw = HexToRawPattern();
     private static readonly Regex s_standardHash = StandardHashPattern();
     private static readonly Regex s_programBody = ProgramBodyPattern();
+    private static readonly Regex s_clientDirective = ClientDirectivePattern();
 
     /// <summary>
     /// Removes PL/SQL program bodies before any INSERT is looked for.
@@ -92,8 +93,17 @@ public static partial class DataMigrationTranslator
         });
     }
 
-    private static string RewriteStandardHash(Match match)
-    {
+    /// <summary>
+    /// Removes SQL*Plus client directives, which are not statements and carry no terminator.
+    ///
+    /// Because they have no semicolon, the splitter joins one to the statement that follows it, and the
+    /// combined chunk no longer starts with INSERT. The row is then dropped silently, which is the worst
+    /// possible outcome for a data migration: a load that reports success having quietly lost a record.
+    /// </summary>
+    private static string StripClientDirectives(string script) =>
+        s_clientDirective.Replace(script, string.Empty);
+
+    private static string RewriteStandardHash(Match match)    {
         string value = match.Groups["value"].Value.Trim();
         string algorithm = match.Groups["algorithm"].Value.Trim().Trim('\'').ToUpperInvariant();
 
@@ -114,7 +124,7 @@ public static partial class DataMigrationTranslator
         List<DataMigrationStatement> statements = [];
         List<string> ignored = [];
 
-        foreach (string raw in SplitStatements(StripProgramBodies(oracleScript ?? string.Empty, ignored)))
+        foreach (string raw in SplitStatements(StripClientDirectives(StripProgramBodies(oracleScript ?? string.Empty, ignored))))
         {
             string statement = raw.Trim();
             if (statement.Length == 0)
@@ -229,6 +239,13 @@ public static partial class DataMigrationTranslator
         RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.Multiline,
         4000)]
     private static partial Regex ProgramBodyPattern();
+
+    // SET is matched only with a known SQL*Plus option so that the SET clause of an UPDATE is left alone.
+    [GeneratedRegex(
+        @"^[ \t]*(WHENEVER|SPOOL|PROMPT|SHOW|CONNECT|REMARK|SET[ \t]+(DEFINE|ECHO|FEEDBACK|HEADING|LINESIZE|PAGESIZE|SERVEROUTPUT|TERMOUT|TRIMSPOOL|VERIFY|SQLBLANKLINES|ESCAPE|TIMING|TAB))\b[^\n]*$",
+        RegexOptions.IgnoreCase | RegexOptions.Multiline,
+        2000)]
+    private static partial Regex ClientDirectivePattern();
 }
 
 /// <summary>Renders the reconciliation a data migration produced.</summary>

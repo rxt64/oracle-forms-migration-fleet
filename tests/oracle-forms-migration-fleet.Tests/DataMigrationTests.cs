@@ -94,6 +94,40 @@ public class DataMigrationTranslatorTests
     }
 
     [Fact]
+    public void A_terminator_less_client_directive_does_not_swallow_the_next_row()
+    {
+        // SET DEFINE OFF carries no semicolon, so the splitter joined it to the INSERT that followed and
+        // the row was dropped without a failure. A load that quietly loses a record is the worst outcome.
+        const string script = """
+            SET DEFINE OFF
+
+            INSERT INTO bank_account_request (request_id) VALUES (1001);
+            INSERT INTO bank_account_request (request_id) VALUES (1002);
+            """;
+
+        IReadOnlyList<DataMigrationStatement> statements = Translate(script);
+
+        Assert.Equal(2, statements.Count);
+        Assert.Contains(statements, statement => statement.Sql.Contains("1001", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void The_set_clause_of_an_update_is_not_mistaken_for_a_client_directive()
+    {
+        const string script = """
+            UPDATE bank_account
+            SET status = 'N'
+            WHERE account_id = 1;
+            INSERT INTO bank_account (account_id) VALUES (2);
+            """;
+
+        DataMigrationStatement statement = Assert.Single(Translate(script));
+
+        Assert.Contains("bank_account", statement.Table, StringComparison.Ordinal);
+        Assert.Contains("VALUES (2)", statement.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Standard_hash_becomes_the_postgres_digest_of_the_same_bytes()
     {
         DataMigrationStatement statement = Assert.Single(
