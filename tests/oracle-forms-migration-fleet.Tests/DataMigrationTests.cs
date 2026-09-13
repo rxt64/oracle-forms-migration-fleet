@@ -100,7 +100,11 @@ public class DataMigrationTranslatorTests
             Translate("INSERT INTO t (h) VALUES (STANDARD_HASH('demo1234', 'SHA256'));"));
 
         Assert.DoesNotContain("STANDARD_HASH", statement.Sql, StringComparison.OrdinalIgnoreCase);
+
+        // Oracle returns RAW and the schema converter maps RAW to bytea, so the digest must not be
+        // rendered as hex text: that is the right value in a type the column rejects.
         Assert.Contains("sha256(convert_to('demo1234', 'UTF8'))", statement.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("encode(", statement.Sql, StringComparison.Ordinal);
     }
 
     [Fact]

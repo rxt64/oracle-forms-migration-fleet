@@ -97,13 +97,14 @@ public static partial class DataMigrationTranslator
         string value = match.Groups["value"].Value.Trim();
         string algorithm = match.Groups["algorithm"].Value.Trim().Trim('\'').ToUpperInvariant();
 
-        // Oracle returns uppercase hex; encode() returns lowercase, so the digests differ in case only.
+        // Oracle STANDARD_HASH returns RAW, and the schema converter maps RAW to bytea, so the digest has
+        // to stay binary. Rendering it as hex text produces the right bytes in a type the column rejects.
         return algorithm switch
         {
-            "SHA256" or "SHA-256" => $"upper(encode(sha256(convert_to({value}, 'UTF8')), 'hex'))",
-            "SHA384" or "SHA-384" => $"upper(encode(sha384(convert_to({value}, 'UTF8')), 'hex'))",
-            "SHA512" or "SHA-512" => $"upper(encode(sha512(convert_to({value}, 'UTF8')), 'hex'))",
-            "MD5" => $"upper(md5({value}))",
+            "SHA256" or "SHA-256" => $"sha256(convert_to({value}, 'UTF8'))",
+            "SHA384" or "SHA-384" => $"sha384(convert_to({value}, 'UTF8'))",
+            "SHA512" or "SHA-512" => $"sha512(convert_to({value}, 'UTF8'))",
+            "MD5" => $"decode(md5({value}), 'hex')",
             _ => match.Value,
         };
     }
