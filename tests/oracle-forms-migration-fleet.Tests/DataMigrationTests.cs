@@ -94,6 +94,39 @@ public class DataMigrationTranslatorTests
     }
 
     [Fact]
+    public void A_dollar_quoted_body_is_kept_whole_rather_than_split_on_its_semicolons()
+    {
+        // A PL/pgSQL body is full of semicolons; splitting inside one yields fragments that each fail.
+        const string schema = """
+            CREATE TABLE t (id bigint);
+            CREATE OR REPLACE FUNCTION f() RETURNS integer
+            AS $legacy$
+            DECLARE
+                v integer;
+            BEGIN
+                SELECT 1 INTO v;
+                RETURN v;
+            END;
+            $legacy$ LANGUAGE plpgsql;
+            """;
+
+        IReadOnlyList<string> statements = DataMigrationTranslator.SplitSchema(schema);
+
+        Assert.Equal(2, statements.Count);
+        Assert.Contains("RETURN v;", statements[1], StringComparison.Ordinal);
+        Assert.EndsWith("LANGUAGE plpgsql", statements[1], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_semicolon_in_a_line_comment_does_not_end_the_statement()
+    {
+        IReadOnlyList<string> statements = DataMigrationTranslator.SplitSchema(
+            "CREATE TABLE t ( -- id; name;\n id bigint);");
+
+        Assert.Single(statements);
+    }
+
+    [Fact]
     public void A_terminator_less_client_directive_does_not_swallow_the_next_row()
     {
         // SET DEFINE OFF carries no semicolon, so the splitter joined it to the INSERT that followed and

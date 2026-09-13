@@ -187,14 +187,52 @@ public static partial class DataMigrationTranslator
             .Select(line => line.Trim())
             .All(line => line.Length == 0 || line.StartsWith("--", StringComparison.Ordinal));
 
+    /// <summary>
+    /// Splits on semicolons outside string literals, dollar-quoted bodies, and line comments.
+    ///
+    /// A PL/pgSQL body is full of semicolons, so splitting naively would shred every translated routine
+    /// into fragments that each fail on their own.
+    /// </summary>
     private static IEnumerable<string> SplitStatements(string script)
     {
         StringBuilder current = new();
         bool inString = false;
+        string? dollarTag = null;
 
         for (int index = 0; index < script.Length; index++)
         {
             char character = script[index];
+
+            if (dollarTag is not null)
+            {
+                if (character == '$' && HasTagAt(script, index, dollarTag))
+                {
+                    current.Append(dollarTag);
+                    index += dollarTag.Length - 1;
+                    dollarTag = null;
+                    continue;
+                }
+
+                current.Append(character);
+                continue;
+            }
+
+            if (!inString && character == '$' && TryReadTag(script, index, out string tag))
+            {
+                dollarTag = tag;
+                current.Append(tag);
+                index += tag.Length - 1;
+                continue;
+            }
+
+            if (!inString && character == '-' && index + 1 < script.Length && script[index + 1] == '-')
+            {
+                int newline = script.IndexOf('\n', index);
+                int stop = newline < 0 ? script.Length : newline;
+                current.Append(script, index, stop - index);
+                index = stop - 1;
+                continue;
+            }
 
             if (character == '\'')
             {
@@ -218,6 +256,35 @@ public static partial class DataMigrationTranslator
             yield return current.ToString();
         }
     }
+
+    /// <summary>Reads a dollar-quote tag such as <c>$$</c> or <c>$legacy$</c> at <paramref name="index"/>.</summary>
+    private static bool TryReadTag(string script, int index, out string tag)
+    {
+        tag = string.Empty;
+        int cursor = index + 1;
+
+        while (cursor < script.Length && (char.IsLetterOrDigit(script[cursor]) || script[cursor] == '_'))
+        {
+            // A tag may not begin with a digit, which is what keeps $1 from reading as one.
+            if (cursor == index + 1 && char.IsDigit(script[cursor]))
+            {
+                return false;
+            }
+
+            cursor++;
+        }
+
+        if (cursor >= script.Length || script[cursor] != '$')
+        {
+            return false;
+        }
+
+        tag = script[index..(cursor + 1)];
+        return true;
+    }
+
+    private static bool HasTagAt(string script, int index, string tag) =>
+        index + tag.Length <= script.Length && string.CompareOrdinal(script, index, tag, 0, tag.Length) == 0;
 
     [GeneratedRegex(@"^\s*INSERT\s+INTO\s+(?<table>[A-Za-z_][\w$#]*)", RegexOptions.IgnoreCase, 2000)]
     private static partial Regex InsertPattern();
