@@ -120,7 +120,7 @@ public sealed class ApplicationCodeConversionAdapter(IArtifactReviewer? reviewer
         }
 
         string reportPath = $"{appRoot}/CONVERSION_NOTES.md";
-        context.Workspace.WriteText(reportPath, RenderNotes(context.Request.ApplicationName, conversion, schema, formsModules));
+        context.Workspace.WriteText(reportPath, RenderNotes(context.Request.ApplicationName, conversion, schema, formsModules, forms.Count));
 
         List<ArtifactReference> artifacts =
         [
@@ -169,7 +169,8 @@ public sealed class ApplicationCodeConversionAdapter(IArtifactReviewer? reviewer
         string applicationName,
         ApplicationConversion conversion,
         OracleSchema schema,
-        int formsModules)
+        int formsModules,
+        int formsRead)
     {
         StringBuilder builder = new();
         builder.AppendLine("# Application conversion notes").AppendLine();
@@ -189,11 +190,19 @@ public sealed class ApplicationCodeConversionAdapter(IArtifactReviewer? reviewer
         builder.AppendLine().AppendLine("## Not generated, and why").AppendLine();
 
         if (formsModules > 0)
+        if (formsRead > 0)
+        {
+            builder.Append("- **").Append(formsRead.ToString(CultureInfo.InvariantCulture));
+            builder.AppendLine(" Forms module(s) were read from an XML export.** Blocks, item order, prompts, and required");
+            builder.AppendLine("  flags came from the form. Canvas geometry, window navigation, and trigger behaviour did not.");
+        }
+        else if (formsModules > 0)
         {
             builder.Append("- **").Append(formsModules.ToString(CultureInfo.InvariantCulture));
             builder.AppendLine(" Oracle Forms modules were not converted.** Their contents are a proprietary binary that");
             builder.AppendLine("  requires Forms Builder or the Forms JDAPI, so no trigger, block, or navigation rule was read.");
             builder.AppendLine("  The screens here are CRUD over the converted tables and do not reproduce the original UI.");
+            builder.AppendLine("  Export them with frmf2xml and supply the XML to have the screens follow the real form.");
         }
         else
         {
