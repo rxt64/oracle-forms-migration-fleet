@@ -106,12 +106,16 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 if (modelConfigured)
 {
     // Azure Developer CLI authenticates local runs; the hosted service falls back to its managed identity.
+    // The identity must be the one assigned to the container app: asking for a system-assigned token on a
+    // user-assigned host fails at the token call, which surfaces only as a dead review agent.
     // The model handles intake dialogue and reporting; the deterministic fleet, exposed as tools, owns
     // every stage transition and the target platform recommendation.
     var credential = new ChainedTokenCredential(
         // The default process timeout is short enough that a cold azd invocation loses the race.
         new AzureDeveloperCliCredential(new AzureDeveloperCliCredentialOptions { ProcessTimeout = TimeSpan.FromSeconds(30) }),
-        new ManagedIdentityCredential(ManagedIdentityId.SystemAssigned));
+        new ManagedIdentityCredential(managedIdentityConfigured
+            ? ManagedIdentityId.FromUserAssignedClientId(managedIdentityClientId!)
+            : ManagedIdentityId.SystemAssigned));
 
     IChatClient modelClient = new AzureOpenAIClient(openAiEndpoint!, credential)
         .GetChatClient(deployment!)

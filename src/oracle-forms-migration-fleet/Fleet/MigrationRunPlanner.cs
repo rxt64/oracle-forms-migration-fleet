@@ -172,14 +172,25 @@ public static class MigrationRunPlanner
                 "workspace-relative backing artifact; rooted, URI, traversal, and credential-like fields are rejected.");
         }
 
+        // The ladder is climbed per phase, not on the union of every phase's evidence. Gating the sandbox
+        // rung on Forms binaries would block loading rows into PostgreSQL for want of a file no data phase
+        // opens, and the only way past it would be to tick a box the operator cannot stand behind.
+        bool AnyPhaseClearsEvidence(MutationClass mutation) =>
+            Blueprint(request).Any(candidate =>
+                candidate.Mutation == mutation && RelevantTo(candidate.Phase, generationBlockers).Count == 0);
+
         ExecutionMode authorized = ExecutionMode.PlanOnly;
-        if (generationBlockers.Count == 0)
+        if (generationBlockers.Count == 0 || AnyPhaseClearsEvidence(MutationClass.WorkspaceArtifactWrite))
         {
             authorized = ExecutionMode.GenerateArtifacts;
-            if (sandboxBlockers.Count == 0)
+
+            if (sandboxBlockers.Count == 0 && AnyPhaseClearsEvidence(MutationClass.SandboxDatabaseWrite))
             {
                 authorized = ExecutionMode.SandboxMigration;
-                if (productionBlockers.Count == 0)
+
+                // Production keeps the union: a cutover rests on claims about the whole application,
+                // including the Forms behaviour nothing here has read.
+                if (productionBlockers.Count == 0 && generationBlockers.Count == 0)
                 {
                     authorized = ExecutionMode.ProductionCutover;
                 }
@@ -274,7 +285,10 @@ public static class MigrationRunPlanner
         IReadOnlyList<string> sandboxBlockers,
         IReadOnlyList<string> productionBlockers)
     {
-        if (phase.RequiredMode <= authorized)
+        // Clearing the mode ladder is not the same as clearing your own evidence. Another phase may have
+        // raised the authorized mode, so a mutating phase is still held to what it individually relies on.
+        if (phase.RequiredMode <= authorized &&
+            (phase.Mutation == MutationClass.None || RelevantTo(phase.Phase, generationBlockers).Count == 0))
         {
             return ResolveInputs(phase, request);
         }

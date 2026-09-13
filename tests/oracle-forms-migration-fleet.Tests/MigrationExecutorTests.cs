@@ -141,6 +141,36 @@ public class MigrationExecutorTests
         Assert.Equal(1, adapter.Invocations);
     }
 
+    [Fact]
+    public void An_approved_sandbox_run_is_authorized_without_forms_evidence()
+    {
+        IReadOnlyList<EvidenceItem> noForms =
+            [.. FullEvidence().Where(item => item.Kind is not (EvidenceKind.FormsModuleSource or EvidenceKind.FormsXmlExport))];
+
+        MigrationRunPlan plan = MigrationRunPlanner.Plan(Request(
+            mode: ExecutionMode.SandboxMigration,
+            evidence: noForms,
+            executionApproval: Requests.Approved("release-manager@contoso.com")));
+
+        // Loading rows into PostgreSQL opens no .fmb, so requiring one would only invite a false tick.
+        Assert.Equal(ExecutionMode.SandboxMigration, plan.AuthorizedMode);
+        Assert.Equal(
+            PhaseStatus.Planned,
+            plan.Phases.Single(phase => phase.Phase == MigrationPhase.SandboxDataMigration).Status);
+    }
+
+    [Fact]
+    public void A_sandbox_run_without_its_own_approval_is_still_refused()
+    {
+        MigrationRunPlan plan = MigrationRunPlanner.Plan(Request(
+            mode: ExecutionMode.SandboxMigration,
+            evidence: FullEvidence()));
+
+        Assert.Equal(
+            PhaseStatus.BlockedOnApproval,
+            plan.Phases.Single(phase => phase.Phase == MigrationPhase.SandboxDataMigration).Status);
+    }
+
     [Theory]
     [InlineData(MigrationPhase.DatabaseConversion)]
     [InlineData(MigrationPhase.ApplicationCodeConversion)]
