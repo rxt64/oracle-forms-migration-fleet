@@ -94,6 +94,22 @@ public class SourceWorkspaceTests : IDisposable
     }
 
     [Fact]
+    public async Task Supplied_workbench_run_state_is_removed_before_the_workspace_is_available()
+    {
+        using var service = new SourceWorkspaceService(_root);
+        using MemoryStream archive = BuildArchive(
+            ("forms/ORDERS.fmb", "form"),
+            (".fleet-run/out/database/postgresql/schema/program-unit-repairs.sql", "untrusted repair"));
+
+        List<SourceProgress> progress = await Collect(service.ExtractAsync("user-a", archive, "orders.zip", CancellationToken.None));
+
+        string workspaceId = Assert.Single(progress, step => step.Level == "done").Text;
+        string root = service.ResolveRoot("user-a", workspaceId)!;
+        Assert.False(Directory.Exists(Path.Combine(root, WorkbenchExecution.OutputRoot)));
+        Assert.True(File.Exists(Path.Combine(root, "forms", "ORDERS.fmb")));
+    }
+
+    [Fact]
     public async Task Build_descriptors_beside_forms_code_are_not_counted_as_xml_exports()
     {
         using var service = new SourceWorkspaceService(_root);

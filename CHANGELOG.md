@@ -6,6 +6,18 @@ Notable changes to behaviour, with the reasoning that is not visible in a diff.
 
 ### Added
 
+- Compiler-driven PL/pgSQL repair (`Fleet/Execution/ProgramUnitRepairLoop.cs`). PostgreSQL deployment
+  failures now retain the rejected statement with its diagnostic and enter a bounded two-attempt repair
+  cycle during the execution-approved sandbox phase. Model output may change only a routine's dollar-quoted
+  body; routine identity, parameters, return contract, language, security clauses, and all surrounding DDL
+  must remain unchanged. PostgreSQL compilation, not the model, accepts a revision.
+
+  Accepted revisions and an audit report are returned as artifacts and survive workbench reruns. Every reuse
+  is compared with the newly generated routine and recompiled before it is trusted. Source ingestion removes
+  supplied `.fleet-run` state so an uploaded archive or repository cannot pre-seed an accepted repair.
+  Partially accepted sets are retained and merged across runs. If any routine remains rejected, valid rows
+  are still loaded but the phase fails and cannot produce `SandboxMigrationCompleted`.
+
 - Application tier generation (`Fleet/Execution/ApplicationCodeEmitter.cs` and its adapter).
   `ApplicationCodeConversion` had no adapter, so every run reported the phase as unperformed and a run
   converted the schema while leaving the application on Oracle. It now emits JPA entities, Spring Data

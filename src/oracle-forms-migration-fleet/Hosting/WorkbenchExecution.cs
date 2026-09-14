@@ -49,6 +49,7 @@ public static class WorkbenchExecution
     public const long MaxPreviewBytes = 512L * 1024;
 
     private const string UnknownWorkspace = "No source workspace with that identifier is available for this session.";
+    private const string AcceptedRepairsFile = "program-unit-repairs.sql";
 
     private static readonly HashSet<string> s_previewable = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -129,7 +130,19 @@ public static class WorkbenchExecution
 
         try
         {
+            List<(string RelativePath, byte[] Content)> acceptedRepairs =
+            [.. Directory.EnumerateFiles(path, AcceptedRepairsFile, SearchOption.AllDirectories)
+                .Where(file => new FileInfo(file).Length <= MaxPreviewBytes)
+                .Select(file => (System.IO.Path.GetRelativePath(path, file), File.ReadAllBytes(file)))];
+
             Directory.Delete(path, recursive: true);
+
+            foreach ((string relativePath, byte[] content) in acceptedRepairs)
+            {
+                string restored = System.IO.Path.Combine(path, relativePath);
+                Directory.CreateDirectory(System.IO.Path.GetDirectoryName(restored)!);
+                File.WriteAllBytes(restored, content);
+            }
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {

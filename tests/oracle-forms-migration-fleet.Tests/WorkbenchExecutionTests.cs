@@ -218,6 +218,36 @@ public class WorkbenchExecutionTests : IDisposable
         Assert.True(File.Exists(Path.Combine(root, "forms", "ORDERS.fmb")));
     }
 
+    [Fact]
+    public async Task Resetting_output_preserves_only_compiler_accepted_program_unit_repairs()
+    {
+        (SourceWorkspaceService service, string workspaceId) = await SeedAsync();
+        using SourceWorkspaceService owned = service;
+
+        string root = service.ResolveRoot(Owner, workspaceId)!;
+        WriteArtifact(service, workspaceId, "out/database/postgresql/schema/program-unit-repairs.sql", "accepted repair");
+        WriteArtifact(service, workspaceId, "out/database/postgresql/schema/schema.sql", "stale schema");
+
+        WorkbenchExecution.ResetOutput(root);
+
+        Assert.True(File.Exists(Path.Combine(
+            root,
+            WorkbenchExecution.OutputRoot,
+            "out",
+            "database",
+            "postgresql",
+            "schema",
+            "program-unit-repairs.sql")));
+        Assert.False(File.Exists(Path.Combine(
+            root,
+            WorkbenchExecution.OutputRoot,
+            "out",
+            "database",
+            "postgresql",
+            "schema",
+            "schema.sql")));
+    }
+
     private static void WriteArtifact(SourceWorkspaceService service, string workspaceId, string relativePath, string content)
     {
         string absolute = Path.Combine(

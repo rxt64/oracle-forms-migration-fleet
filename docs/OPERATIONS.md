@@ -75,6 +75,18 @@ Expect the newest revision `Healthy`, `RunningAtMaxScale`, `traffic: 100`, and t
 Then load the workbench in a browser and exercise one real acquisition — a green revision only proves the
 process started.
 
+For a sandbox migration containing translated program units, inspect these exported artifacts:
+
+- `database/postgresql/schema/program-unit-repairs.sql` contains only revisions PostgreSQL compiled;
+- `database/postgresql/schema/program-unit-repair-audit.md` records attempted SQL, compiler acceptance,
+  and outstanding diagnostics;
+- `data/migration-report.md` records row-loading outcomes independently from routine compilation.
+
+The sandbox phase intentionally reports failure when rows loaded but program units remain rejected. This
+preserves the useful data-load result without issuing `SandboxMigrationCompleted` for an incomplete target.
+On a rerun, accepted repair SQL is preserved, checked against the newly generated routine envelopes, and
+recompiled. A model call occurs only for routines that remain unresolved after that revalidation.
+
 ## Rollback
 
 Revisions are immutable, so rolling back is pointing traffic at the previous one:
@@ -118,5 +130,10 @@ traffic moves. Re-probe before debugging the route.
 `WorkbenchEndpoints.ServeAsset` sends `Cache-Control: no-cache` plus `Last-Modified`. When verifying a
 fresh deploy through browser automation, disable the HTTP cache (CDP `Network.setCacheDisabled`) or you
 will test the previous build and believe your change did not ship.
+
+**The repair model can return HTTP 429.** The compiler-driven loop retries a transient rate-limit response
+once within its two-attempt budget. If capacity remains unavailable, the phase keeps the original compiler
+diagnostics, writes the repair audit, and fails without an attestation. Increase review-model capacity or
+rerun later; do not treat a missing model revision as successful migration.
 
 **PowerShell:** `$env:ProgramFiles(x86)` is a parse error; use `${env:ProgramFiles(x86)}`.

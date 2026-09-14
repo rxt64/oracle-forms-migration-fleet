@@ -50,7 +50,8 @@ public class MigrationExecutorTests
     private sealed class RecordingAdapter(
         MigrationPhase phase,
         bool succeeds = true,
-        Action<PhaseExecutionContext>? work = null) : IPhaseAdapter
+        Action<PhaseExecutionContext>? work = null,
+        bool returnsArtifactOnFailure = false) : IPhaseAdapter
     {
         public int Invocations { get; private set; }
 
@@ -61,15 +62,42 @@ public class MigrationExecutorTests
             Invocations++;
             work?.Invoke(context);
 
+            ArtifactReference artifact = new(
+                $"{context.OutputRoot}/reports/{phase}.json",
+                ArtifactKind.ValidationReport,
+                "Recorded by the test adapter.");
+
             return Task.FromResult(succeeds
-                ? PhaseExecutionResult.Success(
-                    [new ArtifactReference($"{context.OutputRoot}/reports/{phase}.json", ArtifactKind.ValidationReport, "Recorded by the test adapter.")])
-                : PhaseExecutionResult.Failure("The test adapter failed on purpose."));
+                ? PhaseExecutionResult.Success([artifact])
+                : new PhaseExecutionResult(
+                    false,
+                    returnsArtifactOnFailure ? [artifact] : [],
+                    [],
+                    "The test adapter failed on purpose."));
         }
     }
 
     private static PhaseOutcome Outcome(MigrationExecutionResult result, MigrationPhase phase) =>
         result.Phases.Single(outcome => outcome.Phase == phase);
+
+    [Fact]
+    public async Task A_failed_phase_retains_its_diagnostic_artifacts_without_attesting()
+    {
+        using TemporaryWorkspace workspace = SeededWorkspace();
+        RecordingAdapter adapter = new(
+            MigrationPhase.SandboxDataMigration,
+            succeeds: false,
+            returnsArtifactOnFailure: true);
+
+        MigrationExecutionResult result = await new MigrationExecutor(workspace.Root, [adapter])
+            .ExecuteAsync(
+                Request(mode: ExecutionMode.SandboxMigration, executionApproval: Requests.Approved("release@contoso.com")),
+                Operator);
+
+        ArtifactReference artifact = Assert.Single(Outcome(result, MigrationPhase.SandboxDataMigration).Artifacts);
+        Assert.Contains(artifact, result.Artifacts);
+        Assert.Empty(result.Attestations);
+    }
 
     [Fact]
     public async Task A_phase_the_planner_blocks_is_never_executed()

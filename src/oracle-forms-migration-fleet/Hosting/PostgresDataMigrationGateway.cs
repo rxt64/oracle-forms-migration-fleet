@@ -36,6 +36,7 @@ public sealed class PostgresDataMigrationGateway(
         int applied = 0;
         int alreadyPresent = 0;
         List<string> failures = [];
+        List<SchemaStatementFailure> statementFailures = [];
 
         foreach (string statement in statements)
         {
@@ -53,11 +54,16 @@ public sealed class PostgresDataMigrationGateway(
             }
             catch (PostgresException exception)
             {
-                failures.Add($"{exception.SqlState} {exception.MessageText}");
+                string diagnostic = $"{exception.SqlState} {exception.MessageText}";
+                failures.Add(diagnostic);
+                statementFailures.Add(new SchemaStatementFailure(statement, diagnostic));
             }
         }
 
-        return new SchemaDeploymentOutcome(applied, alreadyPresent, failures);
+        return new SchemaDeploymentOutcome(applied, alreadyPresent, failures)
+        {
+            StatementFailures = statementFailures,
+        };
     }
 
     public async Task<IReadOnlyList<TableRowCount>> CountAsync(

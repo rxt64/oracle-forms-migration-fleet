@@ -1,7 +1,9 @@
 // Copyright (c) Microsoft. All rights reserved.
 
 using OracleFormsMigrationFleet.Fleet;
+using OracleFormsMigrationFleet.Fleet.Agents;
 using OracleFormsMigrationFleet.Fleet.Execution;
+using OracleFormsMigrationFleet.Fleet.Execution.Adapters;
 
 namespace OracleFormsMigrationFleet.Tests;
 
@@ -189,6 +191,10 @@ internal sealed class StubDataGateway(DataMigrationOutcome outcome) : IDataMigra
 
     public IReadOnlyList<string>? Prepared { get; private set; }
 
+    public List<IReadOnlyList<string>> PreparedBatches { get; } = [];
+
+    public Queue<SchemaDeploymentOutcome> PrepareOutcomes { get; } = [];
+
     public SchemaDeploymentOutcome PrepareOutcome { get; set; } = new(0, 0, []);
 
     /// <summary>What the target reports when reconciliation reads it back.</summary>
@@ -245,7 +251,8 @@ internal sealed class StubDataGateway(DataMigrationOutcome outcome) : IDataMigra
         CancellationToken cancellationToken)
     {
         Prepared = statements;
-        return Task.FromResult(PrepareOutcome);
+        PreparedBatches.Add(statements);
+        return Task.FromResult(PrepareOutcomes.TryDequeue(out SchemaDeploymentOutcome? next) ? next : PrepareOutcome);
     }
 
     public Task<DataMigrationOutcome> ApplyAsync(
@@ -255,6 +262,199 @@ internal sealed class StubDataGateway(DataMigrationOutcome outcome) : IDataMigra
     {
         Applied = statements;
         return Task.FromResult(outcome);
+    }
+}
+
+public class ProgramUnitRepairLoopTests
+{
+    private const string Broken = "CREATE OR REPLACE FUNCTION hr.raise_salary() RETURNS void AS $body$ BEGIN broken; END; $body$ LANGUAGE plpgsql";
+    private const string Fixed = "CREATE OR REPLACE FUNCTION hr.raise_salary() RETURNS void AS $body$ BEGIN NULL; END; $body$ LANGUAGE plpgsql";
+
+    private static SchemaDeploymentOutcome Rejected(string statement = Broken, string diagnostic = "42703 broken does not exist") =>
+        new(0, 0, [diagnostic])
+        {
+            StatementFailures = [new SchemaStatementFailure(statement, diagnostic)],
+        };
+
+    [Fact]
+    public async Task A_repair_is_accepted_only_after_the_target_compiles_it()
+    {
+        StubDataGateway gateway = new(new DataMigrationOutcome(0, 0, [], []));
+        gateway.PrepareOutcomes.Enqueue(new SchemaDeploymentOutcome(1, 0, []));
+        ScriptedAgent repairer = new(
+            FleetRole.DatabaseConverter,
+            "repair",
+            new FleetAgentResult(true, Fixed, [], "fixed"));
+
+        ProgramUnitRepairOutcome result = await new ProgramUnitRepairLoop(repairer)
+            .RunAsync("HRMS", gateway, Rejected(), null, CancellationToken.None);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(1, result.Attempts);
+        Assert.Equal(Fixed, Assert.Single(result.AcceptedStatements));
+        Assert.Equal(Fixed, Assert.Single(Assert.Single(gateway.PreparedBatches)));
+    }
+
+    [Fact]
+    public async Task A_repair_that_adds_a_non_routine_statement_is_never_executed()
+    {
+        StubDataGateway gateway = new(new DataMigrationOutcome(0, 0, [], []));
+        ScriptedAgent repairer = new(
+            FleetRole.DatabaseConverter,
+            "repair",
+            new FleetAgentResult(true, Fixed + "; CREATE TABLE injected (id bigint)", [], "expanded scope"));
+
+        ProgramUnitRepairOutcome result = await new ProgramUnitRepairLoop(repairer)
+            .RunAsync("HRMS", gateway, Rejected(), null, CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Empty(gateway.PreparedBatches);
+        Assert.Contains("non-routine", Assert.Single(result.OutstandingFailures), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_repair_that_changes_the_parameter_signature_is_never_executed()
+    {
+        const string original = "CREATE OR REPLACE FUNCTION hr.raise_salary(employee_id bigint) RETURNS void AS $body$ BEGIN broken; END; $body$ LANGUAGE plpgsql";
+        const string changed = "CREATE OR REPLACE FUNCTION hr.raise_salary(employee_id text) RETURNS void AS $body$ BEGIN NULL; END; $body$ LANGUAGE plpgsql";
+        StubDataGateway gateway = new(new DataMigrationOutcome(0, 0, [], []));
+        ScriptedAgent repairer = new(
+            FleetRole.DatabaseConverter,
+            "repair",
+            new FleetAgentResult(true, changed, [], "changed signature"));
+
+        ProgramUnitRepairOutcome result = await new ProgramUnitRepairLoop(repairer)
+            .RunAsync("HRMS", gateway, Rejected(original), null, CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Empty(gateway.PreparedBatches);
+    }
+
+    [Fact]
+    public async Task A_dollar_tag_inside_a_default_string_cannot_hide_a_contract_change()
+    {
+        const string original = "CREATE OR REPLACE FUNCTION hr.raise_salary(note text DEFAULT 'value $body$ tail') RETURNS void AS $body$ BEGIN broken; END; $body$ LANGUAGE plpgsql";
+        const string changed = "CREATE OR REPLACE FUNCTION hr.raise_salary(note text DEFAULT 'value $body$ changed') RETURNS text AS $body$ BEGIN RETURN 'x'; END; $body$ LANGUAGE plpgsql";
+        StubDataGateway gateway = new(new DataMigrationOutcome(0, 0, [], []));
+        ScriptedAgent repairer = new(
+            FleetRole.DatabaseConverter,
+            "repair",
+            new FleetAgentResult(true, changed, [], "changed contract"));
+
+        ProgramUnitRepairOutcome result = await new ProgramUnitRepairLoop(repairer)
+            .RunAsync("HRMS", gateway, Rejected(original), null, CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Empty(gateway.PreparedBatches);
+    }
+
+    [Fact]
+    public async Task Compiler_failures_stop_at_the_repair_budget()
+    {
+        StubDataGateway gateway = new(new DataMigrationOutcome(0, 0, [], []));
+        gateway.PrepareOutcomes.Enqueue(Rejected(Fixed, "42703 first retry failed"));
+        gateway.PrepareOutcomes.Enqueue(Rejected(Fixed, "42703 second retry failed"));
+        ScriptedAgent repairer = new(
+            FleetRole.DatabaseConverter,
+            "repair",
+            new FleetAgentResult(true, Fixed, [], "still trying"));
+
+        ProgramUnitRepairOutcome result = await new ProgramUnitRepairLoop(repairer, maxAttempts: 2)
+            .RunAsync("HRMS", gateway, Rejected(), null, CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(2, result.Attempts);
+        Assert.Equal(2, repairer.Calls);
+        Assert.Equal(2, gateway.PreparedBatches.Count);
+        Assert.Contains("second retry failed", Assert.Single(result.OutstandingFailures), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task An_unattributed_compiler_failure_accepts_no_statement()
+    {
+        StubDataGateway gateway = new(new DataMigrationOutcome(0, 0, [], []));
+        gateway.PrepareOutcomes.Enqueue(new SchemaDeploymentOutcome(0, 0, ["connection lost after compilation"]));
+        ScriptedAgent repairer = new(
+            FleetRole.DatabaseConverter,
+            "repair",
+            new FleetAgentResult(true, Fixed, [], "fixed"));
+
+        ProgramUnitRepairOutcome result = await new ProgramUnitRepairLoop(repairer)
+            .RunAsync("HRMS", gateway, Rejected(), null, CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Empty(result.AcceptedStatements);
+        Assert.Contains("connection lost", Assert.Single(result.OutstandingFailures), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_transient_rate_limit_uses_the_next_bounded_attempt()
+    {
+        StubDataGateway gateway = new(new DataMigrationOutcome(0, 0, [], []));
+        gateway.PrepareOutcomes.Enqueue(new SchemaDeploymentOutcome(1, 0, []));
+        ScriptedAgent repairer = new(
+            FleetRole.DatabaseConverter,
+            "repair",
+            FleetAgentResult.Failed("HTTP 429 rate limit exceeded"),
+            new FleetAgentResult(true, Fixed, [], "fixed"));
+
+        ProgramUnitRepairOutcome result = await new ProgramUnitRepairLoop(repairer, maxAttempts: 2)
+            .RunAsync("HRMS", gateway, Rejected(), null, CancellationToken.None);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(2, result.Attempts);
+        Assert.Equal(2, repairer.Calls);
+    }
+
+    [Fact]
+    public async Task A_compiler_rejection_after_a_rate_limit_is_the_outstanding_failure()
+    {
+        StubDataGateway gateway = new(new DataMigrationOutcome(0, 0, [], []));
+        gateway.PrepareOutcomes.Enqueue(Rejected(Fixed, "42703 final compiler rejection"));
+        ScriptedAgent repairer = new(
+            FleetRole.DatabaseConverter,
+            "repair",
+            FleetAgentResult.Failed("HTTP 429 rate limit exceeded"),
+            new FleetAgentResult(true, Fixed, [], "fixed"));
+
+        ProgramUnitRepairOutcome result = await new ProgramUnitRepairLoop(repairer, maxAttempts: 2)
+            .RunAsync("HRMS", gateway, Rejected(), null, CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("final compiler rejection", Assert.Single(result.OutstandingFailures), StringComparison.Ordinal);
+        Assert.DoesNotContain("429", result.OutstandingFailures[0], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Mixed_attributed_and_unattributed_failures_accept_no_statement()
+    {
+        const string secondBroken = "CREATE OR REPLACE FUNCTION hr.end_employment() RETURNS void AS $body$ BEGIN broken; END; $body$ LANGUAGE plpgsql";
+        const string secondFixed = "CREATE OR REPLACE FUNCTION hr.end_employment() RETURNS void AS $body$ BEGIN NULL; END; $body$ LANGUAGE plpgsql";
+        const string diagnostic = "42703 first statement failed";
+        StubDataGateway gateway = new(new DataMigrationOutcome(0, 0, [], []));
+        gateway.PrepareOutcomes.Enqueue(new SchemaDeploymentOutcome(0, 0, [diagnostic, "connection lost"])
+        {
+            StatementFailures = [new SchemaStatementFailure(Fixed, diagnostic)],
+        });
+        ScriptedAgent repairer = new(
+            FleetRole.DatabaseConverter,
+            "repair",
+            new FleetAgentResult(true, $"{Fixed};\n{secondFixed}", [], "fixed"));
+        SchemaDeploymentOutcome rejected = new(0, 0, ["first", "second"])
+        {
+            StatementFailures =
+            [
+                new SchemaStatementFailure(Broken, "first"),
+                new SchemaStatementFailure(secondBroken, "second"),
+            ],
+        };
+
+        ProgramUnitRepairOutcome result = await new ProgramUnitRepairLoop(repairer)
+            .RunAsync("HRMS", gateway, rejected, null, CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Empty(result.AcceptedStatements);
+        Assert.Equal(2, result.OutstandingFailures.Count);
     }
 }
 
@@ -295,6 +495,24 @@ public class SandboxDataMigrationPhaseTests
         TemporaryWorkspace workspace, IDataMigrationGateway? gateway, HumanApproval? execution = null) =>
         new MigrationExecutor(workspace.Root, MigrationExecutor.DefaultAdapters(null, gateway))
             .ExecuteAsync(Request(execution), Operator);
+
+    private static Task<MigrationExecutionResult> RunSandboxOnlyAsync(
+        TemporaryWorkspace workspace,
+        IDataMigrationGateway gateway,
+        ProgramUnitRepairLoop repair) =>
+        new MigrationExecutor(workspace.Root, [new SandboxDataMigrationAdapter(gateway, repair)])
+            .ExecuteAsync(Request(), Operator);
+
+    private static void WriteRejectedProgramUnitSchema(TemporaryWorkspace workspace)
+    {
+        workspace.WriteFile(
+            "out/orders/database/postgresql/schema/schema.sql",
+            $"""
+            CREATE TABLE orders (id bigint);
+            {PlSqlTranslator.ProgramUnitsMarker}
+            CREATE OR REPLACE FUNCTION hr.raise_salary() RETURNS void AS $body$ BEGIN broken; END; $body$ LANGUAGE plpgsql;
+            """);
+    }
 
     private static PhaseOutcome Outcome(MigrationExecutionResult result) =>
         result.Phases.Single(phase => phase.Phase == MigrationPhase.SandboxDataMigration);
@@ -395,5 +613,145 @@ public class SandboxDataMigrationPhaseTests
 
         string report = workspace.Read("out/orders/data/migration-report.md");
         Assert.Contains("They are not a reconciliation", report, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_compiler_accepted_repair_is_persisted_and_returned_as_an_artifact()
+    {
+        using TemporaryWorkspace workspace = SeededWorkspace();
+        WriteRejectedProgramUnitSchema(workspace);
+        StubDataGateway gateway = new(new DataMigrationOutcome(2, 0, [], [new TableRowCount("orders", 2)]));
+        gateway.PrepareOutcomes.Enqueue(new SchemaDeploymentOutcome(1, 0, []));
+        gateway.PrepareOutcomes.Enqueue(ProgramUnitRepairLoopTestsRejected());
+        gateway.PrepareOutcomes.Enqueue(new SchemaDeploymentOutcome(1, 0, []));
+        ScriptedAgent repairer = new(
+            FleetRole.DatabaseConverter,
+            "repair",
+            new FleetAgentResult(true, ProgramUnitRepairLoopTestsFixed(), [], "fixed"));
+
+        MigrationExecutionResult result = await RunSandboxOnlyAsync(
+            workspace,
+            gateway,
+            new ProgramUnitRepairLoop(repairer));
+
+        PhaseOutcome outcome = Outcome(result);
+        Assert.Equal(PhaseExecutionState.Executed, outcome.State);
+        Assert.Contains(outcome.Artifacts, artifact => artifact.Path.EndsWith("program-unit-repairs.sql", StringComparison.Ordinal));
+        Assert.Contains(outcome.Artifacts, artifact => artifact.Path.EndsWith("program-unit-repair-audit.md", StringComparison.Ordinal));
+        Assert.Contains("BEGIN NULL", workspace.Read("out/orders/database/postgresql/schema/program-unit-repairs.sql"), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Outstanding_program_units_load_rows_but_prevent_the_sandbox_attestation()
+    {
+        using TemporaryWorkspace workspace = SeededWorkspace();
+        WriteRejectedProgramUnitSchema(workspace);
+        StubDataGateway gateway = new(new DataMigrationOutcome(2, 0, [], [new TableRowCount("orders", 2)]));
+        gateway.PrepareOutcomes.Enqueue(new SchemaDeploymentOutcome(1, 0, []));
+        gateway.PrepareOutcomes.Enqueue(ProgramUnitRepairLoopTestsRejected());
+        gateway.PrepareOutcomes.Enqueue(ProgramUnitRepairLoopTestsRejected(ProgramUnitRepairLoopTestsFixed()));
+        ScriptedAgent repairer = new(
+            FleetRole.DatabaseConverter,
+            "repair",
+            new FleetAgentResult(true, ProgramUnitRepairLoopTestsFixed(), [], "still broken"));
+
+        MigrationExecutionResult result = await RunSandboxOnlyAsync(
+            workspace,
+            gateway,
+            new ProgramUnitRepairLoop(repairer, maxAttempts: 1));
+
+        Assert.Equal(PhaseExecutionState.Failed, Outcome(result).State);
+        Assert.NotNull(gateway.Applied);
+        Assert.Contains(Outcome(result).Artifacts, artifact => artifact.Path.EndsWith("migration-report.md", StringComparison.Ordinal));
+        Assert.Contains(Outcome(result).Artifacts, artifact => artifact.Path.EndsWith("program-unit-repair-audit.md", StringComparison.Ordinal));
+        Assert.All(Outcome(result).Artifacts, artifact => Assert.Contains(artifact, result.Artifacts));
+        Assert.DoesNotContain(result.Attestations, attestation => attestation.Kind == AttestationKind.SandboxMigrationCompleted);
+    }
+
+    [Fact]
+    public async Task A_persisted_repair_is_recompiled_without_calling_the_model_again()
+    {
+        using TemporaryWorkspace workspace = SeededWorkspace();
+        WriteRejectedProgramUnitSchema(workspace);
+        workspace.WriteFile(
+            "out/orders/database/postgresql/schema/program-unit-repairs.sql",
+            ProgramUnitRepairLoopTestsFixed() + ";\n");
+        StubDataGateway gateway = new(new DataMigrationOutcome(2, 0, [], [new TableRowCount("orders", 2)]));
+        gateway.PrepareOutcomes.Enqueue(new SchemaDeploymentOutcome(1, 0, []));
+        gateway.PrepareOutcomes.Enqueue(ProgramUnitRepairLoopTestsRejected());
+        gateway.PrepareOutcomes.Enqueue(new SchemaDeploymentOutcome(1, 0, []));
+        ScriptedAgent repairer = new(
+            FleetRole.DatabaseConverter,
+            "repair",
+            FleetAgentResult.Failed("the model must not be called"));
+
+        MigrationExecutionResult result = await RunSandboxOnlyAsync(
+            workspace,
+            gateway,
+            new ProgramUnitRepairLoop(repairer));
+
+        Assert.Equal(PhaseExecutionState.Executed, Outcome(result).State);
+        Assert.Equal(0, repairer.Calls);
+        Assert.Equal(3, gateway.PreparedBatches.Count);
+    }
+
+    [Fact]
+    public async Task A_persisted_partial_repair_is_revalidated_and_merged_with_a_new_repair()
+    {
+        const string secondBroken = "CREATE OR REPLACE FUNCTION hr.end_employment() RETURNS void AS $body$ BEGIN broken; END; $body$ LANGUAGE plpgsql";
+        const string secondFixed = "CREATE OR REPLACE FUNCTION hr.end_employment() RETURNS void AS $body$ BEGIN NULL; END; $body$ LANGUAGE plpgsql";
+        using TemporaryWorkspace workspace = SeededWorkspace();
+        workspace.WriteFile(
+            "out/orders/database/postgresql/schema/schema.sql",
+            $"""
+            CREATE TABLE orders (id bigint);
+            {PlSqlTranslator.ProgramUnitsMarker}
+            {ProgramUnitRepairLoopTestsRejected().StatementFailures[0].Statement};
+            {secondBroken};
+            """);
+        workspace.WriteFile(
+            "out/orders/database/postgresql/schema/program-unit-repairs.sql",
+            ProgramUnitRepairLoopTestsFixed() + ";\n");
+        StubDataGateway gateway = new(new DataMigrationOutcome(2, 0, [], [new TableRowCount("orders", 2)]));
+        gateway.PrepareOutcomes.Enqueue(new SchemaDeploymentOutcome(1, 0, []));
+        gateway.PrepareOutcomes.Enqueue(new SchemaDeploymentOutcome(0, 0, ["first", "second"])
+        {
+            StatementFailures =
+            [
+                new SchemaStatementFailure(ProgramUnitRepairLoopTestsRejected().StatementFailures[0].Statement, "first"),
+                new SchemaStatementFailure(secondBroken, "second"),
+            ],
+        });
+        gateway.PrepareOutcomes.Enqueue(new SchemaDeploymentOutcome(1, 0, []));
+        gateway.PrepareOutcomes.Enqueue(new SchemaDeploymentOutcome(1, 0, []));
+        ScriptedAgent repairer = new(
+            FleetRole.DatabaseConverter,
+            "repair",
+            new FleetAgentResult(true, secondFixed, [], "fixed remaining routine"));
+
+        MigrationExecutionResult result = await RunSandboxOnlyAsync(
+            workspace,
+            gateway,
+            new ProgramUnitRepairLoop(repairer));
+
+        Assert.Equal(PhaseExecutionState.Executed, Outcome(result).State);
+        Assert.Equal(1, repairer.Calls);
+        string persisted = workspace.Read("out/orders/database/postgresql/schema/program-unit-repairs.sql");
+        Assert.Contains("raise_salary", persisted, StringComparison.Ordinal);
+        Assert.Contains("end_employment", persisted, StringComparison.Ordinal);
+    }
+
+    private static string ProgramUnitRepairLoopTestsFixed() =>
+        "CREATE OR REPLACE FUNCTION hr.raise_salary() RETURNS void AS $body$ BEGIN NULL; END; $body$ LANGUAGE plpgsql";
+
+    private static SchemaDeploymentOutcome ProgramUnitRepairLoopTestsRejected(string? statement = null)
+    {
+        string rejected = statement ??
+            "CREATE OR REPLACE FUNCTION hr.raise_salary() RETURNS void AS $body$ BEGIN broken; END; $body$ LANGUAGE plpgsql";
+        const string diagnostic = "42703 broken does not exist";
+        return new SchemaDeploymentOutcome(0, 0, [diagnostic])
+        {
+            StatementFailures = [new SchemaStatementFailure(rejected, diagnostic)],
+        };
     }
 }

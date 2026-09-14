@@ -12,7 +12,9 @@ namespace OracleFormsMigrationFleet.Fleet.Execution.Adapters;
 /// <see cref="PhaseStatus.Planned"/>, which needs an execution approval distinct from plan approval.
 /// Without a configured gateway the phase fails rather than reporting success it did not achieve.
 /// </summary>
-public sealed class SandboxDataMigrationAdapter(IDataMigrationGateway? gateway = null) : IPhaseAdapter
+public sealed class SandboxDataMigrationAdapter(
+    IDataMigrationGateway? gateway = null,
+    ProgramUnitRepairLoop? programUnitRepair = null) : IPhaseAdapter
 {
     private const int MaxFiles = 20_000;
     private const long MaxTextBytes = 16L * 1024 * 1024;
@@ -46,6 +48,9 @@ public sealed class SandboxDataMigrationAdapter(IDataMigrationGateway? gateway =
 
         List<DataMigrationStatement> statements = [];
         List<string> skipped = [];
+        List<string> programUnitFailures = [];
+        string? repairPath = null;
+        string? repairAuditPath = null;
 
         foreach (WorkspaceFile file in context.Workspace.EnumerateFiles(sourceRoot, MaxFiles))
         {
@@ -115,6 +120,7 @@ public sealed class SandboxDataMigrationAdapter(IDataMigrationGateway? gateway =
                         [.. prepared.Failures]);
                 }
 
+                List<string> acceptedRepairs = [];
                 if (programmable.Length > 0)
                 {
                     SchemaDeploymentOutcome units = await gateway
@@ -132,10 +138,94 @@ public sealed class SandboxDataMigrationAdapter(IDataMigrationGateway? gateway =
 
                     if (units.Failures.Count > 0)
                     {
-                        context.Warn(
-                            $"{units.Failures.Count.ToString(CultureInfo.InvariantCulture)} translated program units did " +
-                            "not compile. The tables are correct and the rows below were still loaded, but that logic is " +
-                            "absent from the target.");
+                        repairPath = $"{outputRoot}/database/postgresql/schema/program-unit-repairs.sql";
+                        SchemaDeploymentOutcome repairInput = units;
+                        if (context.Workspace.FileExists(repairPath) && units.StatementFailures.Count > 0)
+                        {
+                            IReadOnlyList<string> persisted = DataMigrationTranslator.SplitSchema(
+                                context.Workspace.ReadText(repairPath, MaxTextBytes));
+
+                            if (ProgramUnitRepairLoop.IsBodyOnlySubset(
+                                    units.StatementFailures.Select(failure => failure.Statement),
+                                    persisted,
+                                    out IReadOnlySet<string> replacedEnvelopes))
+                            {
+                                SchemaDeploymentOutcome revalidated = await gateway
+                                    .PrepareAsync(persisted, cancellationToken)
+                                    .ConfigureAwait(false);
+
+                                if (revalidated.Failures.Count == 0)
+                                {
+                                    acceptedRepairs.AddRange(persisted);
+                                    repairAuditPath = $"{outputRoot}/database/postgresql/schema/program-unit-repair-audit.md";
+                                    context.Workspace.WriteText(
+                                        repairAuditPath,
+                                        RenderRevalidationAudit(context.Request.ApplicationName, persisted));
+                                    context.Info(
+                                        $"Revalidated {persisted.Count.ToString(CultureInfo.InvariantCulture)} accepted " +
+                                        "program-unit repairs from the previous run.");
+
+                                    SchemaStatementFailure[] remaining =
+                                    [.. units.StatementFailures.Where(failure =>
+                                        !replacedEnvelopes.Contains(ProgramUnitRepairLoop.RoutineEnvelope(failure.Statement)))];
+                                    repairInput = new SchemaDeploymentOutcome(
+                                        0,
+                                        0,
+                                        [.. remaining.Select(failure => failure.Diagnostic)])
+                                    {
+                                        StatementFailures = remaining,
+                                    };
+                                }
+                            }
+                        }
+
+                        if (repairInput.Failures.Count > 0 && programUnitRepair is not null)
+                        {
+                            ProgramUnitRepairOutcome repair = await programUnitRepair.RunAsync(
+                                context.Request.ApplicationName,
+                                gateway,
+                                repairInput,
+                                context.Info,
+                                cancellationToken).ConfigureAwait(false);
+
+                            acceptedRepairs.AddRange(repair.AcceptedStatements);
+                            programUnitFailures.AddRange(repair.OutstandingFailures);
+                            foreach (string failure in repair.OutstandingFailures)
+                            {
+                                context.Warn($"Program unit remains rejected after repair: {failure}");
+                            }
+
+                            context.Info(
+                                $"Program-unit repair: {acceptedRepairs.Count.ToString(CultureInfo.InvariantCulture)} accepted " +
+                                $"after {repair.Attempts.ToString(CultureInfo.InvariantCulture)} attempts; " +
+                                $"{repair.OutstandingFailures.Count.ToString(CultureInfo.InvariantCulture)} remain rejected.");
+
+                            repairAuditPath = $"{outputRoot}/database/postgresql/schema/program-unit-repair-audit.md";
+                            context.Workspace.WriteText(
+                                repairAuditPath,
+                                RenderRepairAudit(context.Request.ApplicationName, repair));
+                        }
+
+                        if (repairInput.Failures.Count > 0 && programUnitRepair is null)
+                        {
+                            programUnitFailures.AddRange(repairInput.Failures);
+                        }
+
+                        int outstanding = programUnitFailures.Count;
+
+                        if (outstanding > 0)
+                        {
+                            context.Warn(
+                                $"{outstanding.ToString(CultureInfo.InvariantCulture)} translated program units did not compile. " +
+                                "The tables are correct and the rows below were still loaded, but that logic is absent from the target.");
+                        }
+                    }
+
+                    if (acceptedRepairs.Count > 0)
+                    {
+                        repairPath ??= $"{outputRoot}/database/postgresql/schema/program-unit-repairs.sql";
+                        context.Workspace.WriteText(repairPath, string.Join(";\n\n", acceptedRepairs) + ";\n");
+                        context.Info($"Accepted program-unit repairs written to {repairPath}.");
                     }
                 }
             }
@@ -190,13 +280,77 @@ public sealed class SandboxDataMigrationAdapter(IDataMigrationGateway? gateway =
                 [.. outcome.Failures]);
         }
 
-        ArtifactReference[] artifacts =
+        List<ArtifactReference> artifacts =
         [
             new(reportPath, ArtifactKind.ReconciliationReport, "Statements executed and the row counts read back from the target."),
         ];
+
+        if (repairPath is not null)
+        {
+            artifacts.Add(new ArtifactReference(
+                repairPath,
+                ArtifactKind.DatabaseSchema,
+                "Program-unit revisions accepted by the PostgreSQL compiler."));
+        }
+
+        if (repairAuditPath is not null)
+        {
+            artifacts.Add(new ArtifactReference(
+                repairAuditPath,
+                ArtifactKind.ValidationReport,
+                "Repair attempts, compiler acceptance, and outstanding program-unit failures."));
+        }
+
+        if (programUnitFailures.Count > 0)
+        {
+            return new PhaseExecutionResult(
+                false,
+                artifacts,
+                programUnitFailures,
+                $"Rows were loaded, but {programUnitFailures.Count.ToString(CultureInfo.InvariantCulture)} program-unit " +
+                "failures remain, so the sandbox migration cannot be attested as complete.");
+        }
 
         return PhaseExecutionResult.Success(
             artifacts,
             [.. outcome.RowCounts.Select(count => $"Loaded: {count.Table} — {count.Rows.ToString(CultureInfo.InvariantCulture)} rows")]);
     }
+
+    private static string RenderRepairAudit(string applicationName, ProgramUnitRepairOutcome repair)
+    {
+        string attempted = repair.AttemptedStatements.Count == 0
+            ? "_No proposal reached the database compiler._"
+            : string.Join("\n\n", repair.AttemptedStatements.Select(statement => $"```sql\n{statement}\n```"));
+        string failures = repair.OutstandingFailures.Count == 0
+            ? "None."
+            : string.Join("\n", repair.OutstandingFailures.Select(failure => $"- {failure}"));
+
+        return $"""
+            # Program-unit repair audit — {applicationName}
+
+            Attempts: {repair.Attempts.ToString(CultureInfo.InvariantCulture)}
+
+            Accepted statements: {repair.AcceptedStatements.Count.ToString(CultureInfo.InvariantCulture)}
+
+            ## Attempted SQL
+
+            {attempted}
+
+            ## Outstanding failures
+
+            {failures}
+            """;
+    }
+
+    private static string RenderRevalidationAudit(string applicationName, IReadOnlyList<string> persisted) =>
+        $"""
+        # Program-unit repair audit — {applicationName}
+
+        {persisted.Count.ToString(CultureInfo.InvariantCulture)} repairs retained from the previous run passed the
+        body-only contract policy and were accepted again by the PostgreSQL compiler. The repair model was not called.
+
+        ## Revalidated SQL
+
+        {string.Join("\n\n", persisted.Select(statement => $"```sql\n{statement}\n```"))}
+        """;
 }

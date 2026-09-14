@@ -65,12 +65,13 @@ public sealed class MigrationExecutor
     public static IReadOnlyList<IPhaseAdapter> DefaultAdapters(
         IArtifactReviewer? reviewer = null,
         IDataMigrationGateway? dataGateway = null,
-        Agents.CritiqueRepairOrchestrator? orchestrator = null) =>
+        Agents.CritiqueRepairOrchestrator? orchestrator = null,
+        ProgramUnitRepairLoop? programUnitRepair = null) =>
     [
         new SourceAnalysisAdapter(),
         new DatabaseConversionAdapter(reviewer, orchestrator),
         new ApplicationCodeConversionAdapter(reviewer),
-        new SandboxDataMigrationAdapter(dataGateway),
+        new SandboxDataMigrationAdapter(dataGateway, programUnitRepair),
         new DataReconciliationAdapter(dataGateway),
     ];
 
@@ -171,7 +172,14 @@ public sealed class MigrationExecutor
             {
                 string detail = result.FailureReason ?? "The adapter reported failure without a reason.";
                 Report("error", $"{phase.Phase}: {detail}");
-                outcomes.Add(new PhaseOutcome(phase.Phase, phase.Status, PhaseExecutionState.Failed, [], result.Findings, detail));
+                artifacts.AddRange(result.Artifacts);
+                outcomes.Add(new PhaseOutcome(
+                    phase.Phase,
+                    phase.Status,
+                    PhaseExecutionState.Failed,
+                    result.Artifacts,
+                    result.Findings,
+                    detail));
                 continue;
             }
 

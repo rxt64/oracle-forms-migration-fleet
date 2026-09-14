@@ -35,7 +35,12 @@ public sealed record DataMigrationOutcome(
 public sealed record SchemaDeploymentOutcome(
     int Applied,
     int AlreadyPresent,
-    IReadOnlyList<string> Failures);
+    IReadOnlyList<string> Failures)
+{
+    public IReadOnlyList<SchemaStatementFailure> StatementFailures { get; init; } = [];
+}
+
+public sealed record SchemaStatementFailure(string Statement, string Diagnostic);
 
 /// <summary>
 /// Writes rows into the sandbox target.

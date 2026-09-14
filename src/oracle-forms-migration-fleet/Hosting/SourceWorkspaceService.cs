@@ -326,6 +326,10 @@ public sealed class SourceWorkspaceService : IDisposable
     {
         yield return new SourceProgress("info", "Indexing files...");
 
+        // This directory is owned by the workbench. A clone or archive may contain a path with the
+        // same name, but supplied content must never be mistaken for compiler-accepted run state.
+        DeleteDirectory(Path.Combine(path, WorkbenchExecution.OutputRoot));
+
         SourceInventory? inventory = null;
         try
         {

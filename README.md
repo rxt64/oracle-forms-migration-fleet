@@ -8,12 +8,12 @@ Database, Azure SQL Managed Instance), build and behavior validation, sandbox da
 reconciliation, human acceptance, and production cutover.
 
 > **What runs inside this service today.** `Fleet/` is deterministic and offline: it assesses, plans, and
-> gates. It never connects to Oracle, PostgreSQL, or SQL Server, and never moves data. `Fleet/Execution/`
-> adds adapters that carry out the phases the planner authorizes — source analysis and Oracle-to-PostgreSQL
-> schema conversion — writing artifacts **only** into the operator's private session workspace, never into
-> the customer's repository. The planner stays authoritative: an adapter runs only for a phase the planner
-> resolved to `Planned`, and a phase counts as done only when an adapter returns artifacts plus a matching
-> successful attestation.
+> gates. `Fleet/Execution/` adds authorized adapters for source analysis, Oracle-to-PostgreSQL conversion,
+> React/Java generation, sandbox schema deployment and data movement, and reconciliation. The sandbox
+> adapters reach only the PostgreSQL target configured by the host; a browser request cannot supply an
+> endpoint or credential. Artifacts are written **only** into the operator's private session workspace,
+> never into the customer's repository. The planner stays authoritative: an adapter runs only for a phase
+> resolved to `Planned`, and a phase counts as done only when its deterministic checks succeed.
 
 ## Documentation
 
@@ -31,14 +31,15 @@ reconciliation, human acceptance, and production cutover.
 | Layer | What it does | Where it lives |
 |---|---|---|
 | **Deterministic planning** | Validates requests, scores the target platform, sequences assessment stages, and authorizes lifecycle phases, owners, inputs, outputs, tooling, mutation class, and approval gates | `Fleet/` — pure C#, no network, fully unit-tested |
-| **Execution adapters** | Parse the acquired source, emit PostgreSQL DDL from Oracle DDL, and write analysis and conversion artifacts into the session workspace. Forms-to-React/Java conversion and sandbox data movement are **not implemented yet**. | `Fleet/Execution/` |
-| **Artifact review** | After the schema conversion writes its DDL, a model reads it back and reports suspected defects into a separate report. Advisory by construction: it cannot open a gate, sign an attestation, or alter the deterministic conversion report. | `Fleet/Execution/ArtifactReview.cs` |
+| **Execution adapters** | Parse acquired source, emit PostgreSQL DDL, generate React/Java, deploy the sandbox schema, load rows, and reconcile target data. Database access is host-bound and requires a planner-authorized sandbox phase. | `Fleet/Execution/` |
+| **Artifact review and repair** | Review remains advisory. During an execution-approved sandbox phase only, rejected PL/pgSQL routines may enter a two-attempt repair loop. Model output may change routine bodies only and is accepted only after PostgreSQL compiles it. | `Fleet/Execution/ArtifactReview.cs`, `Fleet/Execution/ProgramUnitRepairLoop.cs` |
 | **Attestation-backed completion** | An adapter reports back a signed `MigrationAttestation` naming a signer and citing at least one valid workspace-relative artifact. Without one, the agent must say the phase is *planned*, never *performed*. | `MigrationAttestation`, gate logic in `MigrationRunPlanner` |
 
-A model is consulted at exactly two points: conversation with the operator, and reading a generated schema
-after it is written. Neither reaches a gate, an approval, an attestation, or the platform recommendation.
-The specialist role names on each phase label ownership; no code selects behaviour from a role, so they are
-not independent agents. The workbench states this per phase rather than leaving it to be inferred.
+A model is consulted for conversation, artifact review, and bounded repair proposals. No model reaches a
+gate, approval, attestation, credential, or platform recommendation. A repair proposal can reach PostgreSQL
+only inside an already authorized sandbox phase, after the fleet proves that the complete routine envelope
+is unchanged. PostgreSQL compilation is the acceptance decision. Any unresolved routine makes the phase
+fail after valid rows finish loading, so `SandboxMigrationCompleted` is not emitted.
 
 ### Models
 
@@ -215,9 +216,29 @@ report `NotRequested` rather than pretending to be blocked.
 - **Database only:** SSMA for Oracle on the SQL Server family; Ora2Pg on PostgreSQL. The planner selects
   one or the other from `target.database` and never both.
 - **Forms UI and logic:** owned by the fleet's own conversion adapter plus a compiler-driven and
-  AI-assisted repair loop over the generated React and Java sources. That adapter is specified and planned
-  here, not implemented in this repository. Neither SSMA nor Ora2Pg converts Forms UI or runtime
-  behavior, and the planner never lists them for `ApplicationCodeConversion`.
+  AI-assisted repair loop. The conversion adapter emits React and Java/Spring Boot artifacts today; generated
+  application code is not yet compiled by a build adapter. PL/pgSQL repair is implemented separately in the
+  execution-approved sandbox phase. Neither SSMA nor Ora2Pg converts Forms UI or runtime behavior, and the
+  planner never lists them for `ApplicationCodeConversion`.
+
+### Program-unit repair
+
+Translated routines are deployed separately from structural DDL. When PostgreSQL rejects a routine, the
+gateway records the exact statement and diagnostic. `ProgramUnitRepairLoop` submits only those rejected
+routines and diagnostics to the SQL repair agent, with a maximum of two attempts.
+
+The loop fails closed:
+
+- the number and complete envelope of every function or procedure must remain byte-for-byte stable;
+- only the dollar-quoted routine body may change;
+- extra DDL, renamed routines, signature/return/language/security changes, and incomplete diagnostic
+  attribution are rejected before acceptance;
+- accepted SQL is written to `program-unit-repairs.sql`, and attempts and outstanding diagnostics are
+  written to `program-unit-repair-audit.md`;
+- accepted repairs survive a workbench output reset, but are checked against the current generated routines
+  and recompiled by PostgreSQL before reuse; supplied `.fleet-run` content is removed during source ingestion;
+- model failure, compiler failure, or remaining routines prevents sandbox completion attestation while
+  preserving the migration report and repair diagnostics as failed-phase artifacts.
 
 ## Legacy exit strategy
 
