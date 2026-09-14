@@ -48,10 +48,30 @@ public sealed class DatabaseConversionAdapter(
 
         List<string> sources = [];
         List<OracleSchema> schemas = [];
+        List<BehaviourScenario> scenarios = [];
 
         foreach (WorkspaceFile file in context.Workspace.EnumerateFiles(sourceRoot, MaxFiles))
         {
             cancellationToken.ThrowIfCancellationRequested();
+
+            string extension = Path.GetExtension(file.RelativePath);
+            if (extension.Equals(".yaml", StringComparison.OrdinalIgnoreCase)
+                || extension.Equals(".yml", StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    if (ScenarioReader.Read(context.Workspace.ReadText(file.RelativePath, MaxTextBytes)) is { } scenario)
+                    {
+                        scenarios.Add(scenario);
+                    }
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                {
+                    context.Warn($"{file.RelativePath} could not be read and was skipped.");
+                }
+
+                continue;
+            }
 
             if (!OracleSourceFile.IsSqlText(file.RelativePath))
             {
@@ -114,6 +134,31 @@ public sealed class DatabaseConversionAdapter(
             Declared(context, ddlPath, ArtifactKind.DatabaseSchema, "Converted PostgreSql schema and programmable objects."),
             Declared(context, reportPath, ArtifactKind.ValidationReport, "Type mappings, unsupported constructs, and manual remediation list."),
         ];
+
+        if (scenarios.Count > 0)
+        {
+            IReadOnlyList<ScenarioCoverage> coverage = ScenarioReader.Cover(scenarios, conversion.Report.Findings);
+            string coveragePath = $"{outputRoot}/database/postgresql/behaviour-coverage.md";
+            context.Workspace.WriteText(coveragePath, ScenarioReader.Render(context.Request.ApplicationName, coverage));
+
+            int blocked = coverage.Count(entry => entry.BlockedBy.Count > 0);
+            context.Info(
+                $"Read {scenarios.Count.ToString(CultureInfo.InvariantCulture)} documented scenarios; " +
+                $"{blocked.ToString(CultureInfo.InvariantCulture)} depend on logic that did not migrate.");
+
+            foreach (ScenarioCoverage entry in coverage.Where(entry => entry.BlockedBy.Count > 0))
+            {
+                context.Warn(
+                    $"{entry.Scenario.Name}: blocked by {entry.BlockedBy.Count.ToString(CultureInfo.InvariantCulture)} " +
+                    $"untranslated program units in {entry.Scenario.LegacyPackage}.");
+            }
+
+            artifacts.Add(Declared(
+                context,
+                coveragePath,
+                ArtifactKind.ValidationReport,
+                "Documented behaviours matched against the program units this conversion refused. Nothing was executed."));
+        }
 
         List<string> findings =
             [.. conversion.Report.Findings.Select(finding => $"{finding.Severity}: {finding.Category} — {finding.Construct}: {finding.Reason}")];
