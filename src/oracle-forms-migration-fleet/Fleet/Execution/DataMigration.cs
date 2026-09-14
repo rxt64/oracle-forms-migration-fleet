@@ -56,6 +56,13 @@ public interface IDataMigrationGateway
         IReadOnlyList<string> tables,
         CancellationToken cancellationToken);
 
+    /// <summary>Reads named columns back as text, so values can be compared and not just counted.</summary>
+    Task<IReadOnlyList<IReadOnlyList<string?>>> FetchAsync(
+        string table,
+        IReadOnlyList<string> columns,
+        int maxRows,
+        CancellationToken cancellationToken);
+
     Task<DataMigrationOutcome> ApplyAsync(
         IReadOnlyList<DataMigrationStatement> statements,
         IReadOnlyList<string> tables,
@@ -108,7 +115,78 @@ public static partial class DataMigrationTranslator
     private static string StripClientDirectives(string script) =>
         s_clientDirective.Replace(script, string.Empty);
 
-    private static string RewriteStandardHash(Match match)    {
+    /// <summary>One row from the export, as the columns it names and the literals it supplies.</summary>
+    public static bool TryReadRow(string sql, out string table, out IReadOnlyList<string> columns, out IReadOnlyList<string> values)
+    {
+        table = string.Empty;
+        columns = [];
+        values = [];
+
+        if (string.IsNullOrWhiteSpace(sql))
+        {
+            return false;
+        }
+
+        Match match = KeyedInsertPattern().Match(sql);
+        if (!match.Success)
+        {
+            return false;
+        }
+
+        string[] names = [.. SplitTopLevel(match.Groups["columns"].Value).Select(name => name.Trim().Trim('"'))];
+        string[] literals = [.. SplitTopLevel(match.Groups["values"].Value).Select(value => value.Trim())];
+
+        // A row whose column count does not match its value count is not something to guess at.
+        if (names.Length == 0 || names.Length != literals.Length)
+        {
+            return false;
+        }
+
+        table = match.Groups["table"].Value.ToLowerInvariant();
+        columns = names;
+        values = literals;
+        return true;
+    }
+
+    /// <summary>Splits an argument list on commas that are outside quotes and nested parentheses.</summary>
+    private static IEnumerable<string> SplitTopLevel(string text)
+    {
+        int depth = 0;
+        bool inString = false;
+        StringBuilder current = new();
+
+        foreach (char character in text)
+        {
+            if (character == '\'')
+            {
+                inString = !inString;
+            }
+            else if (!inString && character == '(')
+            {
+                depth++;
+            }
+            else if (!inString && character == ')')
+            {
+                depth--;
+            }
+            else if (character == ',' && depth == 0 && !inString)
+            {
+                yield return current.ToString();
+                current.Clear();
+                continue;
+            }
+
+            current.Append(character);
+        }
+
+        if (current.Length > 0)
+        {
+            yield return current.ToString();
+        }
+    }
+
+    private static string RewriteStandardHash(Match match)
+    {
         string value = match.Groups["value"].Value.Trim();
         string algorithm = match.Groups["algorithm"].Value.Trim().Trim('\'').ToUpperInvariant();
 
@@ -293,6 +371,12 @@ public static partial class DataMigrationTranslator
 
     [GeneratedRegex(@"^\s*INSERT\s+INTO\s+(?<table>[A-Za-z_][\w$#]*)", RegexOptions.IgnoreCase, 2000)]
     private static partial Regex InsertPattern();
+
+    [GeneratedRegex(
+        @"^\s*INSERT\s+INTO\s+(?:[A-Za-z_][\w$#]*\s*\.\s*)?(?<table>[A-Za-z_][\w$#]*)\s*\(\s*(?<columns>[^)]*?)\s*\)\s*VALUES\s*\(\s*(?<values>.*)\s*\)\s*$",
+        RegexOptions.IgnoreCase | RegexOptions.Singleline,
+        4000)]
+    private static partial Regex KeyedInsertPattern();
 
     [GeneratedRegex(@"TO_DATE\s*\(\s*(?<value>'[^']*')\s*,\s*'[^']*'\s*\)", RegexOptions.IgnoreCase, 2000)]
     private static partial Regex ToDatePattern();

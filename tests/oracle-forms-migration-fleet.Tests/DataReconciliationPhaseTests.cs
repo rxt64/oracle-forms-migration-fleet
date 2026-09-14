@@ -96,4 +96,77 @@ public class DataReconciliationPhaseTests
         Assert.Equal(PhaseExecutionState.Failed, Outcome(result).State);
         Assert.Empty(result.Attestations);
     }
+
+    [Fact]
+    public async Task A_row_that_loaded_with_the_wrong_value_is_caught_even_though_the_count_matches()
+    {
+        // The case counting cannot reach: the right number of rows, one of them wrong.
+        StubDataGateway gateway = new(new DataMigrationOutcome(0, 0, [], []))
+        {
+            Counts = [new TableRowCount("orders", 2)],
+        };
+
+        gateway.Fetched["orders"] = (
+            ["ID", "STATUS"],
+            [["1", "OPEN"], ["2", "TAMPERED"]]);
+
+        using TemporaryWorkspace workspace = KeyedWorkspace();
+
+        MigrationExecutionResult result = await new MigrationExecutor(
+                workspace.Root,
+                [new Fleet.Execution.Adapters.DataReconciliationAdapter(gateway)])
+            .ExecuteAsync(Request(), Operator);
+
+        PhaseOutcome outcome = result.Phases.Single(phase => phase.Phase == MigrationPhase.DataReconciliation);
+
+        Assert.Equal(PhaseExecutionState.Failed, outcome.State);
+        Assert.Empty(result.Attestations);
+        Assert.Contains(outcome.Findings, finding => finding.Contains("TAMPERED", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Matching_values_are_attested()
+    {
+        StubDataGateway gateway = new(new DataMigrationOutcome(0, 0, [], []))
+        {
+            Counts = [new TableRowCount("orders", 2)],
+        };
+
+        gateway.Fetched["orders"] = (
+            ["ID", "STATUS"],
+            [["1", "OPEN"], ["2", "SHIPPED"]]);
+
+        using TemporaryWorkspace workspace = KeyedWorkspace();
+
+        MigrationExecutionResult result = await new MigrationExecutor(
+                workspace.Root,
+                [new Fleet.Execution.Adapters.DataReconciliationAdapter(gateway)])
+            .ExecuteAsync(Request(), Operator);
+
+        Assert.Equal(
+            PhaseExecutionState.Executed,
+            result.Phases.Single(phase => phase.Phase == MigrationPhase.DataReconciliation).State);
+        Assert.Contains(result.Attestations, attestation => attestation.Kind == AttestationKind.DataReconciliationPassed);
+    }
+
+    private static TemporaryWorkspace KeyedWorkspace()
+    {
+        TemporaryWorkspace workspace = new();
+        workspace.WriteFile(
+            "legacy/forms/db/001_schema.sql",
+            """
+            CREATE TABLE ORDERS (
+                ID NUMBER(10) NOT NULL,
+                STATUS VARCHAR2(20),
+                CONSTRAINT PK_ORDERS PRIMARY KEY (ID)
+            );
+            """);
+        workspace.WriteFile(
+            "legacy/forms/db/002_data.sql",
+            """
+            INSERT INTO ORDERS (ID, STATUS) VALUES (1, 'OPEN');
+            INSERT INTO ORDERS (ID, STATUS) VALUES (2, 'SHIPPED');
+            """);
+        return workspace;
+    }
 }

@@ -21,6 +21,7 @@ public sealed class DataReconciliationAdapter(IDataMigrationGateway? gateway = n
 {
     private const int MaxFiles = 20_000;
     private const long MaxTextBytes = 16L * 1024 * 1024;
+    private const int MaxCompared = 10_000;
 
     public MigrationPhase Phase => MigrationPhase.DataReconciliation;
 
@@ -44,6 +45,8 @@ public sealed class DataReconciliationAdapter(IDataMigrationGateway? gateway = n
         }
 
         Dictionary<string, long> expected = new(StringComparer.Ordinal);
+        Dictionary<string, List<(IReadOnlyList<string> Columns, IReadOnlyList<string> Values)>> rowsByTable = new(StringComparer.Ordinal);
+        List<OracleSchema> schemas = [];
 
         foreach (WorkspaceFile file in context.Workspace.EnumerateFiles(sourceRoot, MaxFiles))
         {
@@ -56,12 +59,25 @@ public sealed class DataReconciliationAdapter(IDataMigrationGateway? gateway = n
 
             try
             {
-                IReadOnlyList<DataMigrationStatement> statements = DataMigrationTranslator.Translate(
-                    context.Workspace.ReadText(file.RelativePath, MaxTextBytes), out _);
+                string text = context.Workspace.ReadText(file.RelativePath, MaxTextBytes);
+                schemas.Add(OracleSchemaParser.Parse(text));
+
+                IReadOnlyList<DataMigrationStatement> statements = DataMigrationTranslator.Translate(text, out _);
 
                 foreach (DataMigrationStatement statement in statements)
                 {
                     expected[statement.Table] = expected.GetValueOrDefault(statement.Table) + 1;
+
+                    if (DataMigrationTranslator.TryReadRow(statement.Sql, out string table, out IReadOnlyList<string> columns, out IReadOnlyList<string> values))
+                    {
+                        if (!rowsByTable.TryGetValue(table, out var list))
+                        {
+                            list = [];
+                            rowsByTable[table] = list;
+                        }
+
+                        list.Add((columns, values));
+                    }
                 }
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
@@ -92,7 +108,6 @@ public sealed class DataReconciliationAdapter(IDataMigrationGateway? gateway = n
             [.. actual.Select(count => new TableReconciliation(count.Table, expected[count.Table], count.Rows))];
 
         string reportPath = $"{outputRoot}/data/reconciliation.md";
-        context.Workspace.WriteText(reportPath, Render(context.Request.ApplicationName, rows));
 
         foreach (TableReconciliation row in rows)
         {
@@ -112,9 +127,64 @@ public sealed class DataReconciliationAdapter(IDataMigrationGateway? gateway = n
 
         IReadOnlyList<TableReconciliation> differences = [.. rows.Where(row => !row.Matches)];
 
+        // Counts first: comparing values in a table that is short would bury the shortfall in detail.
+        OracleSchema schema = OracleSchema.Merge(schemas);
+        List<RowDifference> valueDifferences = [];
+        int notComparable = 0;
+
+        foreach (TableReconciliation row in rows.Where(row => row.Matches))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (!rowsByTable.TryGetValue(row.Table, out var source) || source.Count == 0)
+            {
+                continue;
+            }
+
+            IReadOnlyList<string> keys = PrimaryKey(schema, row.Table);
+            if (keys.Count == 0)
+            {
+                // The same rule AWS DMS applies: without a key there is no way to pair the rows up.
+                context.Warn($"{row.Table}: no primary key was parsed, so its values were not compared.");
+                continue;
+            }
+
+            string[] columns = [.. source.SelectMany(entry => entry.Columns).Distinct(StringComparer.OrdinalIgnoreCase)];
+
+            IReadOnlyList<IReadOnlyList<string?>> target;
+            try
+            {
+                target = await gateway.FetchAsync(row.Table, columns, MaxCompared, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                context.Warn($"{row.Table}: the target could not be read for comparison ({exception.Message}).");
+                continue;
+            }
+
+            TableComparison comparison = RowComparer.Compare(row.Table, keys, source, columns, target);
+            valueDifferences.AddRange(comparison.Differences);
+            notComparable += comparison.NotComparable;
+
+            if (comparison.Differences.Count > 0)
+            {
+                context.Warn($"{row.Table}: {comparison.Differences.Count.ToString(CultureInfo.InvariantCulture)} rows differ from the source.");
+            }
+        }
+
+        if (notComparable > 0)
+        {
+            context.Info(
+                $"{notComparable.ToString(CultureInfo.InvariantCulture)} values were expressions such as SYSDATE or a " +
+                "sequence call, which differ by definition and were not compared.");
+        }
+
+        string reportPath2 = reportPath;
+        context.Workspace.WriteText(reportPath2, Render(context.Request.ApplicationName, rows, valueDifferences, notComparable));
+
         ArtifactReference[] artifacts =
         [
-            new(reportPath, ArtifactKind.ReconciliationReport, "Source row counts compared against the target."),
+            new(reportPath, ArtifactKind.ReconciliationReport, "Source row counts and values compared against the target."),
         ];
 
         if (differences.Count > 0)
@@ -128,12 +198,45 @@ public sealed class DataReconciliationAdapter(IDataMigrationGateway? gateway = n
                     $"found {row.Actual.ToString(CultureInfo.InvariantCulture)}")]);
         }
 
+        if (valueDifferences.Count > 0)
+        {
+            return PhaseExecutionResult.Failure(
+                $"Every table holds the right number of rows, but {valueDifferences.Count.ToString(CultureInfo.InvariantCulture)} " +
+                "values do not match the source. No reconciliation was attested.",
+                [.. valueDifferences.Take(50).Select(Describe)]);
+        }
+
         return PhaseExecutionResult.Success(
             artifacts,
             [.. rows.Select(row => $"Reconciled: {row.Table} — {row.Expected.ToString(CultureInfo.InvariantCulture)} rows")]);
     }
 
-    private static string Render(string applicationName, IReadOnlyList<TableReconciliation> rows)
+    private static string Describe(RowDifference difference) => difference.Kind switch
+    {
+        RowDifferenceKind.MissingInTarget => $"{difference.Table} key {difference.Key}: missing from the target",
+        _ => $"{difference.Table} key {difference.Key}: {difference.Column} expected '{difference.Expected}', found '{difference.Actual}'",
+    };
+
+    private static IReadOnlyList<string> PrimaryKey(OracleSchema schema, string table)
+    {
+        OracleTable? match = schema.Tables.FirstOrDefault(candidate =>
+            string.Equals(candidate.Name, table, StringComparison.OrdinalIgnoreCase));
+
+        if (match is null)
+        {
+            return [];
+        }
+
+        return [.. match.Constraints
+            .Where(constraint => constraint.Kind == OracleConstraintKind.PrimaryKey)
+            .SelectMany(constraint => constraint.Columns)];
+    }
+
+    private static string Render(
+        string applicationName,
+        IReadOnlyList<TableReconciliation> rows,
+        IReadOnlyList<RowDifference> valueDifferences,
+        int notComparable)
     {
         StringBuilder builder = new();
         builder.AppendLine("# Data reconciliation").AppendLine();
@@ -157,9 +260,37 @@ public sealed class DataReconciliationAdapter(IDataMigrationGateway? gateway = n
         }
 
         builder.AppendLine();
-        builder.AppendLine("Expected counts are the INSERT statements found in the supplied export. This compares how");
-        builder.AppendLine("many rows arrived, not what is in them: it would not detect a row that loaded with the");
-        builder.AppendLine("wrong values, and it says nothing about behaviour.");
+
+        if (valueDifferences.Count > 0)
+        {
+            builder.AppendLine("## Rows whose values differ").AppendLine();
+            builder.AppendLine("| Table | Key | Column | Expected | In target |");
+            builder.AppendLine("| --- | --- | --- | --- | --- |");
+            foreach (RowDifference difference in valueDifferences.Take(200))
+            {
+                builder.Append("| ").Append(difference.Table)
+                       .Append(" | ").Append(difference.Key)
+                       .Append(" | ").Append(difference.Column ?? "(whole row)")
+                       .Append(" | ").Append(difference.Expected ?? "—")
+                       .Append(" | ").Append(difference.Kind == RowDifferenceKind.MissingInTarget ? "missing" : difference.Actual ?? "—")
+                       .AppendLine(" |");
+            }
+
+            builder.AppendLine();
+        }
+
+        builder.AppendLine("Expected counts are the INSERT statements found in the supplied export. Values are compared");
+        builder.AppendLine("row by row on the primary key, so a row that loaded with the wrong value is reported here.");
+        builder.AppendLine("A table with no parsed primary key is counted but not compared, and this says nothing about");
+        builder.AppendLine("behaviour.");
+
+        if (notComparable > 0)
+        {
+            builder.AppendLine();
+            builder.Append(notComparable.ToString(CultureInfo.InvariantCulture))
+                   .AppendLine(" values were expressions such as SYSDATE or a sequence call. Those differ by definition");
+            builder.AppendLine("and were not compared.");
+        }
 
         return builder.ToString();
     }

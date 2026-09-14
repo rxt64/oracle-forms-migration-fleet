@@ -89,6 +89,53 @@ public sealed class PostgresDataMigrationGateway(
         return counts;
     }
 
+    public async Task<IReadOnlyList<IReadOnlyList<string?>>> FetchAsync(
+        string table,
+        IReadOnlyList<string> columns,
+        int maxRows,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(columns);
+
+        if (columns.Count == 0)
+        {
+            return [];
+        }
+
+        await using NpgsqlConnection connection = await ConnectAsync(cancellationToken).ConfigureAwait(false);
+
+        string projection = string.Join(", ", columns.Select(column => $"{QuoteIdentifier(column)}::text"));
+        string sql = $"select {projection} from {QuoteIdentifier(table)} limit {maxRows.ToString(CultureInfo.InvariantCulture)}";
+
+        List<IReadOnlyList<string?>> rows = [];
+
+        try
+        {
+            await using NpgsqlCommand command = new(sql, connection);
+            await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                string?[] row = new string?[columns.Count];
+                for (int index = 0; index < columns.Count; index++)
+                {
+                    row[index] = await reader.IsDBNullAsync(index, cancellationToken).ConfigureAwait(false)
+                        ? null
+                        : reader.GetString(index);
+                }
+
+                rows.Add(row);
+            }
+        }
+        catch (PostgresException)
+        {
+            // A table or column that is not there is a difference for the caller to report, not a crash.
+            return [];
+        }
+
+        return rows;
+    }
+
     public async Task<DataMigrationOutcome> ApplyAsync(
         IReadOnlyList<DataMigrationStatement> statements,
         IReadOnlyList<string> tables,

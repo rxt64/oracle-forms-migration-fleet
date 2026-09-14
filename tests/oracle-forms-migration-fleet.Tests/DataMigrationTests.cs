@@ -194,6 +194,46 @@ internal sealed class StubDataGateway(DataMigrationOutcome outcome) : IDataMigra
     /// <summary>What the target reports when reconciliation reads it back.</summary>
     public IReadOnlyList<TableRowCount> Counts { get; set; } = [];
 
+    /// <summary>Columns and rows the target returns, per table.</summary>
+    public Dictionary<string, (IReadOnlyList<string> Columns, IReadOnlyList<IReadOnlyList<string?>> Rows)> Fetched { get; } = new(StringComparer.Ordinal);
+
+    public Task<IReadOnlyList<IReadOnlyList<string?>>> FetchAsync(
+        string table,
+        IReadOnlyList<string> columns,
+        int maxRows,
+        CancellationToken cancellationToken)
+    {
+        if (!Fetched.TryGetValue(table, out var stored))
+        {
+            return Task.FromResult<IReadOnlyList<IReadOnlyList<string?>>>([]);
+        }
+
+        // Project the stored rows onto the columns the caller asked for, as the real gateway does.
+        List<IReadOnlyList<string?>> projected = [];
+        foreach (IReadOnlyList<string?> row in stored.Rows)
+        {
+            string?[] cells = new string?[columns.Count];
+            for (int index = 0; index < columns.Count; index++)
+            {
+                int source = -1;
+                for (int candidate = 0; candidate < stored.Columns.Count; candidate++)
+                {
+                    if (string.Equals(stored.Columns[candidate], columns[index], StringComparison.OrdinalIgnoreCase))
+                    {
+                        source = candidate;
+                        break;
+                    }
+                }
+
+                cells[index] = source >= 0 ? row[source] : null;
+            }
+
+            projected.Add(cells);
+        }
+
+        return Task.FromResult<IReadOnlyList<IReadOnlyList<string?>>>(projected);
+    }
+
     public Task<IReadOnlyList<TableRowCount>> CountAsync(
         IReadOnlyList<string> tables,
         CancellationToken cancellationToken) =>
