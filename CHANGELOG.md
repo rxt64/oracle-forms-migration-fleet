@@ -6,6 +6,14 @@ Notable changes to behaviour, with the reasoning that is not visible in a diff.
 
 ### Added
 
+- Generated application build and static validation. `BuildAndStaticValidation` now runs after application
+  conversion and invokes fixed, host-owned commands for Maven packaging and React production compilation.
+  Generated Java targets release 21; generated React passes `tsc --noEmit` before Vite builds it. Command,
+  tool availability, exit status, and bounded output are retained in `build-and-static-analysis.json`, including
+  on phase failure. Missing descriptors, missing tools, timeouts, and nonzero exits fail closed. Long-running
+  execution streams emit keepalives, and child builds receive a restricted environment without the host's
+  Azure identity or Foundry configuration. The Container Apps runtime now includes Java 21, Maven, Node, and npm.
+
 - Compiler-driven PL/pgSQL repair (`Fleet/Execution/ProgramUnitRepairLoop.cs`). PostgreSQL deployment
   failures now retain the rejected statement with its diagnostic and enter a bounded two-attempt repair
   cycle during the execution-approved sandbox phase. Model output may change only a routine's dollar-quoted

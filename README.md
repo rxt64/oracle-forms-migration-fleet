@@ -216,10 +216,12 @@ report `NotRequested` rather than pretending to be blocked.
 - **Database only:** SSMA for Oracle on the SQL Server family; Ora2Pg on PostgreSQL. The planner selects
   one or the other from `target.database` and never both.
 - **Forms UI and logic:** owned by the fleet's own conversion adapter plus a compiler-driven and
-  AI-assisted repair loop. The conversion adapter emits React and Java/Spring Boot artifacts today; generated
-  application code is not yet compiled by a build adapter. PL/pgSQL repair is implemented separately in the
-  execution-approved sandbox phase. Neither SSMA nor Ora2Pg converts Forms UI or runtime behavior, and the
-  planner never lists them for `ApplicationCodeConversion`.
+  AI-assisted repair loop. The conversion adapter emits React and Java/Spring Boot projects, and the following
+  build phase runs fixed host-owned Maven and npm commands. Java must compile with release 21, and React must
+  pass TypeScript checking and a Vite production build. Results are retained in
+  `reports/build-and-static-analysis.json`; missing tools, descriptors, or nonzero exits fail the phase. PL/pgSQL
+  repair is implemented separately in the execution-approved sandbox phase. Neither SSMA nor Ora2Pg converts
+  Forms UI or runtime behavior, and the planner never lists them for `ApplicationCodeConversion`.
 
 ### Program-unit repair
 
