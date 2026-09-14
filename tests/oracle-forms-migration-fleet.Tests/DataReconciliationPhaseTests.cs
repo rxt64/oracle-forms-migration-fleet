@@ -149,6 +149,27 @@ public class DataReconciliationPhaseTests
         Assert.Contains(result.Attestations, attestation => attestation.Kind == AttestationKind.DataReconciliationPassed);
     }
 
+    [Fact]
+    public async Task A_target_that_could_not_be_read_is_not_reported_as_every_row_missing()
+    {
+        // Swallowing the read error turned a fixable fault into 33 false "missing row" findings.
+        StubDataGateway gateway = new(new DataMigrationOutcome(0, 0, [], []))
+        {
+            Counts = [new TableRowCount("orders", 2)],
+        };
+
+        using TemporaryWorkspace workspace = KeyedWorkspace();
+
+        MigrationExecutionResult result = await new MigrationExecutor(
+                workspace.Root,
+                [new Fleet.Execution.Adapters.DataReconciliationAdapter(gateway)])
+            .ExecuteAsync(Request(), Operator);
+
+        PhaseOutcome outcome = result.Phases.Single(phase => phase.Phase == MigrationPhase.DataReconciliation);
+
+        Assert.DoesNotContain(outcome.Findings, finding => finding.Contains("missing from the target", StringComparison.Ordinal));
+    }
+
     private static TemporaryWorkspace KeyedWorkspace()
     {
         TemporaryWorkspace workspace = new();

@@ -52,8 +52,9 @@ public static class RowComparer
         Dictionary<string, IReadOnlyList<string?>> byKey = new(StringComparer.Ordinal);
         int[] keyIndexes = [.. keyColumns.Select(key => IndexOf(targetColumns, key))];
 
-        if (keyIndexes.Any(index => index < 0))
+        if (keyIndexes.Any(index => index < 0) || targetRows.Count == 0)
         {
+            // Reporting every row as missing when the target was never read would be a false finding.
             return new TableComparison(table, 0, expected.Count, []);
         }
 

@@ -104,33 +104,27 @@ public sealed class PostgresDataMigrationGateway(
 
         await using NpgsqlConnection connection = await ConnectAsync(cancellationToken).ConfigureAwait(false);
 
-        string projection = string.Join(", ", columns.Select(column => $"{QuoteIdentifier(column)}::text"));
-        string sql = $"select {projection} from {QuoteIdentifier(table)} limit {maxRows.ToString(CultureInfo.InvariantCulture)}";
+        // The converter emits unquoted lowercase identifiers, so quoting the source's uppercase name
+        // would ask for a column that does not exist.
+        string projection = string.Join(", ", columns.Select(column => $"{QuoteIdentifier(column.ToLowerInvariant())}::text"));
+        string sql = $"select {projection} from {QuoteIdentifier(table.ToLowerInvariant())} limit {maxRows.ToString(CultureInfo.InvariantCulture)}";
 
         List<IReadOnlyList<string?>> rows = [];
 
-        try
-        {
-            await using NpgsqlCommand command = new(sql, connection);
-            await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        await using NpgsqlCommand command = new(sql, connection);
+        await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
 
-            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            string?[] row = new string?[columns.Count];
+            for (int index = 0; index < columns.Count; index++)
             {
-                string?[] row = new string?[columns.Count];
-                for (int index = 0; index < columns.Count; index++)
-                {
-                    row[index] = await reader.IsDBNullAsync(index, cancellationToken).ConfigureAwait(false)
-                        ? null
-                        : reader.GetString(index);
-                }
-
-                rows.Add(row);
+                row[index] = await reader.IsDBNullAsync(index, cancellationToken).ConfigureAwait(false)
+                    ? null
+                    : reader.GetString(index);
             }
-        }
-        catch (PostgresException)
-        {
-            // A table or column that is not there is a difference for the caller to report, not a crash.
-            return [];
+
+            rows.Add(row);
         }
 
         return rows;
