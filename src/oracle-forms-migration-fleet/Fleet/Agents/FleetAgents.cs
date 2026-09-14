@@ -159,7 +159,7 @@ public sealed class CritiqueRepairOrchestrator(
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            result = FleetAgentResult.Failed($"{agent.Name} threw {exception.GetType().Name}.");
+            result = FleetAgentResult.Failed($"{agent.Name} failed: {Execution.FailureText.Describe(exception)}");
         }
 
         OrchestrationStep step = new(index, agent.Role, agent.Name, result.Succeeded, result.Summary);

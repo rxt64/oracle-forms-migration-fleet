@@ -93,7 +93,7 @@ public sealed class SqlRepairAgent(IChatClient chatClient) : IFleetAgent
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            return FleetAgentResult.Failed($"The repair model call failed: {exception.GetType().Name}.");
+            return FleetAgentResult.Failed($"The repair model call failed: {FailureText.Describe(exception)}");
         }
 
         if (!TryReadSql(response.Text, out string repaired))

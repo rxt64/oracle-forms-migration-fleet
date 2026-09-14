@@ -154,7 +154,7 @@ public sealed class ApplicationCodeConversionAdapter(IArtifactReviewer? reviewer
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
-                context.Warn($"The model review did not complete ({exception.GetType().Name}). The generated code is unaffected.");
+                context.Warn($"The model review did not complete ({FailureText.Describe(exception)}). The generated code is unaffected.");
                 context.Workspace.WriteText(reviewPath, ArtifactReviewReport.RenderFailure(
                     context.Request.ApplicationName, context.Request.Target.Database, exception.Message));
             }

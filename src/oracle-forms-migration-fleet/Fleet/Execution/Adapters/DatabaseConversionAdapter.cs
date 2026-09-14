@@ -181,7 +181,7 @@ public sealed class DatabaseConversionAdapter(
             {
                 // The conversion already succeeded and is on disk; a failed review must not discard it.
                 advisories = [];
-                context.Warn($"The model review did not complete ({exception.GetType().Name}). The converted schema is unaffected.");
+                context.Warn($"The model review did not complete ({FailureText.Describe(exception)}). The converted schema is unaffected.");
                 context.Workspace.WriteText(reviewPath, ArtifactReviewReport.RenderFailure(
                     context.Request.ApplicationName, target, exception.Message));
             }
