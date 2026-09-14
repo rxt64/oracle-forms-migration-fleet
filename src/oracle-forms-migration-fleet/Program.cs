@@ -17,9 +17,9 @@
  * Microsoft.Agents.AI.Foundry.Hosting provide the Responses protocol, port binding, health
  * probes, SSE lifecycle, and OpenTelemetry tracing.
  *
- * This service performs assessment and planning only. No execution adapter is implemented in this
- * repository, so it never executes a migration, never mutates a source or target system, and never
- * accepts conversion artifacts without a recorded human approval.
+ * Execution adapters write generated artifacts inside private workspaces and may reach only the
+ * host-configured sandbox PostgreSQL target after planner authorization. Source repositories are never
+ * mutated, and production writes still require the production gate and its attestations.
  *
  * Required environment variables:
  *   FOUNDRY_PROJECT_ENDPOINT        — Foundry project endpoint (auto-injected in hosted containers)
@@ -98,6 +98,7 @@ if (FoundryAgentClient.TryParseEndpoint(
 //   - OpenTelemetry traces and metrics
 //   - x-platform-server response header
 var builder = AgentHost.CreateBuilder(args);
+builder.Services.AddSingleton<IApplicationBuildGateway, ProcessApplicationBuildGateway>();
 
 // The workbench API speaks enums as strings so the static console never carries numeric enum values.
 builder.Services.ConfigureHttpJsonOptions(options =>

@@ -73,6 +73,12 @@ public static class ApplicationCodeEmitter
 
         files.Add(BuildReactTypes(tables));
         files.Add(BuildReactClient(tables));
+        files.Add(BuildReactPackage());
+        files.Add(BuildTypeScriptConfig());
+        files.Add(BuildViteConfig());
+        files.Add(BuildReactIndex());
+        files.Add(BuildReactMain());
+        files.Add(BuildViteTypes());
 
         IReadOnlyList<FormsBlock> screens =
             [.. (forms ?? []).SelectMany(module => module.Blocks).Where(block => block.BaseTable is not null)];
@@ -556,6 +562,98 @@ public static class ApplicationCodeEmitter
         return new GeneratedFile("frontend/src/App.tsx", builder.ToString(), $"React screen over {first.Name}.");
     }
 
+        private static GeneratedFile BuildReactPackage() => new(
+                "frontend/package.json",
+                """
+                {
+                    "name": "migrated-forms-ui",
+                    "private": true,
+                    "version": "1.0.0",
+                    "type": "module",
+                    "scripts": {
+                        "build": "tsc --noEmit && vite build"
+                    },
+                    "dependencies": {
+                        "@vitejs/plugin-react": "4.3.4",
+                        "vite": "6.1.0",
+                        "typescript": "5.7.3",
+                        "react": "19.0.0",
+                        "react-dom": "19.0.0",
+                        "@types/react": "19.0.8",
+                        "@types/react-dom": "19.0.3"
+                    }
+                }
+                """,
+                "Pinned React, TypeScript, and Vite build dependencies.");
+
+        private static GeneratedFile BuildTypeScriptConfig() => new(
+                "frontend/tsconfig.json",
+                """
+                {
+                    "compilerOptions": {
+                        "target": "ES2022",
+                        "useDefineForClassFields": true,
+                        "lib": ["ES2022", "DOM", "DOM.Iterable"],
+                        "allowJs": false,
+                        "skipLibCheck": true,
+                        "esModuleInterop": true,
+                        "allowSyntheticDefaultImports": true,
+                        "strict": true,
+                        "forceConsistentCasingInFileNames": true,
+                        "module": "ESNext",
+                        "moduleResolution": "Bundler",
+                        "resolveJsonModule": true,
+                        "isolatedModules": true,
+                        "noEmit": true,
+                        "jsx": "react-jsx"
+                    },
+                    "include": ["src"],
+                    "references": []
+                }
+                """,
+                "Strict TypeScript compiler configuration for the generated UI.");
+
+        private static GeneratedFile BuildViteConfig() => new(
+                "frontend/vite.config.ts",
+                """
+                import { defineConfig } from "vite";
+                import react from "@vitejs/plugin-react";
+
+                export default defineConfig({ plugins: [react()] });
+                """,
+                "Vite production build configuration.");
+
+        private static GeneratedFile BuildReactIndex() => new(
+                "frontend/index.html",
+                """
+                <!doctype html>
+                <html lang="en">
+                    <head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>Migrated application</title></head>
+                    <body><div id="root"></div><script type="module" src="/src/main.tsx"></script></body>
+                </html>
+                """,
+                "React application host page.");
+
+        private static GeneratedFile BuildReactMain() => new(
+                "frontend/src/main.tsx",
+                """
+                import { StrictMode } from "react";
+                import { createRoot } from "react-dom/client";
+                import App from "./App";
+
+                const root = document.getElementById("root");
+                if (!root) throw new Error("React root element was not found.");
+                createRoot(root).render(<StrictMode><App /></StrictMode>);
+                """,
+                "React browser entry point.");
+
+            private static GeneratedFile BuildViteTypes() => new(
+                "frontend/src/vite-env.d.ts",
+                """
+                /// <reference types="vite/client" />
+                """,
+                "Vite ambient types for import.meta.env.");
+
     private static GeneratedFile BuildDockerfile() => new(
         "backend/Dockerfile",
         """
@@ -606,7 +704,7 @@ public static class ApplicationCodeEmitter
         builder.AppendLine("export PGHOST=<server>.postgres.database.azure.com");
         builder.AppendLine("export PGDATABASE=postgres");
         builder.AppendLine("export PGUSER=<managed identity name>");
-        builder.AppendLine("cd backend && ./mvnw spring-boot:run");
+        builder.AppendLine("cd backend && mvn spring-boot:run");
         builder.AppendLine("```");
 
         return new GeneratedFile("README.md", builder.ToString(), "What was generated, and what still has to be built by hand.");

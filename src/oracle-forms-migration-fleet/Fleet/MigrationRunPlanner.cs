@@ -426,8 +426,8 @@ public static class MigrationRunPlanner
                     new ArtifactReference($"{root}/reports/pilot-component-mapping.md", ArtifactKind.Documentation, "Auditable pilot migration notes: source module to generated component and service mapping, manual edits, and open questions."),
                 ],
                 [
-                    "Fleet Forms-to-React/Java converter (proposed local execution adapter, not implemented in this repository), applied pilot-first to a reviewed module slice before estate-wide conversion",
-                    "Compiler-driven and AI-assisted repair loop over the generated React and Java sources (proposed local execution adapter)",
+                    "Fleet Forms-to-React/Java converter with a connected local execution adapter, applied pilot-first to a reviewed module slice before estate-wide conversion",
+                    "Compiler-driven host-owned Maven and npm build adapter with fixed commands and captured output",
                     "Neither SSMA nor Ora2Pg is used here: they convert database code only, not Forms UI or runtime behavior.",
                 ],
                 []),

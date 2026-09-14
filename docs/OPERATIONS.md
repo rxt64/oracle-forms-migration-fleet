@@ -87,6 +87,11 @@ preserves the useful data-load result without issuing `SandboxMigrationCompleted
 On a rerun, accepted repair SQL is preserved, checked against the newly generated routine envelopes, and
 recompiled. A model call occurs only for routines that remain unresolved after that revalidation.
 
+Generated application validation requires Java 21, Maven, Node, and npm. The checked-in runtime Dockerfile
+installs those tools. A generation run writes `reports/build-and-static-analysis.json` with the fixed
+command, exit code, and bounded output for both Java/Spring Boot and React/TypeScript. A missing tool is a
+phase failure, not a skipped or successful build.
+
 ## Rollback
 
 Revisions are immutable, so rolling back is pointing traffic at the previous one:

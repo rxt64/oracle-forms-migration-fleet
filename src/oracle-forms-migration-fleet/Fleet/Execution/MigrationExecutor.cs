@@ -66,11 +66,13 @@ public sealed class MigrationExecutor
         IArtifactReviewer? reviewer = null,
         IDataMigrationGateway? dataGateway = null,
         Agents.CritiqueRepairOrchestrator? orchestrator = null,
-        ProgramUnitRepairLoop? programUnitRepair = null) =>
+        ProgramUnitRepairLoop? programUnitRepair = null,
+        IApplicationBuildGateway? applicationBuild = null) =>
     [
         new SourceAnalysisAdapter(),
         new DatabaseConversionAdapter(reviewer, orchestrator),
         new ApplicationCodeConversionAdapter(reviewer),
+        new BuildAndStaticValidationAdapter(applicationBuild),
         new SandboxDataMigrationAdapter(dataGateway, programUnitRepair),
         new DataReconciliationAdapter(dataGateway),
     ];

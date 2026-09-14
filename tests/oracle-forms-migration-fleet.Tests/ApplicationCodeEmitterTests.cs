@@ -142,6 +142,18 @@ public class ApplicationCodeEmitterTests
         Assert.Contains("deliberately not here", readme, StringComparison.Ordinal);
         Assert.Contains("Authorization", readme, StringComparison.Ordinal);
     }
+
+    [Theory]
+    [InlineData("frontend/package.json")]
+    [InlineData("frontend/tsconfig.json")]
+    [InlineData("frontend/vite.config.ts")]
+    [InlineData("frontend/index.html")]
+    [InlineData("frontend/src/main.tsx")]
+    [InlineData("frontend/src/vite-env.d.ts")]
+    public void The_generated_frontend_contains_every_build_entry_point(string path)
+    {
+        Assert.Contains(Convert().Files, file => file.Path == path);
+    }
 }
 
 public class ApplicationCodeConversionPhaseTests

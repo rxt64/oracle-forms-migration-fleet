@@ -218,7 +218,8 @@ internal static class WorkbenchEndpoints
                     context.RequestServices.GetService<IArtifactReviewer>(),
                     context.RequestServices.GetService<IDataMigrationGateway>(),
                     context.RequestServices.GetService<Fleet.Agents.CritiqueRepairOrchestrator>(),
-                    context.RequestServices.GetService<ProgramUnitRepairLoop>()));
+                    context.RequestServices.GetService<ProgramUnitRepairLoop>(),
+                    context.RequestServices.GetService<IApplicationBuildGateway>()));
 
             // The run moves off the request thread to keep progress frames flowing while it works.
             Task<MigrationExecutionResult> run = Task.Run(async () =>
@@ -239,7 +240,25 @@ internal static class WorkbenchEndpoints
 
             try
             {
-                await foreach (ExecutionProgress step in channel.Reader.ReadAllAsync(cancellationToken))
+                while (!run.IsCompleted)
+                {
+                    Task<bool> available = channel.Reader.WaitToReadAsync(cancellationToken).AsTask();
+                    Task heartbeat = Task.Delay(TimeSpan.FromSeconds(20), cancellationToken);
+                    Task completed = await Task.WhenAny(available, heartbeat);
+
+                    if (completed == heartbeat)
+                    {
+                        await WriteFrameAsync(context, new { level = "keepalive", text = "Build or migration work is still running." }, cancellationToken);
+                        continue;
+                    }
+
+                    while (channel.Reader.TryRead(out ExecutionProgress? step))
+                    {
+                        await WriteFrameAsync(context, new { level = step.Level, text = step.Text }, cancellationToken);
+                    }
+                }
+
+                while (channel.Reader.TryRead(out ExecutionProgress? step))
                 {
                     await WriteFrameAsync(context, new { level = step.Level, text = step.Text }, cancellationToken);
                 }

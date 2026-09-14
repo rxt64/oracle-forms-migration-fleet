@@ -173,7 +173,6 @@ public static class MigrationWorkbenchCatalog
             "Convert a reviewed pilot slice of Forms UI to React and client-side logic to Java/Spring Boot, then build and statically validate the output.",
             [MigrationPhase.ApplicationCodeConversion, MigrationPhase.BuildAndStaticValidation],
             RequiresExecutionAdapter: true,
-            // ApplicationCodeConversion runs; BuildAndStaticValidation has no adapter.
             AdapterConnected: true,
             ["blob-storage", "app-insights"]),
 
