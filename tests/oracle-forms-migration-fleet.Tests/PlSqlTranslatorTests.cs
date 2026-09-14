@@ -245,10 +245,601 @@ public class PlSqlTranslatorTests
             finding => finding.Reason.Contains("silently replaced the first", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public void A_package_ref_cursor_alias_becomes_a_postgres_refcursor()
+    {
+        PlSqlTranslation translation = PlSqlTranslator.Translate("""
+            CREATE OR REPLACE PACKAGE PKG_REPORTING AS
+                TYPE t_report_cursor IS REF CURSOR;
+            END PKG_REPORTING;
+            /
+            CREATE OR REPLACE PACKAGE BODY PKG_REPORTING AS
+                PROCEDURE HEADCOUNT_REPORT(
+                    p_cursor OUT t_report_cursor,
+                    p_as_of_date IN DATE DEFAULT SYSDATE,
+                    p_dept_id IN NUMBER DEFAULT NULL
+                ) IS
+                BEGIN
+                    OPEN p_cursor FOR SELECT DEPT_ID FROM DEPARTMENTS;
+                END HEADCOUNT_REPORT;
+            END PKG_REPORTING;
+            /
+            """);
+
+        string sql = Unit(translation, "pkg_reporting_headcount_report").Sql;
+
+        Assert.Contains("OUT p_cursor refcursor", sql, StringComparison.Ordinal);
+        Assert.Contains("p_as_of_date date DEFAULT CURRENT_DATE", sql, StringComparison.Ordinal);
+        Assert.Contains("p_dept_id numeric DEFAULT NULL", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("t_report_cursor", sql, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void A_sys_refcursor_return_and_local_variable_become_postgres_refcursors()
+    {
+        PlSqlTranslation translation = PlSqlTranslator.Translate("""
+            CREATE OR REPLACE PACKAGE BODY PKG_AUDIT AS
+                FUNCTION GET_CHANGE_HISTORY(
+                    p_table_name IN VARCHAR2,
+                    p_user IN VARCHAR2 DEFAULT USER
+                ) RETURN SYS_REFCURSOR IS
+                    v_cursor SYS_REFCURSOR;
+                BEGIN
+                    OPEN v_cursor FOR SELECT AUDIT_ID FROM AUDIT_LOG WHERE TABLE_NAME = p_table_name;
+                    RETURN v_cursor;
+                END GET_CHANGE_HISTORY;
+            END PKG_AUDIT;
+            /
+            """);
+
+        string sql = Unit(translation, "pkg_audit_get_change_history").Sql;
+
+        Assert.Contains("p_user text DEFAULT CURRENT_USER", sql, StringComparison.Ordinal);
+        Assert.Contains("RETURNS refcursor", sql, StringComparison.Ordinal);
+        Assert.Contains("v_cursor refcursor;", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_parameter_that_cannot_be_parsed_refuses_the_whole_routine()
+    {
+        PlSqlTranslation translation = PlSqlTranslator.Translate("""
+            CREATE OR REPLACE PACKAGE BODY PKG_X AS
+                PROCEDURE DO_IT(p_values IN TABLE OF NUMBER) IS
+                BEGIN
+                    NULL;
+                END DO_IT;
+            END PKG_X;
+            /
+            """);
+
+        Assert.DoesNotContain(translation.Units, unit => unit.Name == "pkg_x_do_it");
+        Assert.Contains(
+            translation.Findings,
+            finding => finding.Construct == "PKG_X.DO_IT"
+                       && finding.Reason.Contains("routine was not emitted", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_refusal_keyword_inside_a_comment_does_not_delete_the_routine()
+    {
+        PlSqlTranslation translation = PlSqlTranslator.Translate("""
+            CREATE OR REPLACE PACKAGE BODY PKG_PAYROLL AS
+                PROCEDURE CALCULATE_PAYROLL IS
+                BEGIN
+                    -- This loop should use BULK COLLECT and FORALL in Oracle.
+                    NULL;
+                END CALCULATE_PAYROLL;
+            END PKG_PAYROLL;
+            /
+            """);
+
+        Assert.Contains(translation.Units, unit => unit.Name == "pkg_payroll_calculate_payroll");
+    }
+
+    [Fact]
+    public void Raise_application_error_preserves_the_message_and_oracle_code_for_review()
+    {
+        PlSqlTranslation translation = PlSqlTranslator.Translate("""
+            CREATE OR REPLACE PACKAGE BODY PKG_EMPLOYEE AS
+                PROCEDURE VALIDATE_DEPT(p_dept_id IN NUMBER) IS
+                BEGIN
+                    RAISE_APPLICATION_ERROR(-20003, 'Invalid department: ' || p_dept_id);
+                END VALIDATE_DEPT;
+            END PKG_EMPLOYEE;
+            /
+            """);
+
+        string sql = Unit(translation, "pkg_employee_validate_dept").Sql;
+
+        Assert.Contains("RAISE EXCEPTION USING MESSAGE = 'Invalid department: ' || p_dept_id", sql, StringComparison.Ordinal);
+        Assert.Contains("ERRCODE = 'P0001', DETAIL = 'Oracle error -20003'", sql, StringComparison.Ordinal);
+        Assert.Contains(
+            translation.Findings,
+            finding => finding.Construct == "PKG_EMPLOYEE.VALIDATE_DEPT"
+                       && finding.Severity == ConversionSeverity.ManualReview
+                       && finding.Reason.Contains("numeric Oracle code", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Dbms_output_becomes_a_notice_and_is_reported_as_a_caller_change()
+    {
+        PlSqlTranslation translation = PlSqlTranslator.Translate("""
+            CREATE OR REPLACE PACKAGE BODY PKG_AUDIT AS
+                PROCEDURE PURGE_OLD_RECORDS IS
+                BEGIN
+                    DBMS_OUTPUT.PUT_LINE('Purged records');
+                END PURGE_OLD_RECORDS;
+            END PKG_AUDIT;
+            /
+            """);
+
+        string sql = Unit(translation, "pkg_audit_purge_old_records").Sql;
+
+        Assert.Contains("RAISE NOTICE '%', 'Purged records';", sql, StringComparison.Ordinal);
+        Assert.Contains(
+            translation.Findings,
+            finding => finding.Construct == "PKG_AUDIT.PURGE_OLD_RECORDS"
+                       && finding.Severity == ConversionSeverity.ManualReview);
+    }
+
+    [Fact]
+    public void Initialized_variables_row_count_and_dual_are_rewritten()
+    {
+        PlSqlTranslation translation = PlSqlTranslator.Translate("""
+            CREATE OR REPLACE PACKAGE BODY PKG_COMMON AS
+                FUNCTION NEXT_ID RETURN NUMBER IS
+                    v_id NUMBER := 0;
+                BEGIN
+                    SELECT SEQ_EMPLOYEE.NEXTVAL INTO v_id FROM DUAL;
+                    UPDATE EMPLOYEES SET ACTIVE_FLAG = 'Y';
+                    v_id := SQL%ROWCOUNT;
+                    RETURN v_id;
+                END NEXT_ID;
+            END PKG_COMMON;
+            /
+            """);
+
+        string sql = Unit(translation, "pkg_common_next_id").Sql;
+
+        Assert.Contains("v_id numeric := 0;", sql, StringComparison.Ordinal);
+        Assert.Contains("SELECT nextval('seq_employee') INTO v_id;", sql, StringComparison.Ordinal);
+        Assert.Contains("GET DIAGNOSTICS v_id = ROW_COUNT;", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("DUAL", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("SQL%ROWCOUNT", sql, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Theory]
-    [InlineData("RAISE_APPLICATION_ERROR(-20001, 'bad');")]
+    [InlineData("OPEN p_cursor FOR v_sql;", "OPEN FOR dynamic SQL")]
+    [InlineData("OPEN p_cursor FOR (v_sql);", "OPEN FOR dynamic SQL")]
+    [InlineData("OPEN p_cursor FOR 'SELECT * FROM EMPLOYEES';", "OPEN FOR dynamic SQL")]
+    [InlineData("OPEN p_cursor FOR q'[SELECT * FROM EMPLOYEES]';", "OPEN FOR dynamic SQL")]
+    [InlineData("SELECT EMP_ID FROM EMPLOYEES CONNECT BY PRIOR EMP_ID = MANAGER_EMP_ID;", "CONNECT BY")]
+    [InlineData("v_connection := UTL_SMTP.OPEN_CONNECTION('mail', 25);", "UTL_SMTP")]
+    public void Unsafe_cursor_and_platform_specific_queries_are_refused(string body, string construct)
+    {
+        PlSqlTranslation translation = PlSqlTranslator.Translate($"""
+            CREATE OR REPLACE PACKAGE BODY PKG_X AS
+                PROCEDURE DO_IT(p_cursor OUT SYS_REFCURSOR) IS
+                    v_sql VARCHAR2(100);
+                BEGIN
+                    {body}
+                END DO_IT;
+            END PKG_X;
+            /
+            """);
+
+        Assert.DoesNotContain(translation.Units, unit => unit.Name == "pkg_x_do_it");
+        Assert.Contains(
+            translation.Findings,
+            finding => finding.Construct == "PKG_X.DO_IT"
+                       && finding.Reason.Contains(construct, StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Comment_markers_inside_a_string_do_not_hide_an_unsafe_call()
+    {
+        PlSqlTranslation translation = PlSqlTranslator.Translate("""
+            CREATE OR REPLACE PACKAGE BODY PKG_X AS
+                PROCEDURE DO_IT IS
+                    v_text VARCHAR2(20);
+                BEGIN
+                    v_text := '-- harmless'; UTL_SMTP.OPEN_CONNECTION('mail', 25);
+                END DO_IT;
+            END PKG_X;
+            /
+            """);
+
+        Assert.DoesNotContain(translation.Units, unit => unit.Name == "pkg_x_do_it");
+        Assert.Contains(translation.Findings, finding => finding.Reason.Contains("UTL_SMTP", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("p_optional IN NUMBER DEFAULT 1, p_required IN NUMBER")]
+    [InlineData("p_value OUT NUMBER DEFAULT 1")]
+    public void A_signature_postgres_cannot_represent_is_refused(string parameters)
+    {
+        PlSqlTranslation translation = PlSqlTranslator.Translate($"""
+            CREATE OR REPLACE PACKAGE BODY PKG_X AS
+                PROCEDURE DO_IT({parameters}) IS
+                BEGIN
+                    NULL;
+                END DO_IT;
+            END PKG_X;
+            /
+            """);
+
+        Assert.DoesNotContain(translation.Units, unit => unit.Name == "pkg_x_do_it");
+        Assert.Contains(translation.Findings, finding => finding.Construct == "PKG_X.DO_IT");
+    }
+
+    [Fact]
+    public void Ref_cursor_aliases_are_scoped_to_their_package()
+    {
+        PlSqlTranslation translation = PlSqlTranslator.Translate("""
+            CREATE OR REPLACE PACKAGE PKG_A AS
+                TYPE t_cursor IS REF CURSOR;
+            END PKG_A;
+            /
+            CREATE OR REPLACE PACKAGE BODY PKG_B AS
+                PROCEDURE DO_IT(p_cursor OUT t_cursor) IS
+                BEGIN
+                    OPEN p_cursor FOR SELECT 1;
+                END DO_IT;
+            END PKG_B;
+            /
+            """);
+
+        Assert.DoesNotContain(translation.Units, unit => unit.Name == "pkg_b_do_it");
+        Assert.Contains(translation.Findings, finding => finding.Reason.Contains("unresolved cursor type", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void New_rewrites_do_not_change_string_literals_or_comments()
+    {
+        PlSqlTranslation translation = PlSqlTranslator.Translate("""
+            CREATE OR REPLACE PACKAGE BODY PKG_X AS
+                FUNCTION TEXT_VALUE RETURN VARCHAR2 IS
+                BEGIN
+                    -- DBMS_OUTPUT.PUT_LINE('not executable');
+                    RETURN ' FROM DUAL; SQL%ROWCOUNT; DBMS_OUTPUT.PUT_LINE(''x'');';
+                END TEXT_VALUE;
+            END PKG_X;
+            /
+            """);
+
+        string sql = Unit(translation, "pkg_x_text_value").Sql;
+
+        Assert.Contains("-- DBMS_OUTPUT.PUT_LINE('not executable');", sql, StringComparison.Ordinal);
+        Assert.Contains("' FROM DUAL; SQL%ROWCOUNT; DBMS_OUTPUT.PUT_LINE(''x'');'", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_rewrite_cannot_start_in_a_comment_and_consume_code_on_the_next_line()
+    {
+        PlSqlTranslation translation = PlSqlTranslator.Translate("""
+            CREATE OR REPLACE PACKAGE BODY PKG_X AS
+                PROCEDURE DO_IT IS
+                BEGIN
+                    -- DBMS_OUTPUT.PUT_LINE(
+                    NULL);
+                END DO_IT;
+            END PKG_X;
+            /
+            """);
+
+        string sql = Unit(translation, "pkg_x_do_it").Sql;
+
+        Assert.Contains("-- DBMS_OUTPUT.PUT_LINE(", sql, StringComparison.Ordinal);
+        Assert.Contains("NULL);", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("RAISE NOTICE", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void An_unresolved_local_cursor_declaration_refuses_the_whole_routine()
+    {
+        PlSqlTranslation translation = PlSqlTranslator.Translate("""
+            CREATE OR REPLACE PACKAGE BODY PKG_X AS
+                PROCEDURE DO_IT IS
+                    v_cursor t_missing_cursor;
+                BEGIN
+                    OPEN v_cursor FOR SELECT 1;
+                END DO_IT;
+            END PKG_X;
+            /
+            """);
+
+        Assert.DoesNotContain(translation.Units, unit => unit.Name == "pkg_x_do_it");
+        Assert.Contains(translation.Findings, finding => finding.Reason.Contains("routine was not emitted", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_comment_between_dual_and_the_terminator_refuses_the_routine()
+    {
+        PlSqlTranslation translation = PlSqlTranslator.Translate("""
+            CREATE OR REPLACE PACKAGE BODY PKG_X AS
+                FUNCTION DO_IT RETURN NUMBER IS
+                    v_value NUMBER;
+                BEGIN
+                    SELECT 1 INTO v_value FROM DUAL /* source compatibility */;
+                    RETURN v_value;
+                END DO_IT;
+            END PKG_X;
+            /
+            """);
+
+        Assert.DoesNotContain(translation.Units, unit => unit.Name == "pkg_x_do_it");
+        Assert.Contains(translation.Findings, finding => finding.Reason.Contains("FROM DUAL", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Assignment_defaults_and_commas_inside_literals_are_preserved()
+    {
+        PlSqlTranslation translation = PlSqlTranslator.Translate("""
+            CREATE OR REPLACE PACKAGE BODY PKG_X AS
+                FUNCTION DO_IT(
+                    p_label IN VARCHAR2 := 'a,b',
+                    p_actor IN VARCHAR2 DEFAULT 'USER'
+                ) RETURN VARCHAR2 IS
+                BEGIN
+                    RETURN p_label || p_actor;
+                END DO_IT;
+            END PKG_X;
+            /
+            """);
+
+        string sql = Unit(translation, "pkg_x_do_it").Sql;
+
+        Assert.Contains("p_label text DEFAULT 'a,b'", sql, StringComparison.Ordinal);
+        Assert.Contains("p_actor text DEFAULT 'USER'", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("'CURRENT_USER'", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_routine_local_cursor_alias_does_not_leak_to_another_routine()
+    {
+        PlSqlTranslation translation = PlSqlTranslator.Translate("""
+            CREATE OR REPLACE PACKAGE BODY PKG_X AS
+                PROCEDURE DECLARES_ALIAS IS
+                    TYPE t_local_cursor IS REF CURSOR;
+                BEGIN
+                    NULL;
+                END DECLARES_ALIAS;
+                PROCEDURE USES_ALIAS(p_cursor OUT t_local_cursor) IS
+                BEGIN
+                    OPEN p_cursor FOR SELECT 1;
+                END USES_ALIAS;
+            END PKG_X;
+            /
+            """);
+
+        Assert.DoesNotContain(translation.Units, unit => unit.Name == "pkg_x_uses_alias");
+    }
+
+    [Fact]
+    public void Oracle_alternative_quoted_text_is_not_scanned_as_executable_code()
+    {
+        PlSqlTranslation translation = PlSqlTranslator.Translate("""
+            CREATE OR REPLACE PACKAGE BODY PKG_X AS
+                FUNCTION TEXT_VALUE RETURN VARCHAR2 IS
+                BEGIN
+                    RETURN q'[it's UTL_SMTP text]';
+                END TEXT_VALUE;
+            END PKG_X;
+            /
+            """);
+
+        string sql = Unit(translation, "pkg_x_text_value").Sql;
+
+        Assert.Contains("RETURN 'it''s UTL_SMTP text';", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("q'[", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(
+            translation.Findings,
+            finding => finding.Construct == "PKG_X.TEXT_VALUE"
+                       && finding.Reason.Contains("UTL_SMTP", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Oracle_call_messages_may_contain_a_closing_call_sequence()
+    {
+        PlSqlTranslation translation = PlSqlTranslator.Translate("""
+            CREATE OR REPLACE PACKAGE BODY PKG_X AS
+                PROCEDURE DO_IT IS
+                BEGIN
+                    DBMS_OUTPUT.PUT_LINE('before ); after');
+                    RAISE_APPLICATION_ERROR(-20001, 'bad ); value');
+                END DO_IT;
+            END PKG_X;
+            /
+            """);
+
+        string sql = Unit(translation, "pkg_x_do_it").Sql;
+
+        Assert.Contains("RAISE NOTICE '%', 'before ); after';", sql, StringComparison.Ordinal);
+        Assert.Contains("MESSAGE = 'bad ); value'", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("DBMS_OUTPUT", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("RAISE_APPLICATION_ERROR", sql, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void One_removable_dual_does_not_hide_an_aliased_dual()
+    {
+        PlSqlTranslation translation = PlSqlTranslator.Translate("""
+            CREATE OR REPLACE PACKAGE BODY PKG_X AS
+                PROCEDURE DO_IT IS
+                    v_one NUMBER;
+                    v_two NUMBER;
+                BEGIN
+                    SELECT 1 INTO v_one FROM DUAL;
+                    SELECT 2 INTO v_two FROM DUAL d;
+                END DO_IT;
+            END PKG_X;
+            /
+            """);
+
+        Assert.DoesNotContain(translation.Units, unit => unit.Name == "pkg_x_do_it");
+        Assert.Contains(translation.Findings, finding => finding.Reason.Contains("FROM DUAL", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void An_unknown_type_is_refused_without_relying_on_its_name()
+    {
+        PlSqlTranslation translation = PlSqlTranslator.Translate("""
+            CREATE OR REPLACE PACKAGE BODY PKG_X AS
+                PROCEDURE DO_IT(p_value OUT t_result) IS
+                BEGIN
+                    NULL;
+                END DO_IT;
+            END PKG_X;
+            /
+            """);
+
+        Assert.DoesNotContain(translation.Units, unit => unit.Name == "pkg_x_do_it");
+        Assert.Contains(translation.Findings, finding => finding.Reason.Contains("unresolved cursor type", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Sql_rowcount_outside_a_direct_assignment_is_refused()
+    {
+        PlSqlTranslation translation = PlSqlTranslator.Translate("""
+            CREATE OR REPLACE PACKAGE BODY PKG_X AS
+                PROCEDURE DO_IT IS
+                BEGIN
+                    UPDATE EMPLOYEES SET ACTIVE_FLAG = 'Y';
+                    IF SQL%ROWCOUNT = 0 THEN
+                        NULL;
+                    END IF;
+                END DO_IT;
+            END PKG_X;
+            /
+            """);
+
+        Assert.DoesNotContain(translation.Units, unit => unit.Name == "pkg_x_do_it");
+        Assert.Contains(translation.Findings, finding => finding.Reason.Contains("SQL%ROWCOUNT", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_computed_raise_application_error_code_is_refused()
+    {
+        PlSqlTranslation translation = PlSqlTranslator.Translate("""
+            CREATE OR REPLACE PACKAGE BODY PKG_X AS
+                PROCEDURE DO_IT IS
+                    v_code NUMBER := -20001;
+                BEGIN
+                    RAISE_APPLICATION_ERROR(v_code, 'bad');
+                END DO_IT;
+            END PKG_X;
+            /
+            """);
+
+        Assert.DoesNotContain(translation.Units, unit => unit.Name == "pkg_x_do_it");
+        Assert.Contains(translation.Findings, finding => finding.Reason.Contains("literal Oracle error number", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_multiline_initialized_declaration_is_translated_as_one_statement()
+    {
+        PlSqlTranslation translation = PlSqlTranslator.Translate("""
+            CREATE OR REPLACE PACKAGE BODY PKG_X AS
+                FUNCTION DO_IT RETURN NUMBER IS
+                    v_total NUMBER :=
+                        0;
+                BEGIN
+                    RETURN v_total;
+                END DO_IT;
+            END PKG_X;
+            /
+            """);
+
+        string sql = Unit(translation, "pkg_x_do_it").Sql;
+
+        Assert.Contains("v_total numeric := 0;", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("v_total NUMBER", sql, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void A_q_quoted_default_with_an_apostrophe_and_comma_is_one_parameter()
+    {
+        PlSqlTranslation translation = PlSqlTranslator.Translate("""
+            CREATE OR REPLACE PACKAGE BODY PKG_X AS
+                FUNCTION DO_IT(p_label IN VARCHAR2 DEFAULT q'[it's,a]') RETURN VARCHAR2 IS
+                BEGIN
+                    RETURN p_label;
+                END DO_IT;
+            END PKG_X;
+            /
+            """);
+
+        string sql = Unit(translation, "pkg_x_do_it").Sql;
+
+        Assert.Contains("p_label text DEFAULT 'it''s,a'", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("q'[", sql, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("MY_RAISE_APPLICATION_ERROR(-20001, 'bad');")]
+    [InlineData("MY_DBMS_OUTPUT.PUT_LINE('message');")]
+    [InlineData("OTHER.DBMS_OUTPUT.PUT_LINE('message');")]
+    public void Longer_or_qualified_builtin_names_are_not_partially_rewritten(string body)
+    {
+        PlSqlTranslation translation = PlSqlTranslator.Translate($"""
+            CREATE OR REPLACE PACKAGE BODY PKG_X AS
+                PROCEDURE DO_IT IS
+                BEGIN
+                    {body}
+                END DO_IT;
+            END PKG_X;
+            /
+            """);
+
+        Assert.DoesNotContain(translation.Units, unit => unit.Name == "pkg_x_do_it");
+        Assert.Contains(translation.Findings, finding => finding.Severity == ConversionSeverity.Unsupported);
+    }
+
+    [Fact]
+    public void A_qualified_sql_rowcount_target_is_refused_instead_of_partially_rewritten()
+    {
+        PlSqlTranslation translation = PlSqlTranslator.Translate("""
+            CREATE OR REPLACE PACKAGE BODY PKG_X AS
+                PROCEDURE DO_IT IS
+                    v_result EMPLOYEES%ROWTYPE;
+                BEGIN
+                    UPDATE EMPLOYEES SET ACTIVE_FLAG = 'Y';
+                    v_result.row_count := SQL%ROWCOUNT;
+                END DO_IT;
+            END PKG_X;
+            /
+            """);
+
+        Assert.DoesNotContain(translation.Units, unit => unit.Name == "pkg_x_do_it");
+        Assert.Contains(translation.Findings, finding => finding.Reason.Contains("SQL%ROWCOUNT", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("RETURN OTHER.NVL(p_value, 0);")]
+    [InlineData("RETURN a.USER;")]
+    [InlineData("RETURN pkg.SYSDATE;")]
+    [InlineData("RETURN pkg.SYSTIMESTAMP;")]
+    [InlineData("RETURN HR.ACCOUNT_SEQ.NEXTVAL;")]
+    public void Qualified_oracle_builtins_are_refused_instead_of_partially_rewritten(string body)
+    {
+        PlSqlTranslation translation = PlSqlTranslator.Translate($"""
+            CREATE OR REPLACE PACKAGE BODY PKG_X AS
+                FUNCTION DO_IT(p_value IN NUMBER) RETURN NUMBER IS
+                BEGIN
+                    {body}
+                END DO_IT;
+            END PKG_X;
+            /
+            """);
+
+        Assert.DoesNotContain(translation.Units, unit => unit.Name == "pkg_x_do_it");
+        Assert.Contains(
+            translation.Findings,
+            finding => finding.Reason.Contains("qualified Oracle built-in", StringComparison.Ordinal));
+    }
+
+    [Theory]
     [InlineData("PRAGMA AUTONOMOUS_TRANSACTION; v NUMBER;")]
-    [InlineData("DBMS_OUTPUT.PUT_LINE('x');")]
     [InlineData("EXECUTE IMMEDIATE 'select 1';")]
     [InlineData("EXCEPTION WHEN VALUE_ERROR THEN NULL;")]
     public void A_routine_postgres_cannot_take_is_refused_rather_than_emitted(string body)
