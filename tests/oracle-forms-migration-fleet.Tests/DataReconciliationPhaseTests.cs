@@ -170,6 +170,40 @@ public class DataReconciliationPhaseTests
         Assert.DoesNotContain(outcome.Findings, finding => finding.Contains("missing from the target", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public async Task A_value_the_target_column_rounds_is_not_a_difference()
+    {
+        // NUMBER(6,2) rounds 0.833 to 0.83 on the way in, and Oracle would have done the same.
+        StubDataGateway gateway = new(new DataMigrationOutcome(0, 0, [], []))
+        {
+            Counts = [new TableRowCount("rates", 1)],
+        };
+
+        gateway.Fetched["rates"] = (["ID", "ACCRUAL_RATE"], [["1", "0.83"]]);
+
+        using TemporaryWorkspace workspace = new();
+        workspace.WriteFile(
+            "legacy/forms/db/001_schema.sql",
+            """
+            CREATE TABLE RATES (
+                ID NUMBER(10) NOT NULL,
+                ACCRUAL_RATE NUMBER(6,2),
+                CONSTRAINT PK_RATES PRIMARY KEY (ID)
+            );
+            """);
+        workspace.WriteFile("legacy/forms/db/002_data.sql", "INSERT INTO RATES (ID, ACCRUAL_RATE) VALUES (1, 0.833);");
+
+        MigrationExecutionResult result = await new MigrationExecutor(
+                workspace.Root,
+                [new Fleet.Execution.Adapters.DataReconciliationAdapter(gateway)])
+            .ExecuteAsync(Request(), Operator);
+
+        Assert.Equal(
+            PhaseExecutionState.Executed,
+            result.Phases.Single(phase => phase.Phase == MigrationPhase.DataReconciliation).State);
+        Assert.Contains(result.Attestations, attestation => attestation.Kind == AttestationKind.DataReconciliationPassed);
+    }
+
     private static TemporaryWorkspace KeyedWorkspace()
     {
         TemporaryWorkspace workspace = new();

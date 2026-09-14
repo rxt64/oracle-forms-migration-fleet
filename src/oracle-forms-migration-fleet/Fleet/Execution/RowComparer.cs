@@ -22,6 +22,7 @@ public sealed record TableComparison(
     string Table,
     int Compared,
     int NotComparable,
+    int Rounded,
     IReadOnlyList<RowDifference> Differences);
 
 /// <summary>
@@ -42,7 +43,8 @@ public static class RowComparer
         IReadOnlyList<string> keyColumns,
         IReadOnlyList<(IReadOnlyList<string> Columns, IReadOnlyList<string> Values)> expected,
         IReadOnlyList<string> targetColumns,
-        IReadOnlyList<IReadOnlyList<string?>> targetRows)
+        IReadOnlyList<IReadOnlyList<string?>> targetRows,
+        IReadOnlyDictionary<string, int>? scales = null)
     {
         ArgumentNullException.ThrowIfNull(keyColumns);
         ArgumentNullException.ThrowIfNull(expected);
@@ -55,7 +57,7 @@ public static class RowComparer
         if (keyIndexes.Any(index => index < 0) || targetRows.Count == 0)
         {
             // Reporting every row as missing when the target was never read would be a false finding.
-            return new TableComparison(table, 0, expected.Count, []);
+            return new TableComparison(table, 0, expected.Count, 0, []);
         }
 
         foreach (IReadOnlyList<string?> row in targetRows)
@@ -66,6 +68,7 @@ public static class RowComparer
         List<RowDifference> differences = [];
         int compared = 0;
         int notComparable = 0;
+        int rounded = 0;
 
         foreach ((IReadOnlyList<string> columns, IReadOnlyList<string> values) in expected)
         {
@@ -104,14 +107,38 @@ public static class RowComparer
                 }
 
                 string? have = actual[target];
-                if (!Same(want, have))
+                if (Same(want, have))
                 {
-                    differences.Add(new RowDifference(RowDifferenceKind.ValueDiffers, table, key, column, want, have));
+                    continue;
                 }
+
+                // A column declared with a scale rounds on the way in, and Oracle would have rounded it
+                // the same way. That is the column doing its job, not the migration losing data.
+                if (scales is not null
+                    && scales.TryGetValue(column, out int scale)
+                    && RoundsTo(want, have, scale))
+                {
+                    rounded++;
+                    continue;
+                }
+
+                differences.Add(new RowDifference(RowDifferenceKind.ValueDiffers, table, key, column, want, have));
             }
         }
 
-        return new TableComparison(table, compared, notComparable, differences);
+        return new TableComparison(table, compared, notComparable, rounded, differences);
+    }
+
+    private static bool RoundsTo(string? expected, string? actual, int scale)
+    {
+        if (expected is null || actual is null || scale < 0)
+        {
+            return false;
+        }
+
+        return decimal.TryParse(expected, NumberStyles.Number, CultureInfo.InvariantCulture, out decimal want)
+            && decimal.TryParse(actual, NumberStyles.Number, CultureInfo.InvariantCulture, out decimal have)
+            && Math.Round(want, scale, MidpointRounding.AwayFromZero) == have;
     }
 
     private static bool TryKey(

@@ -131,6 +131,7 @@ public sealed class DataReconciliationAdapter(IDataMigrationGateway? gateway = n
         OracleSchema schema = OracleSchema.Merge(schemas);
         List<RowDifference> valueDifferences = [];
         int notComparable = 0;
+        int rounded = 0;
 
         foreach (TableReconciliation row in rows.Where(row => row.Matches))
         {
@@ -162,9 +163,10 @@ public sealed class DataReconciliationAdapter(IDataMigrationGateway? gateway = n
                 continue;
             }
 
-            TableComparison comparison = RowComparer.Compare(row.Table, keys, source, columns, target);
+            TableComparison comparison = RowComparer.Compare(row.Table, keys, source, columns, target, Scales(schema, row.Table));
             valueDifferences.AddRange(comparison.Differences);
             notComparable += comparison.NotComparable;
+            rounded += comparison.Rounded;
 
             if (comparison.Differences.Count > 0)
             {
@@ -216,6 +218,24 @@ public sealed class DataReconciliationAdapter(IDataMigrationGateway? gateway = n
         RowDifferenceKind.MissingInTarget => $"{difference.Table} key {difference.Key}: missing from the target",
         _ => $"{difference.Table} key {difference.Key}: {difference.Column} expected '{difference.Expected}', found '{difference.Actual}'",
     };
+
+    /// <summary>Declared scale per column, so a value the column rounds is not read as a difference.</summary>
+    private static IReadOnlyDictionary<string, int> Scales(OracleSchema schema, string table)
+    {
+        OracleTable? match = schema.Tables.FirstOrDefault(candidate =>
+            string.Equals(candidate.Name, table, StringComparison.OrdinalIgnoreCase));
+
+        Dictionary<string, int> scales = new(StringComparer.OrdinalIgnoreCase);
+        foreach (OracleColumn column in match?.Columns ?? [])
+        {
+            if (column.Scale is int scale)
+            {
+                scales[column.Name] = scale;
+            }
+        }
+
+        return scales;
+    }
 
     private static IReadOnlyList<string> PrimaryKey(OracleSchema schema, string table)
     {
