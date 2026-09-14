@@ -201,6 +201,50 @@ public class PlSqlTranslatorTests
         Assert.Contains(translation.Findings, finding => finding.Severity == ConversionSeverity.Unsupported);
     }
 
+    [Fact]
+    public void An_owner_qualified_package_keeps_its_own_name()
+    {
+        // HRMS.PKG_AUDIT is the owner and the package. Taking the owner collapsed every package into one
+        // prefix, so same-named routines from different packages overwrote each other.
+        PlSqlTranslation translation = PlSqlTranslator.Translate("""
+            CREATE OR REPLACE PACKAGE BODY HRMS.PKG_AUDIT AS
+                FUNCTION GET_PARAM(p_code IN VARCHAR2) RETURN VARCHAR2 IS
+                BEGIN
+                    RETURN p_code;
+                END GET_PARAM;
+            END PKG_AUDIT;
+            /
+            """);
+
+        PlSqlUnit unit = Assert.Single(translation.Units, candidate => candidate.Kind == PlSqlUnitKind.Function);
+
+        Assert.Equal("pkg_audit_get_param", unit.Name);
+        Assert.DoesNotContain("hrms_get_param", unit.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_second_unit_with_the_same_name_is_refused_rather_than_silently_replacing_the_first()
+    {
+        PlSqlTranslation translation = PlSqlTranslator.Translate("""
+            CREATE OR REPLACE PACKAGE BODY PKG_ONE AS
+                FUNCTION F RETURN NUMBER IS
+                BEGIN
+                    RETURN 1;
+                END F;
+                FUNCTION F RETURN NUMBER IS
+                BEGIN
+                    RETURN 2;
+                END F;
+            END PKG_ONE;
+            /
+            """);
+
+        Assert.Single(translation.Units, unit => unit.Name == "pkg_one_f");
+        Assert.Contains(
+            translation.Findings,
+            finding => finding.Reason.Contains("silently replaced the first", StringComparison.Ordinal));
+    }
+
     [Theory]
     [InlineData("RAISE_APPLICATION_ERROR(-20001, 'bad');")]
     [InlineData("PRAGMA AUTONOMOUS_TRANSACTION; v NUMBER;")]

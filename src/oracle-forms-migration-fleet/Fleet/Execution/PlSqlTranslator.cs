@@ -133,7 +133,37 @@ public static partial class PlSqlTranslator
             }
         }
 
-        return new PlSqlTranslation(units, findings);
+        return new PlSqlTranslation(Distinct(units, findings), findings);
+    }
+
+    /// <summary>
+    /// Drops a unit whose name is already taken, and says which.
+    ///
+    /// Everything is emitted as CREATE OR REPLACE, so two units sharing a name would not error: the second
+    /// would silently replace the first and a routine would vanish from the target with nothing to show for it.
+    /// </summary>
+    private static IReadOnlyList<PlSqlUnit> Distinct(List<PlSqlUnit> units, List<ConversionFinding> findings)
+    {
+        HashSet<string> seen = new(StringComparer.OrdinalIgnoreCase);
+        List<PlSqlUnit> kept = [];
+
+        foreach (PlSqlUnit unit in units)
+        {
+            if (unit.Sql.Length > 0 && !seen.Add($"{unit.Kind}:{unit.Name}"))
+            {
+                findings.Add(new ConversionFinding(
+                    ConversionSeverity.Unsupported,
+                    "Program unit",
+                    unit.Name,
+                    "A second program unit translated to this same name. It was not emitted, because CREATE OR " +
+                    "REPLACE would have silently replaced the first one."));
+                continue;
+            }
+
+            kept.Add(unit);
+        }
+
+        return kept;
     }
 
     /// <summary>Renders the translated units in dependency order: routines, then triggers, then views.</summary>
@@ -576,19 +606,19 @@ public static partial class PlSqlTranslator
     [GeneratedRegex(@"^[ \t]*(WHENEVER|SET[ \t]+DEFINE|ALTER[ \t]+SESSION)\b[^\n]*$", RegexOptions.IgnoreCase | RegexOptions.Multiline, 2000)]
     private static partial Regex ClientDirectivePattern();
 
-    [GeneratedRegex(@"^CREATE\s+(?:OR\s+REPLACE\s+)?PACKAGE\s+BODY\s+(?<name>\w+)", RegexOptions.IgnoreCase, 2000)]
+    [GeneratedRegex(@"^CREATE\s+(?:OR\s+REPLACE\s+)?PACKAGE\s+BODY\s+(?:[\w$#]+\s*\.\s*)?(?<name>[\w$#]+)", RegexOptions.IgnoreCase, 2000)]
     private static partial Regex PackageBodyPattern();
 
-    [GeneratedRegex(@"^CREATE\s+(?:OR\s+REPLACE\s+)?PACKAGE\s+(?<name>\w+)", RegexOptions.IgnoreCase, 2000)]
+    [GeneratedRegex(@"^CREATE\s+(?:OR\s+REPLACE\s+)?PACKAGE\s+(?:[\w$#]+\s*\.\s*)?(?<name>[\w$#]+)", RegexOptions.IgnoreCase, 2000)]
     private static partial Regex PackageSpecPattern();
 
     [GeneratedRegex(
-        @"^CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+(?<name>\w+)\s+(?<timing>BEFORE|AFTER|INSTEAD\s+OF)\s+(?<events>[A-Za-z\s]+?)\s+ON\s+(?<table>[\w.]+)\s*(?<row>FOR\s+EACH\s+ROW)?\s*(?<body>(?:DECLARE|BEGIN)\b.*)$",
+        @"^CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+(?:[\w$#]+\s*\.\s*)?(?<name>[\w$#]+)\s+(?<timing>BEFORE|AFTER|INSTEAD\s+OF)\s+(?<events>[A-Za-z\s]+?)\s+ON\s+(?<table>[\w.]+)\s*(?<row>FOR\s+EACH\s+ROW)?\s*(?<body>(?:DECLARE|BEGIN)\b.*)$",
         RegexOptions.IgnoreCase | RegexOptions.Singleline,
         4000)]
     private static partial Regex TriggerPattern();
 
-    [GeneratedRegex(@"^CREATE\s+(?:OR\s+REPLACE\s+)?(?:FORCE\s+)?VIEW\s+(?<name>\w+)\s+AS\s+(?<body>.*)$", RegexOptions.IgnoreCase | RegexOptions.Singleline, 4000)]
+    [GeneratedRegex(@"^CREATE\s+(?:OR\s+REPLACE\s+)?(?:FORCE\s+)?VIEW\s+(?:[\w$#]+\s*\.\s*)?(?<name>[\w$#]+)\s+AS\s+(?<body>.*)$", RegexOptions.IgnoreCase | RegexOptions.Singleline, 4000)]
     private static partial Regex ViewPattern();
 
     [GeneratedRegex(
