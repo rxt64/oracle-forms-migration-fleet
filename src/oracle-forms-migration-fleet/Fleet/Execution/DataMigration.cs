@@ -51,6 +51,11 @@ public interface IDataMigrationGateway
         IReadOnlyList<string> statements,
         CancellationToken cancellationToken);
 
+    /// <summary>Reads row counts back. Reconciliation must not be able to change what it is measuring.</summary>
+    Task<IReadOnlyList<TableRowCount>> CountAsync(
+        IReadOnlyList<string> tables,
+        CancellationToken cancellationToken);
+
     Task<DataMigrationOutcome> ApplyAsync(
         IReadOnlyList<DataMigrationStatement> statements,
         IReadOnlyList<string> tables,

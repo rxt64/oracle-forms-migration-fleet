@@ -71,6 +71,7 @@ public sealed class MigrationExecutor
         new DatabaseConversionAdapter(reviewer, orchestrator),
         new ApplicationCodeConversionAdapter(reviewer),
         new SandboxDataMigrationAdapter(dataGateway),
+        new DataReconciliationAdapter(dataGateway),
     ];
 
     /// <summary>

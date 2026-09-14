@@ -191,6 +191,15 @@ internal sealed class StubDataGateway(DataMigrationOutcome outcome) : IDataMigra
 
     public SchemaDeploymentOutcome PrepareOutcome { get; set; } = new(0, 0, []);
 
+    /// <summary>What the target reports when reconciliation reads it back.</summary>
+    public IReadOnlyList<TableRowCount> Counts { get; set; } = [];
+
+    public Task<IReadOnlyList<TableRowCount>> CountAsync(
+        IReadOnlyList<string> tables,
+        CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<TableRowCount>>(
+            [.. tables.Select(table => Counts.FirstOrDefault(count => count.Table == table) ?? new TableRowCount(table, 0))]);
+
     public Task<SchemaDeploymentOutcome> PrepareAsync(
         IReadOnlyList<string> statements,
         CancellationToken cancellationToken)

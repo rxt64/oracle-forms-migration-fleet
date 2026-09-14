@@ -60,6 +60,35 @@ public sealed class PostgresDataMigrationGateway(
         return new SchemaDeploymentOutcome(applied, alreadyPresent, failures);
     }
 
+    public async Task<IReadOnlyList<TableRowCount>> CountAsync(
+        IReadOnlyList<string> tables,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(tables);
+
+        await using NpgsqlConnection connection = await ConnectAsync(cancellationToken).ConfigureAwait(false);
+
+        List<TableRowCount> counts = [];
+        foreach (string table in tables)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            try
+            {
+                await using NpgsqlCommand command = new($"select count(*) from {QuoteIdentifier(table)}", connection);
+                object? scalar = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+                counts.Add(new TableRowCount(table, Convert.ToInt64(scalar ?? 0L, CultureInfo.InvariantCulture)));
+            }
+            catch (PostgresException)
+            {
+                // A table that is not there is a difference, not a crash; -1 distinguishes it from empty.
+                counts.Add(new TableRowCount(table, -1));
+            }
+        }
+
+        return counts;
+    }
+
     public async Task<DataMigrationOutcome> ApplyAsync(
         IReadOnlyList<DataMigrationStatement> statements,
         IReadOnlyList<string> tables,

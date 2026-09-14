@@ -478,8 +478,9 @@ public static class MigrationRunPlanner
 
             new(MigrationPhase.DataReconciliation, FleetRole.ReconciliationAnalyst, PhaseStatus.Planned,
                 MutationClass.WorkspaceArtifactWrite, ExecutionMode.SandboxMigration, RequiresApproval: true,
-                "Reconcile source and sandbox data against agreed tolerances and report every unexplained difference.",
-                [nameof(EvidenceKind.DataProfile)],
+                "Count the rows the supplied export should have produced, read the target back, and report every table that does not match.",
+                // It counts INSERTs in the export and reads the target; it opens no separate profile.
+                [nameof(EvidenceKind.DatabaseSchemaExport)],
                 [new ArtifactReference($"{root}/reports/data-reconciliation.json", ArtifactKind.ReconciliationReport, "Row counts, checksums, and tolerance breaches by table.")],
                 ["Reconciliation adapter (read-only against source, read-only against sandbox)"],
                 []),
