@@ -23,6 +23,7 @@ reconciliation, human acceptance, and production cutover.
 | [docs/SECURITY.md](docs/SECURITY.md) | Before touching source acquisition, classification, auth, or anything the browser can see |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | Deploying, rolling back, or debugging a deployment that misbehaved |
 | [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) | Understanding the exact version path demonstrated by the pilot and what is not yet claimed |
+| [docs/ORACLE_FORMS_6I_RESEARCH.md](docs/ORACLE_FORMS_6I_RESEARCH.md) | Researching 6i source recovery, Oracle normalization tooling, risk signatures, and support gates |
 | [infra/legacy-estate/README.md](infra/legacy-estate/README.md) | Deploying the disposable synthetic Oracle database used by demonstrations |
 | [infra/forms-demo/README.md](infra/forms-demo/README.md) | Running the browser-executable banking workflow replica against that database |
 | [CHANGELOG.md](CHANGELOG.md) | Understanding why current behaviour differs from what you expected |

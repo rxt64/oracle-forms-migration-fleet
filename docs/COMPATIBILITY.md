@@ -31,6 +31,10 @@ conversion support for Oracle Forms 6i, 9i, 10g, 11g, 12c, 14c/14.1.2, or for ev
 release. References to those releases in the migration landscape are upgrade or discovery guidance,
 not proof that generated applications from those releases are compatible.
 
+The researched intake and normalization path for 6i is documented in
+[ORACLE_FORMS_6I_RESEARCH.md](ORACLE_FORMS_6I_RESEARCH.md). It keeps 6i at **accepted for assessment**
+until an authorized representative pilot passes the stated readiness gates.
+
 `oracleFormsVersion` is assessment metadata supplied by the operator. The fleet records it but does
 not use the value to bypass evidence checks or select a converter. `unknown` remains the correct value
 when the authoritative source version has not been verified.
