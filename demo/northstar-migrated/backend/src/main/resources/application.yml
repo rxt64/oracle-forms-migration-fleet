@@ -1,0 +1,16 @@
+# Passwordless by design: the JDBC starter exchanges the app's managed identity for a token.
+# No credential appears in this file, in configuration, or in a container image.
+spring:
+  datasource:
+    url: jdbc:postgresql://${PGHOST}:5432/${PGDATABASE}?sslmode=require
+    username: ${PGUSER}
+    azure:
+      passwordless-enabled: true
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+server:
+  port: ${PORT:8080}
