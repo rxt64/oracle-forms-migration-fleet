@@ -57,7 +57,6 @@ jobs:
     name: Build image and deploy destination
     needs: validate
     runs-on: ubuntu-latest
-    environment: demo
     steps:
       - uses: actions/checkout@v4
 
