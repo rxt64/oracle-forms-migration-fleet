@@ -286,6 +286,11 @@ public static class ApplicationCodeEmitter
                 builder.Append(", nullable = false");
             }
 
+            if (column.BaseType.Equals("CHAR", StringComparison.OrdinalIgnoreCase) && column.Precision is int length)
+            {
+                builder.Append($", columnDefinition = \"char({length})\"");
+            }
+
             builder.AppendLine(")");
             builder.AppendLine($"    private {JavaType(column)} {FieldName(column.Name)};").AppendLine();
         }

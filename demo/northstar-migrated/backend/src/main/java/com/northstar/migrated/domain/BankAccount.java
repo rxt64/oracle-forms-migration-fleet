@@ -24,7 +24,7 @@ public class BankAccount {
     @Column(name = "opened_on", nullable = false)
     private LocalDate openedOn;
 
-    @Column(name = "online_enabled", nullable = false)
+    @Column(name = "online_enabled", nullable = false, columnDefinition = "char(1)")
     private String onlineEnabled;
 
     @Column(name = "online_password_hash")

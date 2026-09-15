@@ -48,6 +48,14 @@ public class ApplicationCodeEmitterTests
     }
 
     [Fact]
+    public void Fixed_length_character_columns_preserve_their_postgresql_type()
+    {
+        string entity = File(Convert(), "BankAccount.java");
+
+        Assert.Contains("@Column(name = \"online_enabled\", nullable = false, columnDefinition = \"char(1)\")", entity, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void A_non_postgresql_target_generates_nothing_rather_than_the_wrong_driver()
     {
         ApplicationConversion conversion = Convert(DatabaseTarget.AzureSqlDatabase);

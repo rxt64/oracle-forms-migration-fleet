@@ -24,7 +24,7 @@ public class BankTransaction {
     @Column(name = "reference_code", nullable = false)
     private String referenceCode;
 
-    @Column(name = "direction_code", nullable = false)
+    @Column(name = "direction_code", nullable = false, columnDefinition = "char(2)")
     private String directionCode;
 
     public Long getTransactionId() { return transactionId; }
