@@ -21,7 +21,7 @@ env:
   REGISTRY: acrofmfleedevykbpnrpd
   IMAGE: northstar-migrated
   RESOURCE_GROUP: rg-oracle-forms-migration-fleet-dev-b9f0e875
-  CONTAINER_APP: ca-ofmfleet-migrated-dev-ykbpnrpd
+  CONTAINER_APP: ca-ofmfleet-mig-dev-ykbpnrpd
 
 jobs:
   validate:

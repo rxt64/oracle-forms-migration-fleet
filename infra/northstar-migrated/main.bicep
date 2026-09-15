@@ -5,7 +5,7 @@ param location string = resourceGroup().location
 param containerImage string
 
 @description('Name of the destination Container App.')
-param containerAppName string = 'ca-ofmfleet-migrated-dev-ykbpnrpd'
+param containerAppName string = 'ca-ofmfleet-mig-dev-ykbpnrpd'
 
 @description('Existing Container Apps managed environment name.')
 param containerAppEnvironmentName string = 'cae-ofmfleet-dev-ykbpnrpd'
