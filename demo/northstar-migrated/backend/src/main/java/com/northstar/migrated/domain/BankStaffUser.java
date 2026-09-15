@@ -1,6 +1,8 @@
 package com.northstar.migrated.domain;
 
 import jakarta.persistence.*;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -21,7 +23,8 @@ public class BankStaffUser {
     @Column(name = "role_code", nullable = false)
     private String roleCode;
 
-    @Column(name = "active_flag", nullable = false)
+    @JdbcTypeCode(SqlTypes.CHAR)
+    @Column(name = "active_flag", nullable = false, columnDefinition = "char(1)")
     private String activeFlag;
 
     public Long getStaffId() { return staffId; }
