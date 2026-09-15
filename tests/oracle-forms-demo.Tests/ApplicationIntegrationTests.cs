@@ -90,8 +90,8 @@ public sealed class ApplicationIntegrationTests(DemoApplicationFactory factory)
     {
         var html = await _client.GetStringAsync("/");
 
-        Assert.Contains("pattern=\"[A-Za-z0-9][-A-Za-z0-9_/]*\"", html, StringComparison.Ordinal);
-        Assert.DoesNotContain("pattern=\"[A-Za-z0-9][A-Za-z0-9/_-]*\"", html, StringComparison.Ordinal);
+        Assert.Contains("pattern=\"[A-Za-z0-9][A-Za-z0-9_\\/\\-]*\"", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("pattern=\"[A-Za-z0-9][-A-Za-z0-9_/]*\"", html, StringComparison.Ordinal);
     }
 
     [Fact]

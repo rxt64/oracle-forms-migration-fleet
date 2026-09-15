@@ -117,7 +117,10 @@ jobs:
               -H 'Accept: application/json' "$@"
           }
 
-          curl_json "https://$FQDN/" > migrated-ui.html
+          curl --fail --show-error --silent \
+            --connect-timeout 5 --max-time 20 \
+            --retry 18 --retry-delay 10 --retry-all-errors \
+            -H 'Accept: text/html' "https://$FQDN/" > migrated-ui.html
           grep -q 'Northstar Online Banking' migrated-ui.html
           curl_json "https://$FQDN/healthz" > health.json
           test "$(jq -r .status health.json)" = 'ok'
