@@ -1,11 +1,9 @@
-# Passwordless by design: the JDBC starter exchanges the app's managed identity for a token.
+# Passwordless by design: the JDBC plugin exchanges the app's managed identity for a PostgreSQL token.
 # No credential appears in this file, in configuration, or in a container image.
 spring:
   datasource:
-    url: jdbc:postgresql://${PGHOST}:5432/${PGDATABASE}?sslmode=require
+    url: jdbc:postgresql://${PGHOST}:5432/${PGDATABASE}?sslmode=require&authenticationPluginClassName=com.azure.identity.extensions.jdbc.postgresql.AzurePostgresqlAuthenticationPlugin
     username: ${PGUSER}
-    azure:
-      passwordless-enabled: true
   jpa:
     hibernate:
       ddl-auto: validate

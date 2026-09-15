@@ -181,11 +181,11 @@ public static class ApplicationCodeEmitter
               <artifactId>postgresql</artifactId>
               <scope>runtime</scope>
             </dependency>
-            <!-- Entra authentication to Azure Database for PostgreSQL: no password is stored anywhere. -->
+                        <!-- Entra authentication to Azure Database for PostgreSQL: no password is stored anywhere. -->
             <dependency>
-              <groupId>com.azure.spring</groupId>
-              <artifactId>spring-cloud-azure-starter-jdbc-postgresql</artifactId>
-              <version>5.18.0</version>
+                            <groupId>com.azure</groupId>
+                            <artifactId>azure-identity-extensions</artifactId>
+                            <version>1.2.9</version>
             </dependency>
           </dependencies>
                     <build>
@@ -205,19 +205,17 @@ public static class ApplicationCodeEmitter
                     </build>
         </project>
         """,
-        "Spring Boot build for the migrated back end, with the Azure PostgreSQL Entra JDBC starter.");
+        "Spring Boot build for the migrated back end, with the Azure PostgreSQL Entra JDBC authentication plugin.");
 
     private static GeneratedFile BuildApplicationYaml() => new(
         "backend/src/main/resources/application.yml",
         """
-        # Passwordless by design: the JDBC starter exchanges the app's managed identity for a token.
+                # Passwordless by design: the JDBC plugin exchanges the app's managed identity for a PostgreSQL token.
         # No credential appears in this file, in configuration, or in a container image.
         spring:
           datasource:
-            url: jdbc:postgresql://${PGHOST}:5432/${PGDATABASE}?sslmode=require
+                        url: jdbc:postgresql://${PGHOST}:5432/${PGDATABASE}?sslmode=require&authenticationPluginClassName=com.azure.identity.extensions.jdbc.postgresql.AzurePostgresqlAuthenticationPlugin
             username: ${PGUSER}
-            azure:
-              passwordless-enabled: true
           jpa:
             hibernate:
               ddl-auto: validate

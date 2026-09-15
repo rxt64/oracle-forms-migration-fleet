@@ -32,6 +32,8 @@ public class ApplicationCodeEmitterTests
         Assert.Contains("postgresql", pom, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("spring-boot-maven-plugin", pom, StringComparison.Ordinal);
         Assert.Contains("<goal>repackage</goal>", pom, StringComparison.Ordinal);
+        Assert.Contains("azure-identity-extensions", pom, StringComparison.Ordinal);
+        Assert.DoesNotContain("spring-cloud-azure-starter-jdbc-postgresql", pom, StringComparison.Ordinal);
         Assert.DoesNotContain("ojdbc", pom, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("oracle", pom, StringComparison.OrdinalIgnoreCase);
     }
@@ -41,7 +43,7 @@ public class ApplicationCodeEmitterTests
     {
         string yaml = File(Convert(), "application.yml");
 
-        Assert.Contains("passwordless-enabled: true", yaml, StringComparison.Ordinal);
+        Assert.Contains("authenticationPluginClassName=com.azure.identity.extensions.jdbc.postgresql.AzurePostgresqlAuthenticationPlugin", yaml, StringComparison.Ordinal);
         Assert.DoesNotContain("password:", yaml, StringComparison.Ordinal);
     }
 
