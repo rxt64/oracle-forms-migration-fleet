@@ -30,6 +30,8 @@ public class ApplicationCodeEmitterTests
         string pom = File(Convert(), "pom.xml");
 
         Assert.Contains("postgresql", pom, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("spring-boot-maven-plugin", pom, StringComparison.Ordinal);
+        Assert.Contains("<goal>repackage</goal>", pom, StringComparison.Ordinal);
         Assert.DoesNotContain("ojdbc", pom, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("oracle", pom, StringComparison.OrdinalIgnoreCase);
     }

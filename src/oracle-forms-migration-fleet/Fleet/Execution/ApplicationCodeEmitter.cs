@@ -188,6 +188,21 @@ public static class ApplicationCodeEmitter
               <version>5.18.0</version>
             </dependency>
           </dependencies>
+                    <build>
+                        <plugins>
+                            <plugin>
+                                <groupId>org.springframework.boot</groupId>
+                                <artifactId>spring-boot-maven-plugin</artifactId>
+                                <executions>
+                                    <execution>
+                                        <goals>
+                                            <goal>repackage</goal>
+                                        </goals>
+                                    </execution>
+                                </executions>
+                            </plugin>
+                        </plugins>
+                    </build>
         </project>
         """,
         "Spring Boot build for the migrated back end, with the Azure PostgreSQL Entra JDBC starter.");
