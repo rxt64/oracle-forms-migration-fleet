@@ -72,6 +72,7 @@ jobs:
           TAG="${GITHUB_SHA::12}"
           az acr build \
             --registry "$REGISTRY" \
+            --resource-group "$RESOURCE_GROUP" \
             --image "$IMAGE:$TAG" \
             --file demo/northstar-migrated/Dockerfile \
             demo/northstar-migrated
