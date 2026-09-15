@@ -444,6 +444,17 @@ public class NorthstarBankingApplicationProfileTests
     }
 
     [Fact]
+    public void The_generated_readme_bounds_the_demonstrated_version_path()
+    {
+        string readme = File(Convert(Banking()), "README.md");
+
+        Assert.Contains("12.2.1.4", readme, StringComparison.Ordinal);
+        Assert.Contains("Oracle Database Free 23", readme, StringComparison.Ordinal);
+        Assert.Contains("Azure Database for PostgreSQL 16", readme, StringComparison.Ordinal);
+        Assert.Contains("not a general compatibility claim", readme, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void A_forms_export_does_not_turn_the_generated_screens_into_a_forms_claim()
     {
         OracleSchema schema = Banking();

@@ -408,6 +408,11 @@ public static class NorthstarBankingApplicationProfile
         builder.AppendLine($"# {applicationName} — migrated application tier").AppendLine();
         builder.AppendLine("Generated from the converted Oracle schema. Oracle is not in the data path: the back end talks to");
         builder.AppendLine("Azure Database for PostgreSQL using Entra authentication, so no database password exists.").AppendLine();
+        builder.AppendLine("## Demonstrated version scope").AppendLine();
+        builder.AppendLine("This generated pilot represents an Oracle Forms `12.2.1.4`-style synthetic XML export backed by");
+        builder.AppendLine("Oracle Database Free 23, migrated to Azure Database for PostgreSQL 16. The Forms XML is hand-authored");
+        builder.AppendLine("test evidence, not an export from a licensed Forms runtime. This is not a general compatibility claim");
+        builder.AppendLine("for other Oracle Forms or Oracle Database releases. See `docs/COMPATIBILITY.md` in the fleet repository.").AppendLine();
         builder.AppendLine("## What is here").AppendLine();
         builder.AppendLine($"- {tables.ToString(CultureInfo.InvariantCulture)} JPA entities and Spring Data repositories");
         builder.AppendLine("- A workflow service that reimplements the source application's endpoints over PostgreSQL:").AppendLine();

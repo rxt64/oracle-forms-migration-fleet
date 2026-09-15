@@ -3,6 +3,13 @@
 Generated from the converted Oracle schema. Oracle is not in the data path: the back end talks to
 Azure Database for PostgreSQL using Entra authentication, so no database password exists.
 
+## Demonstrated version scope
+
+This generated pilot represents an Oracle Forms `12.2.1.4`-style synthetic XML export backed by
+Oracle Database Free 23, migrated to Azure Database for PostgreSQL 16. The Forms XML is hand-authored
+test evidence, not an export from a licensed Forms runtime. This is not a general compatibility claim
+for other Oracle Forms or Oracle Database releases. See `docs/COMPATIBILITY.md` in the fleet repository.
+
 ## What is here
 
 - 4 JPA entities and Spring Data repositories

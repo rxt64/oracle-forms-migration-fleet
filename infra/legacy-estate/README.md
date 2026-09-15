@@ -5,6 +5,14 @@ Oracle Forms Migration Fleet workflow. Its banking schema independently implemen
 requirements described by the public
 [Trisha11r/oracle_apps_case_study](https://github.com/Trisha11r/oracle_apps_case_study) repository.
 
+## Version scope
+
+This demo database is **Oracle Database Free 23**, built from
+`gvenzl/oracle-free:23-slim-faststart`. It proves the synthetic Northstar schema and PL/SQL path on
+that image only; it is not a claim that every Oracle Database release or customer schema converts
+without assessment and testing. See [../../docs/COMPATIBILITY.md](../../docs/COMPATIBILITY.md) for the
+complete evidence boundary.
+
 The deployment represents the **database tier only**. It does not include Oracle Forms Builder,
 Forms Services, Oracle E-Business Suite, or a browser-accessible banking application. Those products
 require separately licensed Oracle software, and no redistributable Forms runtime container is

@@ -22,6 +22,7 @@ reconciliation, human acceptance, and production cutover.
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Before your first change — branch naming, the PR loop, and what a change must include |
 | [docs/SECURITY.md](docs/SECURITY.md) | Before touching source acquisition, classification, auth, or anything the browser can see |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | Deploying, rolling back, or debugging a deployment that misbehaved |
+| [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) | Understanding the exact version path demonstrated by the pilot and what is not yet claimed |
 | [infra/legacy-estate/README.md](infra/legacy-estate/README.md) | Deploying the disposable synthetic Oracle database used by demonstrations |
 | [infra/forms-demo/README.md](infra/forms-demo/README.md) | Running the browser-executable banking workflow replica against that database |
 | [CHANGELOG.md](CHANGELOG.md) | Understanding why current behaviour differs from what you expected |
@@ -151,7 +152,7 @@ The model calls `assess_oracle_forms_migration` with a `MigrationAssessmentReque
 |---|---|---|
 | `engagementId` | string | Required. Audit identifier. |
 | `applicationName` | string | Required. |
-| `oracleFormsVersion` | string | Defaults to `unknown`. |
+| `oracleFormsVersion` | string | Assessment metadata supplied by the operator; defaults to `unknown`. It is not a compatibility assertion or converter selector. |
 | `evidence[]` | `EvidenceItem` | `id`, `kind`, `source`, `summary`, `isVerified`, `signals[]`. |
 | `businessConstraints[]` | string | Regulatory/downtime constraints. |
 | `approval` | `HumanApproval` | `decision` (`Pending` \| `Approved` \| `Rejected`), `approverId`, `notes`. |
@@ -375,11 +376,14 @@ documentation, not this snapshot, are authoritative.
 
 ### Example
 
+This example uses the version declared by the synthetic Northstar Forms XML. Supplying the value records
+provenance; it does not establish support for every Forms 12c application.
+
 ```json
 {
   "engagementId": "ENG-4471",
   "applicationName": "ORDERS",
-  "oracleFormsVersion": "12c",
+  "oracleFormsVersion": "12.2.1.4",
   "evidence": [
     { "id": "EV-INV",     "kind": "FormsModuleInventory", "source": "forms-inventory.csv", "summary": "142 modules, 1,908 triggers.", "isVerified": true },
     { "id": "EV-PLSQL",   "kind": "PlSqlProgramUnit",     "source": "plsql-units.sql",     "summary": "312 packages and procedures.", "isVerified": true },

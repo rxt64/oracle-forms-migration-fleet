@@ -16,6 +16,16 @@ present nor redistributable through this repository.
 The replica is therefore an independently implemented demonstration surface, not a conversion or
 execution of those modules.
 
+## Version scope
+
+The synthetic Forms XML used by the fleet declares `FormsVersion="12.2.1.4"` and follows the
+Forms2XML shape. It is hand-authored test evidence, not an export from a licensed Oracle Forms
+12.2.1.4 runtime. The backing disposable database is Oracle Database Free 23. The demonstrated target
+is Azure Database for PostgreSQL 16. See [../../docs/COMPATIBILITY.md](../../docs/COMPATIBILITY.md).
+
+Forms 6i, 10g, 11g, other 12c patch levels, and 14c/14.1.2 are not demonstrated compatibility claims.
+They require their own authorized representative artifacts and differential acceptance tests.
+
 ## Architecture and credential boundary
 
 - ACR Tasks builds `src/oracle-forms-demo/Dockerfile` server-side; local Docker is not used.
