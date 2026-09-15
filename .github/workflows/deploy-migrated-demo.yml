@@ -70,12 +70,19 @@ jobs:
       - name: Build and publish migrated image
         run: |
           TAG="${GITHUB_SHA::12}"
-          az acr build \
-            --registry "$REGISTRY" \
-            --resource-group "$RESOURCE_GROUP" \
+          if az acr repository show \
+            --name "$REGISTRY" \
             --image "$IMAGE:$TAG" \
-            --file demo/northstar-migrated/Dockerfile \
-            demo/northstar-migrated
+            --output none 2>/dev/null; then
+            echo "Reusing $REGISTRY.azurecr.io/$IMAGE:$TAG"
+          else
+            az acr build \
+              --registry "$REGISTRY" \
+              --resource-group "$RESOURCE_GROUP" \
+              --image "$IMAGE:$TAG" \
+              --file demo/northstar-migrated/Dockerfile \
+              demo/northstar-migrated
+          fi
           echo "TAG=$TAG" >> "$GITHUB_ENV"
 
       - name: Preview destination deployment
