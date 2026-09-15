@@ -43,15 +43,15 @@ jobs:
           cache: npm
           cache-dependency-path: demo/northstar-migrated/frontend/package-lock.json
 
-      - name: Build React client
+      - name: Build browser client
         working-directory: demo/northstar-migrated/frontend
         run: |
           npm ci
           npm run build
 
-      - name: Build Spring Boot API
+      - name: Test and build Spring Boot API
         working-directory: demo/northstar-migrated/backend
-        run: mvn -B -DskipTests package
+        run: mvn -B package
 
   deploy:
     name: Build image and deploy destination
@@ -102,18 +102,104 @@ jobs:
             --parameters containerImage="$REGISTRY.azurecr.io/$IMAGE:$TAG" \
             --output none
 
-      - name: Verify UI and migrated PostgreSQL data
+      - name: Verify migrated banking workflows
         run: |
           FQDN=$(az containerapp show \
             --name "$CONTAINER_APP" \
             --resource-group "$RESOURCE_GROUP" \
             --query properties.configuration.ingress.fqdn \
             --output tsv)
-          curl --fail --show-error --silent \
-            --retry 18 --retry-delay 10 --retry-all-errors \
-            "https://$FQDN/" > /dev/null
-          curl --fail --show-error --silent \
-            --retry 6 --retry-delay 10 --retry-all-errors \
-            "https://$FQDN/api/bank-account" | tee bank-accounts.json
-          test "$(jq length bank-accounts.json)" -gt 0
+
+          curl_json() {
+            curl --fail --show-error --silent \
+              --connect-timeout 5 --max-time 20 \
+              --retry 18 --retry-delay 10 --retry-all-errors \
+              -H 'Accept: application/json' "$@"
+          }
+
+          curl_json "https://$FQDN/" > migrated-ui.html
+          grep -q 'Northstar Online Banking' migrated-ui.html
+          curl_json "https://$FQDN/healthz" > health.json
+          test "$(jq -r .status health.json)" = 'ok'
+          curl_json "https://$FQDN/api/health" > database-health.json
+          test "$(jq -r .database database-health.json)" = 'available'
+
+          EMAIL="migration-run-${GITHUB_RUN_ID}@example.test"
+          jq -n --arg email "$EMAIL" '{
+            branchCode: "CENTRAL",
+            accountKind: "CHECKING",
+            honorific: "Ms",
+            givenName: "Migration",
+            familyName: "Verification",
+            dateOfBirth: "1990-01-15",
+            workPhone: "212-555-0100",
+            homePhone: "212-555-0101",
+            streetAddress: "1 Azure Way",
+            regionCode: "NY",
+            postalCode: "10001",
+            emailAddress: $email
+          }' > request.json
+          curl_json -X POST -H 'Content-Type: application/json' \
+            --data @request.json "https://$FQDN/api/account-requests" > request-created.json
+          REQUEST_ID=$(jq -er .requestId request-created.json)
+          test "$(jq -r .requestStatus request-created.json)" = 'SUBMITTED'
+
+          curl_json -X POST -H 'Content-Type: application/json' \
+            --data '{"username":"branch.manager","password":"manager-demo-1"}' \
+            "https://$FQDN/api/manager/login" > manager-login.json
+          MANAGER_TOKEN=$(jq -er .token manager-login.json)
+          curl_json -H "Authorization: Bearer $MANAGER_TOKEN" \
+            "https://$FQDN/api/manager/requests?status=SUBMITTED" > manager-requests.json
+          jq -e --argjson id "$REQUEST_ID" 'any(.requestId == $id)' manager-requests.json > /dev/null
+
+          curl_json -X POST -H "Authorization: Bearer $MANAGER_TOKEN" \
+            "https://$FQDN/api/manager/requests/$REQUEST_ID/approve" > approval.json
+          ACCOUNT_ID=$(jq -er .accountId approval.json)
+          test "$(jq -r .requestStatus approval.json)" = 'APPROVED'
+
+          jq -n --argjson accountId "$ACCOUNT_ID" --arg email "$EMAIL" '{
+            accountId: $accountId,
+            emailAddress: $email,
+            password: "migration-demo-1"
+          }' > registration.json
+          curl_json -X POST -H 'Content-Type: application/json' \
+            --data @registration.json "https://$FQDN/api/online-registration" > registration-result.json
+          test "$(jq -r .onlineEnabled registration-result.json)" = 'true'
+
+          jq -n --argjson accountId "$ACCOUNT_ID" '{
+            accountId: $accountId,
+            password: "migration-demo-1"
+          }' > customer-login-request.json
+          curl_json -X POST -H 'Content-Type: application/json' \
+            --data @customer-login-request.json "https://$FQDN/api/customer/login" > customer-login.json
+          CUSTOMER_TOKEN=$(jq -er .token customer-login.json)
+
+          curl_json -X POST -H 'Content-Type: application/json' \
+            -H "Authorization: Bearer $CUSTOMER_TOKEN" \
+            --data '{"amount":25.00,"directionCode":"CR","referenceCode":"CI-SMOKE"}' \
+            "https://$FQDN/api/customer/transactions" > transaction.json
+          test "$(jq -r .currentBalance transaction.json)" = '25.00'
+          curl_json -H "Authorization: Bearer $CUSTOMER_TOKEN" \
+            "https://$FQDN/api/customer/statement" > statement.json
+          test "$(jq -r .currentBalance statement.json)" = '25.00'
+          test "$(jq '.transactions | length' statement.json)" -eq 1
+
+          curl_json -X POST -H 'Content-Type: application/json' \
+            --data '{"principal":1000,"annualRate":5,"years":2}' \
+            "https://$FQDN/api/interest" > interest.json
+          test "$(jq -r .interest interest.json)" = '100.00'
+
+          curl --fail --show-error --silent --connect-timeout 5 --max-time 20 \
+            -X DELETE -H "Authorization: Bearer $CUSTOMER_TOKEN" \
+            "https://$FQDN/api/session" > /dev/null
+          curl --fail --show-error --silent --connect-timeout 5 --max-time 20 \
+            -X DELETE -H "Authorization: Bearer $MANAGER_TOKEN" \
+            "https://$FQDN/api/session" > /dev/null
+
+          CRUD_STATUS=$(curl --show-error --silent --connect-timeout 5 --max-time 20 \
+            -o removed-crud.json -w '%{http_code}' "https://$FQDN/api/bank-account")
+          test "$CRUD_STATUS" = '404'
+          test "$(jq -r .error removed-crud.json)" = 'No such endpoint.'
+
+          echo "Verified request $REQUEST_ID, account $ACCOUNT_ID, transaction $(jq -r .transactionId transaction.json)."
           echo "Migrated application: https://$FQDN"

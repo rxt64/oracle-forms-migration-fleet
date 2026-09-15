@@ -171,5 +171,50 @@ public class OracleSchemaParserTests
         Assert.Empty(schema.Sequences);
         Assert.Empty(schema.Indexes);
         Assert.Empty(schema.Unparsed);
+        Assert.Empty(schema.ProgramUnits);
+    }
+
+    [Fact]
+    public void Reads_the_identity_of_a_program_unit_without_interpreting_it()
+    {
+        OracleSchema schema = OracleSchemaParser.Parse(OracleSamples.PlSql);
+
+        OracleProgramUnit unit = Assert.Single(schema.ProgramUnits);
+        Assert.Equal(OracleProgramUnitKind.PackageBody, unit.Kind);
+        Assert.Equal("LEGACY_BANKING_API", unit.Name);
+        Assert.Equal(Assert.Single(schema.Unparsed), unit.Statement);
+    }
+
+    [Theory]
+    [InlineData("CREATE OR REPLACE PACKAGE BODY HRMS.PKG_AUDIT AS\nBEGIN\nNULL;\nEND;", OracleProgramUnitKind.PackageBody, "PKG_AUDIT")]
+    [InlineData("CREATE OR REPLACE PACKAGE PKG_AUDIT AS\nEND;", OracleProgramUnitKind.PackageSpecification, "PKG_AUDIT")]
+    [InlineData("CREATE OR REPLACE TRIGGER BANK_TRANSACTION_BI BEFORE INSERT ON BANK_TRANSACTION\nBEGIN\nNULL;\nEND;", OracleProgramUnitKind.Trigger, "BANK_TRANSACTION_BI")]
+    [InlineData("CREATE PROCEDURE SWEEP IS\nBEGIN\nNULL;\nEND;", OracleProgramUnitKind.Procedure, "SWEEP")]
+    [InlineData("CREATE OR REPLACE EDITIONABLE FUNCTION BALANCE RETURN NUMBER IS\nBEGIN\nRETURN 0;\nEND;", OracleProgramUnitKind.Function, "BALANCE")]
+    public void Reads_the_kind_and_the_local_name_from_the_create_header(
+        string statement, OracleProgramUnitKind kind, string name)
+    {
+        OracleProgramUnit unit = Assert.IsType<OracleProgramUnit>(OracleSchemaParser.TryReadProgramUnitIdentity(statement));
+
+        Assert.Equal(kind, unit.Kind);
+        Assert.Equal(name, unit.Name);
+    }
+
+    [Theory]
+    [InlineData("SET DEFINE OFF")]
+    [InlineData("ALTER SESSION SET CURRENT_SCHEMA = BANKING")]
+    [InlineData("BEGIN\nNULL;\nEND;")]
+    [InlineData("")]
+    [InlineData(null)]
+    public void A_statement_that_names_no_program_unit_has_no_identity(string? statement) =>
+        Assert.Null(OracleSchemaParser.TryReadProgramUnitIdentity(statement));
+
+    [Fact]
+    public void Merging_preserves_every_parsed_program_unit()
+    {
+        OracleSchema merged = OracleSchema.Merge(
+            [OracleSchemaParser.Parse(OracleSamples.Schema), OracleSchemaParser.Parse(OracleSamples.PlSql)]);
+
+        Assert.Equal(["LEGACY_BANKING_API"], merged.ProgramUnits.Select(unit => unit.Name));
     }
 }

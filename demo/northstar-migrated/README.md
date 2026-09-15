@@ -5,15 +5,40 @@ Azure Database for PostgreSQL using Entra authentication, so no database passwor
 
 ## What is here
 
-- 4 JPA entities, repositories, and REST controllers
-- A typed React client and a table screen over the first entity
+- 4 JPA entities and Spring Data repositories
+- A workflow service that reimplements the source application's endpoints over PostgreSQL:
+
+  - `GET /healthz`
+  - `GET /api/health`
+  - `POST /api/customer/login`
+  - `POST /api/manager/login`
+  - `POST /api/online-registration`
+  - `POST /api/account-requests`
+  - `POST /api/interest`
+  - `GET /api/customer/statement`
+  - `POST /api/customer/transactions`
+  - `GET /api/manager/requests`
+  - `POST /api/manager/requests/{requestId}/approve`
+  - `DELETE /api/session`
+
+- A browser client with the source application's modules: Home, Open Account, Online Registration, Interest Calculator, Customer Login, Manager Login, Account Statement, Transaction Entry, Account Requests.
+- Spring Boot tests over the generated routes, run with `mvn test`.
+
+## Where the behaviour came from
+
+The schema declares every table and column these workflows use, so the generator recognised the
+workflow and emitted a working replacement instead of CRUD screens. Balance, simple interest, and
+approval are reimplemented from schema evidence — sequences, the CR/DR constraint, the request
+status constraint — and from this fleet's workflow template. **Nothing here was recovered from a
+Forms module.** The only Forms XML available for this estate covers a single block.
 
 ## What is deliberately not here
 
-- **Forms behaviour.** `.fmb` modules are a proprietary binary this build cannot read, so no trigger,
-  block, or navigation rule was extracted. The screens are CRUD over tables, not the original forms.
-- **PL/SQL logic.** Package and trigger bodies were not translated; see the conversion report.
-- **Authorization.** Every endpoint is open. Do not expose this until access control is added.
+- **Per-table CRUD controllers.** They would publish every column of every table, the migrated
+  password hashes included, and accept unvalidated writes with no session or role check, so none
+  was generated. Any path under `/api` that is not a workflow route answers 404.
+- **Stronger credentials.** Passwords stay unsalted SHA-256 because that is what was migrated.
+- **Screens outside the modules listed above.**
 
 ## Running it
 
@@ -23,13 +48,3 @@ export PGDATABASE=postgres
 export PGUSER=<managed identity name>
 cd backend && mvn spring-boot:run
 ```
-
-## Deployment
-
-The `Deploy migrated Northstar demo` GitHub Actions workflow compiles both generated tiers, builds
-the combined image in Azure Container Registry, previews and applies the Bicep deployment, and then
-proves that the UI and PostgreSQL-backed account endpoint respond. The destination is a separate
-Container App; it does not replace the source workflow replica or the migration workbench.
-
-This public demo contains synthetic data only. The generated application has no application-level
-authorization and must not be used for real customer or banking data.

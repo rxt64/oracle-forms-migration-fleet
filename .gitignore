@@ -21,6 +21,13 @@ TestResults/
 # so committing it would only produce minified merge conflicts on every pull request.
 src/oracle-forms-migration-fleet/wwwroot/
 
+# Built output of the generated demo client. The Docker and CI stages rebuild it from the generated
+# sources, so committing it would let a stale bundle contradict what the generator produces.
+demo/northstar-migrated/frontend/dist/
+
+# Maven build output of the generated demo back end, produced by `mvn test` or `mvn package`.
+demo/northstar-migrated/backend/target/
+
 # .NET user secrets
 **/.secrets/
 

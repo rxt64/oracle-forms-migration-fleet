@@ -13,13 +13,17 @@ public sealed record ApplicationConversion(
 
 /// <summary>
 /// Generates the Azure-targeted application tier from the parsed Oracle schema: a Spring Boot back end
-/// bound to Azure Database for PostgreSQL with Entra authentication, and a React front end over it.
+/// bound to Azure Database for PostgreSQL with Entra authentication, and a front end over it.
 ///
 /// What this is derived from matters. Every entity, field, endpoint, and screen here comes from DDL the
 /// parser actually read. Nothing is inferred from a `.fmb`, because their contents are a proprietary
-/// binary this build cannot open; the screens produced are CRUD over the real tables, not a reproduction
-/// of the original forms. Anything that lived only in Forms triggers or PL/SQL bodies is reported as
-/// outstanding work rather than invented.
+/// binary this build cannot open; the generic screens produced are CRUD over the real tables, not a
+/// reproduction of the original forms. Anything that lived only in Forms triggers or PL/SQL bodies is
+/// reported as outstanding work rather than invented.
+///
+/// One exception is deliberate. When the schema carries a workflow this fleet has a generator for — see
+/// <see cref="NorthstarBankingApplicationProfile"/> — a working replacement for that workflow is emitted
+/// instead of CRUD. Recognition is structural and needs the whole schema; it never depends on a name.
 /// </summary>
 public static class ApplicationCodeEmitter
 {
@@ -64,36 +68,59 @@ public static class ApplicationCodeEmitter
         files.Add(BuildApplicationYaml());
         files.Add(BuildMainClass());
 
+        bool recognized = NorthstarBankingApplicationProfile.Matches(schema);
+
         foreach (OracleTable table in tables)
         {
             files.Add(BuildEntity(table, findings));
             files.Add(BuildRepository(table));
-            files.Add(BuildController(table));
+
+            // A recognised workflow gets its own authorized routes. Emitting the generic controllers beside
+            // them would publish every column of every table — password hashes included — and accept
+            // unvalidated writes, with no session or role check anywhere. They are not emitted at all.
+            if (!recognized)
+            {
+                files.Add(BuildController(table));
+            }
         }
 
-        files.Add(BuildReactTypes(tables));
-        files.Add(BuildReactClient(tables));
-        files.Add(BuildReactPackage());
-        files.Add(BuildTypeScriptConfig());
-        files.Add(BuildViteConfig());
-        files.Add(BuildReactIndex());
-        files.Add(BuildReactMain());
-        files.Add(BuildViteTypes());
-
-        IReadOnlyList<FormsBlock> screens =
-            [.. (forms ?? []).SelectMany(module => module.Blocks).Where(block => block.BaseTable is not null)];
-
-        if (screens.Count > 0)
+        if (recognized)
         {
-            files.Add(BuildReactAppFromForms(screens, tables, findings));
+            files.AddRange(NorthstarBankingApplicationProfile.Generate(schema, BasePackage, tables));
         }
         else
         {
-            files.Add(BuildReactApp(tables));
+            files.Add(BuildReactTypes(tables));
+            files.Add(BuildReactClient(tables));
+            files.Add(BuildReactPackage());
+            files.Add(BuildTypeScriptConfig());
+            files.Add(BuildViteConfig());
+            files.Add(BuildReactIndex());
+            files.Add(BuildReactMain());
+            files.Add(BuildViteTypes());
+
+            IReadOnlyList<FormsBlock> screens =
+                [.. (forms ?? []).SelectMany(module => module.Blocks).Where(block => block.BaseTable is not null)];
+
+            files.Add(screens.Count > 0
+                ? BuildReactAppFromForms(screens, tables, findings)
+                : BuildReactApp(tables));
         }
+
         files.Add(BuildDockerfile());
         files.Add(BuildDockerIgnore());
-        files.Add(BuildReadme(applicationName, tables));
+        files.Add(new GeneratedFile(
+            "README.md",
+            recognized
+                ? NorthstarBankingApplicationProfile.Readme(applicationName, tables.Count)
+                : BuildReadme(applicationName, tables),
+            "What was generated, and what still has to be built by hand."));
+
+        Dictionary<string, OracleProgramUnit> identities = [];
+        foreach (OracleProgramUnit unit in schema.ProgramUnits)
+        {
+            identities.TryAdd(unit.Statement, unit);
+        }
 
         foreach (string unparsed in schema.Unparsed)
         {
@@ -103,16 +130,39 @@ public static class ApplicationCodeEmitter
                 head = head[..90];
             }
 
-            if (LooksLikeProgramUnit(unparsed))
+            if (!LooksLikeProgramUnit(unparsed))
             {
-                findings.Add(new ConversionFinding(
+                continue;
+            }
+
+            // A covered unit is reported as done, not as outstanding: claiming otherwise would understate the
+            // output as badly as claiming untranslated logic had been carried across would overstate it.
+            // Coverage is decided on the unit's parsed kind and exact name; a unit the parser could not
+            // identify is never claimed, however much its text resembles one that is covered.
+            bool covered = recognized
+                && identities.TryGetValue(unparsed, out OracleProgramUnit? unit)
+                && NorthstarBankingApplicationProfile.Covers(unit);
+
+            findings.Add(covered
+                ? new ConversionFinding(
+                    ConversionSeverity.Note,
+                    "Server-side logic",
+                    head,
+                    "This program unit's behaviour is implemented by the generated workflow service, so the tier " +
+                    "does not depend on the translated PL/pgSQL for it.")
+                : new ConversionFinding(
                     ConversionSeverity.ManualReview,
                     "Server-side logic",
                     head,
                     "The database conversion translates this program unit into PL/pgSQL, so the rule moves with the " +
                     "schema rather than into Java. The generated back end exposes CRUD over the tables and does not " +
                     "call it yet; wire it up, or reimplement it here, before this tier replaces the Forms client."));
-            }
+        }
+
+        if (recognized)
+        {
+            findings.AddRange(NorthstarBankingApplicationProfile.Findings());
+            return new ApplicationConversion(files, findings);
         }
 
         findings.Add(new ConversionFinding(
@@ -181,28 +231,33 @@ public static class ApplicationCodeEmitter
               <artifactId>postgresql</artifactId>
               <scope>runtime</scope>
             </dependency>
-                        <!-- Entra authentication to Azure Database for PostgreSQL: no password is stored anywhere. -->
+            <!-- Entra authentication to Azure Database for PostgreSQL: no password is stored anywhere. -->
             <dependency>
-                            <groupId>com.azure</groupId>
-                            <artifactId>azure-identity-extensions</artifactId>
-                            <version>1.2.9</version>
+              <groupId>com.azure</groupId>
+              <artifactId>azure-identity-extensions</artifactId>
+              <version>1.2.9</version>
+            </dependency>
+            <dependency>
+              <groupId>org.springframework.boot</groupId>
+              <artifactId>spring-boot-starter-test</artifactId>
+              <scope>test</scope>
             </dependency>
           </dependencies>
-                    <build>
-                        <plugins>
-                            <plugin>
-                                <groupId>org.springframework.boot</groupId>
-                                <artifactId>spring-boot-maven-plugin</artifactId>
-                                <executions>
-                                    <execution>
-                                        <goals>
-                                            <goal>repackage</goal>
-                                        </goals>
-                                    </execution>
-                                </executions>
-                            </plugin>
-                        </plugins>
-                    </build>
+          <build>
+            <plugins>
+              <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <executions>
+                  <execution>
+                    <goals>
+                      <goal>repackage</goal>
+                    </goals>
+                  </execution>
+                </executions>
+              </plugin>
+            </plugins>
+          </build>
         </project>
         """,
         "Spring Boot build for the migrated back end, with the Azure PostgreSQL Entra JDBC authentication plugin.");
@@ -210,11 +265,11 @@ public static class ApplicationCodeEmitter
     private static GeneratedFile BuildApplicationYaml() => new(
         "backend/src/main/resources/application.yml",
         """
-                # Passwordless by design: the JDBC plugin exchanges the app's managed identity for a PostgreSQL token.
+        # Passwordless by design: the JDBC plugin exchanges the app's managed identity for a PostgreSQL token.
         # No credential appears in this file, in configuration, or in a container image.
         spring:
           datasource:
-                        url: jdbc:postgresql://${PGHOST}:5432/${PGDATABASE}?sslmode=require&authenticationPluginClassName=com.azure.identity.extensions.jdbc.postgresql.AzurePostgresqlAuthenticationPlugin
+            url: jdbc:postgresql://${PGHOST}:5432/${PGDATABASE}?sslmode=require&authenticationPluginClassName=com.azure.identity.extensions.jdbc.postgresql.AzurePostgresqlAuthenticationPlugin
             username: ${PGUSER}
           jpa:
             hibernate:
@@ -710,7 +765,7 @@ public static class ApplicationCodeEmitter
         """,
         "Keeps build output and notes out of the image context.");
 
-    private static GeneratedFile BuildReadme(string applicationName, IReadOnlyList<OracleTable> tables)
+    private static string BuildReadme(string applicationName, IReadOnlyList<OracleTable> tables)
     {
         StringBuilder builder = new();
         builder.AppendLine($"# {applicationName} — migrated application tier").AppendLine();
@@ -732,7 +787,7 @@ public static class ApplicationCodeEmitter
         builder.AppendLine("cd backend && mvn spring-boot:run");
         builder.AppendLine("```");
 
-        return new GeneratedFile("README.md", builder.ToString(), "What was generated, and what still has to be built by hand.");
+        return builder.ToString();
     }
 
     private static IReadOnlyList<string> PrimaryKeyColumns(OracleTable table) =>

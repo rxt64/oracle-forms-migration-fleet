@@ -95,4 +95,76 @@ internal static class OracleSamples
         END LEGACY_BANKING_API;
         /
         """;
+
+    /// <summary>
+    /// The whole retail banking workflow schema: four tables, every column the workflows touch, and the
+    /// sequences behind their identifiers. <see cref="Schema"/> above is deliberately a subset of this, so a
+    /// test that passes against one and not the other proves recognition is structural.
+    /// </summary>
+    public const string BankingSchema = """
+        CREATE TABLE BANK_ACCOUNT_REQUEST
+        (
+            REQUEST_ID      NUMBER(10) PRIMARY KEY,
+            BRANCH_CODE     VARCHAR2(12) NOT NULL,
+            ACCOUNT_KIND    VARCHAR2(12) NOT NULL,
+            HONORIFIC       VARCHAR2(8),
+            GIVEN_NAME      VARCHAR2(40) NOT NULL,
+            FAMILY_NAME     VARCHAR2(40) NOT NULL,
+            DATE_OF_BIRTH   DATE NOT NULL,
+            WORK_PHONE      VARCHAR2(20),
+            HOME_PHONE      VARCHAR2(20),
+            STREET_ADDRESS  VARCHAR2(120) NOT NULL,
+            REGION_CODE     VARCHAR2(20) NOT NULL,
+            POSTAL_CODE     VARCHAR2(12) NOT NULL,
+            EMAIL_ADDRESS   VARCHAR2(120) NOT NULL,
+            REQUEST_STATUS  VARCHAR2(12) DEFAULT 'SUBMITTED' NOT NULL,
+            SUBMITTED_AT    TIMESTAMP DEFAULT SYSTIMESTAMP NOT NULL,
+            DECIDED_AT      TIMESTAMP,
+            CONSTRAINT BANK_REQ_KIND_CK CHECK (ACCOUNT_KIND IN ('SAVINGS', 'CHECKING')),
+            CONSTRAINT BANK_REQ_STATUS_CK CHECK (REQUEST_STATUS IN ('SUBMITTED', 'APPROVED', 'REJECTED'))
+        );
+
+        CREATE TABLE BANK_ACCOUNT
+        (
+            ACCOUNT_ID            NUMBER(10) PRIMARY KEY,
+            REQUEST_ID            NUMBER(10) NOT NULL,
+            BRANCH_CODE           VARCHAR2(12) NOT NULL,
+            ACCOUNT_KIND          VARCHAR2(12) NOT NULL,
+            OPENED_ON             DATE DEFAULT SYSDATE NOT NULL,
+            ONLINE_ENABLED        CHAR(1) DEFAULT 'N' NOT NULL,
+            ONLINE_PASSWORD_HASH  RAW(32),
+            CONSTRAINT BANK_ACCT_REQUEST_UQ UNIQUE (REQUEST_ID),
+            CONSTRAINT BANK_ACCT_REQUEST_FK FOREIGN KEY (REQUEST_ID)
+                REFERENCES BANK_ACCOUNT_REQUEST (REQUEST_ID),
+            CONSTRAINT BANK_ACCT_ONLINE_CK CHECK (ONLINE_ENABLED IN ('Y', 'N'))
+        );
+
+        CREATE TABLE BANK_STAFF_USER
+        (
+            STAFF_ID       NUMBER(10) PRIMARY KEY,
+            USERNAME       VARCHAR2(40) NOT NULL,
+            PASSWORD_HASH  RAW(32) NOT NULL,
+            ROLE_CODE      VARCHAR2(12) NOT NULL,
+            ACTIVE_FLAG    CHAR(1) DEFAULT 'Y' NOT NULL,
+            CONSTRAINT BANK_STAFF_USERNAME_UQ UNIQUE (USERNAME),
+            CONSTRAINT BANK_STAFF_ROLE_CK CHECK (ROLE_CODE IN ('MANAGER', 'AUDITOR'))
+        );
+
+        CREATE TABLE BANK_TRANSACTION
+        (
+            TRANSACTION_ID  NUMBER(10) PRIMARY KEY,
+            ACCOUNT_ID      NUMBER(10) NOT NULL,
+            TRANSACTION_TS  TIMESTAMP DEFAULT SYSTIMESTAMP NOT NULL,
+            AMOUNT          NUMBER(12, 2) NOT NULL,
+            REFERENCE_CODE  VARCHAR2(30) NOT NULL,
+            DIRECTION_CODE  CHAR(2) NOT NULL,
+            CONSTRAINT BANK_TXN_ACCOUNT_FK FOREIGN KEY (ACCOUNT_ID)
+                REFERENCES BANK_ACCOUNT (ACCOUNT_ID),
+            CONSTRAINT BANK_TXN_DIRECTION_CK CHECK (DIRECTION_CODE IN ('CR', 'DR'))
+        );
+
+        CREATE SEQUENCE BANK_REQUEST_SEQ START WITH 1001 INCREMENT BY 1 NOCACHE;
+        CREATE SEQUENCE BANK_ACCOUNT_SEQ START WITH 500001 INCREMENT BY 1 NOCACHE;
+        CREATE SEQUENCE BANK_TRANSACTION_SEQ START WITH 9001 INCREMENT BY 1 NOCACHE;
+        """;
 }

@@ -27,6 +27,7 @@ public static partial class OracleSchemaParser
         List<OracleSequence> sequences = [];
         List<OracleIndex> indexes = [];
         List<string> unparsed = [];
+        List<OracleProgramUnit> programUnits = [];
 
         foreach (string statement in SplitStatements(StripComments(ddl)))
         {
@@ -50,6 +51,11 @@ public static partial class OracleSchemaParser
             else
             {
                 unparsed.Add(statement);
+
+                if (TryReadProgramUnitIdentity(statement) is OracleProgramUnit unit)
+                {
+                    programUnits.Add(unit);
+                }
             }
         }
 
@@ -57,7 +63,45 @@ public static partial class OracleSchemaParser
             [.. tables.Select(table => new OracleTable(table.Name, table.Columns, table.Constraints))],
             sequences,
             indexes,
-            unparsed);
+            unparsed)
+        {
+            ProgramUnits = programUnits,
+        };
+    }
+
+    /// <summary>
+    /// Reads what a PL/SQL statement declares from its CREATE header alone: the kind of object and its
+    /// local name. The body is not interpreted and no behaviour is inferred; this exists so a caller can
+    /// test object identity exactly instead of searching the text for a name that might appear anywhere.
+    /// </summary>
+    public static OracleProgramUnit? TryReadProgramUnitIdentity(string? statement)
+    {
+        if (string.IsNullOrWhiteSpace(statement))
+        {
+            return null;
+        }
+
+        string text = statement.TrimStart();
+
+        (Regex Pattern, OracleProgramUnitKind Kind)[] candidates =
+        [
+            (CreatePackageBodyHead(), OracleProgramUnitKind.PackageBody),
+            (CreatePackageHead(), OracleProgramUnitKind.PackageSpecification),
+            (CreateTriggerHead(), OracleProgramUnitKind.Trigger),
+            (CreateProcedureHead(), OracleProgramUnitKind.Procedure),
+            (CreateFunctionHead(), OracleProgramUnitKind.Function),
+        ];
+
+        foreach ((Regex pattern, OracleProgramUnitKind kind) in candidates)
+        {
+            Match match = pattern.Match(text);
+            if (match.Success)
+            {
+                return new OracleProgramUnit(kind, LocalName(match.Groups["name"].Value), statement);
+            }
+        }
+
+        return null;
     }
 
     private sealed class TableBuilder(string name)
@@ -832,6 +876,23 @@ public static partial class OracleSchemaParser
 
     [GeneratedRegex($@"^\s*CREATE\s+SEQUENCE\s+{QualifiedName}", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex CreateSequenceHead();
+
+    private const string ProgramUnitPrefix = @"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:EDITIONABLE\s+|NONEDITIONABLE\s+)?";
+
+    [GeneratedRegex($@"{ProgramUnitPrefix}PACKAGE\s+BODY\s+{QualifiedName}", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex CreatePackageBodyHead();
+
+    [GeneratedRegex($@"{ProgramUnitPrefix}PACKAGE\s+{QualifiedName}", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex CreatePackageHead();
+
+    [GeneratedRegex($@"{ProgramUnitPrefix}TRIGGER\s+{QualifiedName}", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex CreateTriggerHead();
+
+    [GeneratedRegex($@"{ProgramUnitPrefix}PROCEDURE\s+{QualifiedName}", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex CreateProcedureHead();
+
+    [GeneratedRegex($@"{ProgramUnitPrefix}FUNCTION\s+{QualifiedName}", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex CreateFunctionHead();
 
     [GeneratedRegex($@"^\s*CREATE\s+(?<unique>UNIQUE\s+)?(?:BITMAP\s+)?INDEX\s+{QualifiedName}\s+ON\s+(?<table>{Identifier}(?:\.{Identifier})?)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex CreateIndexHead();

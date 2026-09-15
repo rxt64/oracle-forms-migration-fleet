@@ -13,7 +13,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
     <title>Northstar Online Banking</title>
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="styles.css" />
     <link
       rel="icon"
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='13' font-size='13'%3E%E2%98%85%3C/text%3E%3C/svg%3E"
@@ -25,7 +25,7 @@
         <div class="ofx-titlebar-main">
           <span class="ofx-mark" aria-hidden="true">★</span>
           <h1 class="ofx-product">Northstar Online Banking</h1>
-          <span class="ofx-badge">Migrated to Azure Database for PostgreSQL</span>
+          <span class="ofx-badge">Oracle Forms workflow replica</span>
         </div>
         <div class="ofx-titlebar-side">
           <span class="ofx-dbchip" id="dbChip" data-state="checking">
@@ -103,7 +103,7 @@
             <u>H</u>elp
           </button>
           <ul class="ofx-menu-list" id="menu-help" hidden>
-            <li><button type="button" data-action="about">About This Application…</button></li>
+            <li><button type="button" data-action="about">About This Replica…</button></li>
             <li><button type="button" data-action="health">Check Database Status</button></li>
           </ul>
         </div>
@@ -220,9 +220,9 @@
             <div class="ofx-window-bar"><span>Provenance</span></div>
             <div class="ofx-window-body">
               <p class="ofx-note">
-                Oracle is no longer in the data path. The migration fleet generated this client from the
-                converted schema, and every module below runs against Azure Database for PostgreSQL
-                through the generated workflow service.
+                The original Oracle Forms <span class="ofx-mono">.fmb</span> modules are not running
+                here. This browser client re-implements the published workflow requirements against
+                the synthetic demo Oracle database.
               </p>
             </div>
           </div>
@@ -689,21 +689,22 @@
         </div>
         <div class="ofx-dialog-body">
           <p>
-            <strong>This is the migrated application.</strong>
-            Neither an Oracle Forms runtime nor an Oracle database is involved: the back end is Spring
-            Boot on Java 21, talking to Azure Database for PostgreSQL with Entra authentication.
+            <strong>The original Oracle Forms <span class="ofx-mono">.fmb</span> source is not
+            running here.</strong>
+            No Oracle Forms runtime, Forms Services component, or compiled module is loaded by this
+            page.
           </p>
           <p>
-            The migration fleet generated both tiers from the converted schema. It recognised the retail
-            banking workflow from the tables and columns present, then emitted this client and the
-            endpoints behind it. Nothing here was recovered from a Forms module.
+            This is a browser replica that implements the published workflow requirements of the
+            public Oracle Apps case study against the synthetic demo Oracle database exposed by this
+            application's HTTP API.
           </p>
           <p>
             All accounts, staff users, balances and transactions are invented seed data. Nothing in
             this environment corresponds to a real person, account, or transaction.
           </p>
           <dl class="ofx-result ofx-result-inline">
-            <div><dt>Client</dt><dd>Static HTML, CSS and JavaScript — no framework, bundled by Vite</dd></div>
+            <div><dt>Client</dt><dd>Static HTML, CSS and JavaScript — no framework, no build step</dd></div>
             <div><dt>Session storage</dt><dd>Bearer token held in <span class="ofx-mono">sessionStorage</span> only</dd></div>
           </dl>
         </div>
@@ -726,6 +727,6 @@
       </form>
     </dialog>
 
-    <script src="/app.js"></script>
+    <script src="app.js"></script>
   </body>
 </html>
