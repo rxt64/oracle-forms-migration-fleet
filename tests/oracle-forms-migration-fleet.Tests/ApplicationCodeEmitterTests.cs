@@ -52,6 +52,7 @@ public class ApplicationCodeEmitterTests
     {
         string entity = File(Convert(), "BankAccount.java");
 
+        Assert.Contains("@JdbcTypeCode(SqlTypes.CHAR)", entity, StringComparison.Ordinal);
         Assert.Contains("@Column(name = \"online_enabled\", nullable = false, columnDefinition = \"char(1)\")", entity, StringComparison.Ordinal);
     }
 

@@ -252,6 +252,8 @@ public static class ApplicationCodeEmitter
         StringBuilder builder = new();
         builder.AppendLine($"package {BasePackage}.domain;").AppendLine();
         builder.AppendLine("import jakarta.persistence.*;");
+        builder.AppendLine("import org.hibernate.annotations.JdbcTypeCode;");
+        builder.AppendLine("import org.hibernate.type.SqlTypes;");
         builder.AppendLine("import java.math.BigDecimal;");
         builder.AppendLine("import java.time.LocalDate;");
         builder.AppendLine("import java.time.LocalDateTime;").AppendLine();
@@ -278,6 +280,11 @@ public static class ApplicationCodeEmitter
             if (isKey)
             {
                 builder.AppendLine("    @Id");
+            }
+
+            if (column.BaseType.Equals("CHAR", StringComparison.OrdinalIgnoreCase))
+            {
+                builder.AppendLine("    @JdbcTypeCode(SqlTypes.CHAR)");
             }
 
             builder.Append("    @Column(name = \"").Append(column.Name.ToLowerInvariant()).Append('"');

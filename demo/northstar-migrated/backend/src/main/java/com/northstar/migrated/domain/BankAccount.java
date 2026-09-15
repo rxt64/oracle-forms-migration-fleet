@@ -1,6 +1,8 @@
 package com.northstar.migrated.domain;
 
 import jakarta.persistence.*;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -24,6 +26,7 @@ public class BankAccount {
     @Column(name = "opened_on", nullable = false)
     private LocalDate openedOn;
 
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "online_enabled", nullable = false, columnDefinition = "char(1)")
     private String onlineEnabled;
 

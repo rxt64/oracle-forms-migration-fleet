@@ -1,6 +1,8 @@
 package com.northstar.migrated.domain;
 
 import jakarta.persistence.*;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -24,6 +26,7 @@ public class BankTransaction {
     @Column(name = "reference_code", nullable = false)
     private String referenceCode;
 
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "direction_code", nullable = false, columnDefinition = "char(2)")
     private String directionCode;
 
