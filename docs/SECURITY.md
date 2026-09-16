@@ -91,5 +91,6 @@ bug, not a UX bug.
 
 ## Reporting
 
-Report security concerns directly to the repository owner. Do not place credentials, exploit details,
-customer data, or other sensitive material in a public GitHub issue.
+Report security concerns through
+[GitHub private vulnerability reporting](https://github.com/rxt64/oracle-forms-migration-fleet/security/advisories/new).
+Do not place credentials, exploit details, customer data, or other sensitive material in a public issue.
