@@ -600,7 +600,12 @@ public static class WorkspacePath
 
         string normalized = Normalize(path);
 
-        if (Path.IsPathRooted(path) || Path.IsPathRooted(normalized) ||
+        bool driveQualified = normalized.Length >= 3
+            && char.IsAsciiLetter(normalized[0])
+            && normalized[1] == ':'
+            && normalized[2] == '/';
+
+        if (driveQualified || Path.IsPathRooted(path) || Path.IsPathRooted(normalized) ||
             normalized.StartsWith('/') || path.StartsWith('\\') || path.Contains("://", StringComparison.Ordinal))
         {
             return $"{fieldName} must be workspace-relative; rooted, UNC, and URI paths are rejected.";
