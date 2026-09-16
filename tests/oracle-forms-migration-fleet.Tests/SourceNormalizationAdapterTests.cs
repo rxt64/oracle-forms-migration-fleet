@@ -150,6 +150,51 @@ public class SourceNormalizationAdapterTests
         Assert.Equal("ORDER_BLOCK", ir.RootElement.GetProperty("modules")[0].GetProperty("blocks")[0].GetProperty("name").GetString());
     }
 
+    [Theory]
+    [InlineData("6i", "6.0.8.28", "6i")]
+    [InlineData("9i", "9.0.2.0", "9i")]
+    [InlineData("10g", "10.1.2.3", "10g")]
+    [InlineData("11g", "11.1.2.2", "11g")]
+    [InlineData("12c", "12.2.1.4", "12c")]
+    public async Task A_text_export_from_each_intake_family_reaches_strict_ir_and_application_generation(
+        string requestedVersion,
+        string exportVersion,
+        string expectedFamily)
+    {
+        using TemporaryWorkspace workspace = Workspace(space =>
+            space.WriteFile("legacy/forms/ui/ORDER_ENTRY.xml", FormsXml(exportVersion)));
+
+        MigrationExecutionResult result = await new MigrationExecutor(
+                workspace.Root,
+                [new SourceNormalizationAdapter(), new ApplicationCodeConversionAdapter()])
+            .ExecuteAsync(Request(requestedVersion), Operator);
+
+        Assert.Equal(
+            PhaseExecutionState.Executed,
+            result.Phases.Single(phase => phase.Phase == MigrationPhase.SourceNormalization).State);
+        Assert.Equal(
+            PhaseExecutionState.Executed,
+            result.Phases.Single(phase => phase.Phase == MigrationPhase.ApplicationCodeConversion).State);
+
+        using JsonDocument ir = JsonDocument.Parse(workspace.Read(IrPath));
+        Assert.Equal("oracle-forms-migration-fleet/source-normalization", ir.RootElement.GetProperty("generator").GetString());
+        Assert.Equal("1", ir.RootElement.GetProperty("schemaVersion").GetString());
+        Assert.True(ir.RootElement.GetProperty("normalized").GetBoolean());
+        Assert.Equal("declared by the export and matching the run", ir.RootElement.GetProperty("versionAuthority").GetString());
+        Assert.Equal(expectedFamily, ir.RootElement.GetProperty("formsFamily").GetString());
+        Assert.Equal("legacy/forms", ir.RootElement.GetProperty("sourceRoot").GetString());
+        Assert.Equal(exportVersion, ir.RootElement.GetProperty("modules")[0].GetProperty("declaredVersion").GetString());
+        Assert.Equal(expectedFamily, ir.RootElement.GetProperty("modules")[0].GetProperty("declaredFamily").GetString());
+        Assert.Equal("legacy/forms/ui/ORDER_ENTRY.xml", ir.RootElement.GetProperty("modules")[0].GetProperty("sourcePath").GetString());
+
+        Assert.Contains("<artifactId>migrated-backend</artifactId>", workspace.Read("out/orders/application/backend/pom.xml"), StringComparison.Ordinal);
+        Assert.Contains("\"build\": \"tsc --noEmit && vite build\"", workspace.Read("out/orders/application/frontend/package.json"), StringComparison.Ordinal);
+        Assert.Contains(
+            "were read from an XML export",
+            workspace.Read("out/orders/application/CONVERSION_NOTES.md"),
+            StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task A_declared_release_that_contradicts_the_run_fails_closed()
     {

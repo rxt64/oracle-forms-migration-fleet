@@ -24,7 +24,7 @@ The development deployment was revalidated on 2026-09-16:
 - Both applications passed manager authentication and loaded the authorization-gated submitted-account-request worklist.
 - The destination reported a connected PostgreSQL database. Azure reported revision `ca-ofmfleet-mig-dev-ykbpnrpd--0000008` running and ready from image `northstar-migrated:3c496b0e2d22`.
 - The deployed destination `app.js` matched the fleet-generated artifact byte-for-byte at SHA-256 `0169ef470cecca57785e1ef4e5f31736a60a8c8b8ebeb50cf29f7623e892e22b`.
-- The local solution passed all 1,062 tests, and GitHub Actions CI run `35055850554` passed its build, test, and container-image jobs.
+- At that acceptance checkpoint, the local solution passed all 1,062 tests, and GitHub Actions CI run `35055850554` passed its build, test, and container-image jobs.
 
 This evidence applies only to the synthetic Northstar path and the deployment above. It does not establish general Oracle Forms release compatibility.
 
@@ -76,6 +76,28 @@ closed on a binary-only estate, and `ApplicationCodeConversion` refuses to gener
 when Forms binaries exist and no readable `FormModule` XML accompanies them, at every release including
 12c. Normalization is performed by the operator, on their own Oracle installation, under their own
 licence and support terms: the fleet runs no Oracle tool and holds no `ORACLE_HOME`.
+
+### Automated textual pipeline matrix
+
+CI runs one positive synthetic export through normalization, validated normalized IR, and application
+generation for each intake family: Forms 6i (`6.0.8.28`), 9i (`9.0.2.0`), 10g (`10.1.2.3`), 11g
+(`11.1.2.2`), and 12c (`12.2.1.4`). Each row verifies the exact declared version and family, source-root
+and source-file provenance, IR authority metadata, and key generated Java and browser descriptor content. The existing negative
+matrix verifies that a binary-only estate fails closed for every family.
+
+With these five matrix rows, the current local solution passes all 1,067 tests.
+
+Run the positive matrix locally with:
+
+```powershell
+dotnet test tests/oracle-forms-migration-fleet.Tests/oracle-forms-migration-fleet.Tests.csproj `
+    --filter "FullyQualifiedName~A_text_export_from_each_intake_family_reaches_strict_ir_and_application_generation"
+```
+
+This is parser and generator regression evidence over a common synthetic XML shape. It does not test
+Oracle's native binary formats, version-specific Forms widgets or runtime behavior, generated target
+compilation for each release, or source-versus-target equivalence. Those require the release
+qualification procedure below and authorized source corpora.
 
 ### Oracle Database
 

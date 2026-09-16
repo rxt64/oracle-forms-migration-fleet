@@ -42,6 +42,19 @@ jobs:
       - name: Build
         run: dotnet build --no-restore -c Release -p:SkipClientBuild=true
 
+      - name: Test Forms 6i-12c textual pipeline matrix
+        run: |
+          set -o pipefail
+          MATRIX_TEST=A_text_export_from_each_intake_family_reaches_strict_ir_and_application_generation
+          dotnet test --no-build -c Release -p:SkipClientBuild=true \
+            --filter "FullyQualifiedName~$MATRIX_TEST" \
+            --logger "console;verbosity=normal" | tee forms-textual-matrix.log
+          PASSED=$(grep -c "Passed .*${MATRIX_TEST}(" forms-textual-matrix.log || true)
+          if [ "$PASSED" -ne 5 ]; then
+            echo "Expected exactly 5 passed Forms textual-pipeline rows, but found $PASSED."
+            exit 1
+          fi
+
       - name: Test
         run: dotnet test --no-build -c Release -p:SkipClientBuild=true --logger "console;verbosity=normal"
 
