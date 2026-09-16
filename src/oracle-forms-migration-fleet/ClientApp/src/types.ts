@@ -55,7 +55,7 @@ export interface TopologyHop {
   state: ComponentState;
 }
 
-export type PhaseEngine = "NotImplemented" | "Deterministic" | "DeterministicWithModelReview";
+export type PhaseEngine = "NotImplemented" | "Deterministic" | "DeterministicWithModelReview" | "DeterministicWithBoundedModelRepair";
 
 export interface PhaseAttribution {
   phase: string;

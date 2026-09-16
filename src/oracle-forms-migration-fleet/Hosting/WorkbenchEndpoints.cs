@@ -28,6 +28,7 @@ internal static class WorkbenchEndpoints
         FoundryAgentClient? foundryAgentClient = null,
         bool managedIdentityConfigured = false,
         bool entraAuthenticationConfigured = false,
+        bool sandboxDatabaseConfigured = false,
         SourceWorkspaceService? sourceWorkspaces = null)
     {
         IHostEnvironment environment = endpoints.ServiceProvider.GetRequiredService<IHostEnvironment>();
@@ -54,6 +55,7 @@ internal static class WorkbenchEndpoints
                 foundryAgentClient is not null,
                 managedIdentityConfigured,
                 entraAuthenticationConfigured,
+                sandboxDatabaseConfigured,
                 attribution));
         });
 

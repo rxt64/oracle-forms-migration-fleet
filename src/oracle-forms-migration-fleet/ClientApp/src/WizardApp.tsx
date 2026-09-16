@@ -322,6 +322,7 @@ const ENGINE_LABELS: Record<PhaseEngine, string> = {
   NotImplemented: "No adapter",
   Deterministic: "Deterministic code",
   DeterministicWithModelReview: "Deterministic code + model review",
+  DeterministicWithBoundedModelRepair: "Deterministic code + compiler-bounded model repair",
 };
 
 function PhaseCard({ phase, attribution }: { phase: Phase; attribution?: PhaseAttribution }) {
@@ -949,9 +950,9 @@ export default function WizardApp() {
         </ol>
 
         <div className="mf-intro-cards">
-          <article><ListChecks /><h2>What you need</h2><p>A project reference, the folder that holds your Forms files, and a rough idea of which exports you already have. Nothing is uploaded.</p></article>
+          <article><ListChecks /><h2>What you need</h2><p>A repository or archive, the folder that holds your Forms files, and a rough idea of which exports you already have. Acquired source stays in your owner-scoped session workspace.</p></article>
           <article><FileCheck2 /><h2>What you get</h2><p>A plan covering the six migration stages, what each stage produces, and a plain list of anything still missing.</p></article>
-          <article><ShieldCheck /><h2>What it will not do</h2><p>It never touches your code, your database, or your Azure resources. Anything it generates is written into your own private session workspace.</p></article>
+          <article><ShieldCheck /><h2>What it will not do</h2><p>It never modifies your source repository or production resources. Generated files stay in your private session workspace; only separately approved sandbox phases may write to the host-configured PostgreSQL target.</p></article>
         </div>
 
         <div className="mf-intro-actions">
@@ -967,7 +968,7 @@ export default function WizardApp() {
               <span>{index < step ? <Check /> : index + 1}</span><span><strong>{item}</strong><small>{STEP_SUMMARIES[index]}</small></span>
             </button>
           </li>)}</ol>
-          <div className="mf-boundary compact"><LockKeyhole /><p><strong>Safe mode</strong>Planning writes nothing. Running the authorized phases writes files into your private session workspace only — never your repository, a database, or an Azure resource.</p></div>
+          <div className="mf-boundary compact"><LockKeyhole /><p><strong>Gated mode</strong>Planning writes nothing. Authorized conversion writes stay in your private session workspace. Separately approved sandbox phases may write to the host-configured PostgreSQL target; source and production resources remain unchanged.</p></div>
         </nav>
 
         <section className="mf-page">
@@ -1055,13 +1056,13 @@ export default function WizardApp() {
             />
             <ChoiceCards
               legend="Planning depth"
-              hint="How far the plan looks ahead. The workbench can then run the phases the planner authorizes, which write into your session workspace only."
+              hint="How far the plan looks ahead. Authorized conversion writes stay in the session workspace; separately approved sandbox phases may write to the host-configured PostgreSQL target."
               value={mode}
               onChange={setMode}
               options={bootstrap.executionModes.map((option) => ({ value: option.mode, name: option.name, description: option.description }))}
               renderDetail={(value) => {
                 const option = bootstrap.executionModes.find((item) => item.mode === value);
-                return option ? <p className="mf-detail-note">{option.executableHere ? "This depth is produced entirely by this workbench." : "This depth describes work that would need execution adapters, which are not built. The plan still covers it in writing."}</p> : null;
+                return option ? <p className="mf-detail-note">{option.executableHere ? "This depth has an implementation here, but evidence, runtime configuration, and approvals still gate each phase." : "This depth describes work that would need execution adapters, which are not built. The plan still covers it in writing."}</p> : null;
               }}
             />
           </div>}
@@ -1081,7 +1082,7 @@ export default function WizardApp() {
             <section className="mf-review"><header><h2>Application</h2><button type="button" onClick={() => goToStep(0)}>Change</button></header><dl><ReviewRow label="Engagement" value={fields.engagementId} onEdit={() => goToStep(0)} /><ReviewRow label="Application" value={fields.applicationName} onEdit={() => goToStep(0)} /><ReviewRow label="Source" value={sourceLabel} onEdit={() => goToStep(0)} /><ReviewRow label="Output" value={fields.outputRoot} onEdit={() => goToStep(0)} /><ReviewRow label="Oracle Forms release" value={FORMS_VERSIONS.find((item) => item.value === fields.oracleFormsVersion)?.label ?? fields.oracleFormsVersion} onEdit={() => goToStep(0)} /><ReviewRow label="Oracle Database release" value={DATABASE_VERSIONS.find((item) => item.value === fields.oracleDatabaseVersion)?.label ?? fields.oracleDatabaseVersion} onEdit={() => goToStep(0)} /></dl></section>
             <section className="mf-review"><header><h2>Destination</h2><button type="button" onClick={() => goToStep(1)}>Change</button></header><dl><ReviewRow label="Database" value={selectedDatabase?.name ?? database} onEdit={() => goToStep(1)} /><ReviewRow label="Planning depth" value={selectedMode?.name ?? mode} onEdit={() => goToStep(1)} /></dl></section>
             <section className="mf-review"><header><h2>Evidence and approvals</h2><button type="button" onClick={() => goToStep(2)}>Change</button></header><dl><ReviewRow label="Verified evidence" value={`${evidence.length} artifact types (${readyGroups}/${groups.length} requirements)`} onEdit={() => goToStep(2)} /><ReviewRow label="Sandbox approver" value={fields.executionApprover} onEdit={() => goToStep(3)} /><ReviewRow label="Production approver" value={fields.productionApprover} onEdit={() => goToStep(3)} /></dl></section>
-            <div className="mf-boundary"><LockKeyhole /><p><strong>Generating the plan writes nothing.</strong>Afterwards you can run the phases the planner authorizes; those write files into your private session workspace only. Sandbox database migration and production cutover are not available here.</p></div>
+            <div className="mf-boundary"><LockKeyhole /><p><strong>Generating the plan writes nothing.</strong>Running authorized conversion phases writes files into your private session workspace. With separate execution approval, sandbox phases may write to the host-configured PostgreSQL target. Production cutover is not available here.</p></div>
             <button className="mf-primary mf-generate" type="submit" disabled={submitting}><Sparkles />{submitting ? "Generating plan..." : "Generate migration plan"}</button>
           </form>}
 
@@ -1101,7 +1102,7 @@ export default function WizardApp() {
         {bootstrap.attribution && <AttributionSection attribution={bootstrap.attribution} />}
         {plan.azureFootprint && <AzureFootprintSection footprint={plan.azureFootprint} />}
         <section className="mf-result-section"><p className="mf-kicker">Execution</p><h2>Run the authorized phases</h2>
-          <p className="mf-run-lead">This runs only the phases marked <strong>Planned</strong> above. Everything it produces is written into your private session workspace, which is deleted with the rest of your copy. Your repository, your databases, and your Azure resources are never touched.</p>
+          <p className="mf-run-lead">This runs only the phases marked <strong>Planned</strong> above. Conversion artifacts stay in your private session workspace and your source repository is never modified. Separately approved sandbox phases may write schema and data to the host-configured PostgreSQL target; no caller can change that endpoint. Production resources are not changed.</p>
           {!runnable && <p className="mf-help" id="run-hint">{runHint}</p>}
           <button type="button" className="mf-primary mf-generate" disabled={!runnable || executing} aria-describedby={runnable ? undefined : "run-hint"} onClick={() => void runAuthorized()}>
             <Play />{executing ? "Running..." : "Run authorized phases"}
@@ -1120,7 +1121,7 @@ export default function WizardApp() {
             : artifact?.text
               ? <pre className="mf-artifact" tabIndex={0} aria-label={`Contents of ${artifact.path}`}>{artifact.text}</pre>
               : <p role="status" aria-live="polite">Loading the artifact...</p>}</>
-          : <><div className="mf-assurance"><Cloud /><div><strong>{activeAzure} of {bootstrap.azureComponents.length} components active</strong><p>Only runtime-proven services are marked active.</p></div></div><div className="mf-components">{bootstrap.azureComponents.map((component) => <article key={component.id}><span className={component.state === "Active" ? "active" : ""}><ServiceGlyph id={glyphForComponent(component.id)} size={22} /></span><div><h3>{component.name}<InfoTip label={component.name}>{component.evidence}</InfoTip></h3><p>{component.role}</p><small className={component.state === "Active" ? "mf-pill success" : "mf-pill"}>{component.state === "Active" ? <CheckCircle2 /> : <AlertTriangle />}{humanize(component.state)}</small></div></article>)}</div><div className="mf-boundary compact"><LockKeyhole /><p><strong>Local generation only</strong>Analysis and PostgreSQL schema conversion run here and write into your session workspace. Sandbox database migration and production cutover are not available.</p></div></>}
+          : <><div className="mf-assurance"><Cloud /><div><strong>{activeAzure} of {bootstrap.azureComponents.length} components active</strong><p>Only runtime-proven services are marked active.</p></div></div><div className="mf-components">{bootstrap.azureComponents.map((component) => <article key={component.id}><span className={component.state === "Active" ? "active" : ""}><ServiceGlyph id={glyphForComponent(component.id)} size={22} /></span><div><h3>{component.name}<InfoTip label={component.name}>{component.evidence}</InfoTip></h3><p>{component.role}</p><small className={component.state === "Active" ? "mf-pill success" : "mf-pill"}>{component.state === "Active" ? <CheckCircle2 /> : <AlertTriangle />}{humanize(component.state)}</small></div></article>)}</div><div className="mf-boundary compact"><LockKeyhole /><p><strong>Gated execution</strong>Analysis, conversion, and build phases write into the session workspace. A configured PostgreSQL sandbox can receive writes only after separate execution approval. Differential testing and production cutover are not available.</p></div></>}
       </section></div>}
 
       {consoleOpen && <MatrixConsole

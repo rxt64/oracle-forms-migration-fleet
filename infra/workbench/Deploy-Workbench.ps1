@@ -10,8 +10,10 @@ param(
     [ValidatePattern('^https://[^/]+\.services\.ai\.azure\.com/.+/agents/.+/endpoint/protocols/openai/responses(?:\?.*)?$')]
     [string] $FoundryAgentEndpoint,
 
-    [ValidatePattern('^[a-z0-9][a-z0-9._-]{0,127}$')]
-    [string] $ImageTag = (Get-Date -Format 'yyyyMMddHHmmss')
+    [ValidatePattern('^[0-9a-f]{12}$')]
+    [string] $ImageTag,
+
+    [switch] $FoundationOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -19,11 +21,8 @@ $templateFile = Join-Path $PSScriptRoot 'main.bicep'
 $parameterFile = Join-Path $PSScriptRoot 'dev.bicepparam'
 $compiledParameterFile = Join-Path ([System.IO.Path]::GetTempPath()) "oracle-forms-migration-fleet-$([Guid]::NewGuid().ToString('N')).parameters.json"
 $deploymentParameterFile = Join-Path ([System.IO.Path]::GetTempPath()) "oracle-forms-migration-fleet-$([Guid]::NewGuid().ToString('N')).deployment.parameters.json"
-$projectRoot = Resolve-Path (Join-Path $PSScriptRoot '..\..')
-$sourceRoot = Join-Path $projectRoot 'src\oracle-forms-migration-fleet'
 $deploymentName = 'migration-fleet-workbench'
 $appDisplayName = 'Migration Fleet Workbench - dev'
-$credentialDisplayName = "container-app-auth-$ImageTag"
 $clientSecret = $null
 $deploymentParameters = $null
 $deploymentParametersJson = $null
@@ -100,7 +99,6 @@ try {
     $imageRepository = $outputs.imageRepository.value
     $workbenchUrl = $outputs.workbenchUrl.value
     $redirectUri = "$workbenchUrl/.auth/login/aad/callback"
-    $image = "$($outputs.registryLoginServer.value)/$imageRepository`:$ImageTag"
 
     $agentUri = [Uri] $FoundryAgentEndpoint
     $expectedAgentHost = "$($outputs.foundryAccountName.value).services.ai.azure.com"
@@ -117,22 +115,24 @@ try {
         throw 'The Foundry endpoint does not match the canonical hosted-agent endpoint for the account and project declared by this deployment.'
     }
 
-    Write-Output 'Building the workbench image in Azure Container Registry...'
-    # Log streaming is disabled on purpose: the Azure CLI streamer writes build output
-    # through colorama to the Windows console, so a single non-ASCII character emitted by
-    # the toolchain (for example vite's check mark) aborts the client with a
-    # UnicodeEncodeError while the server-side run keeps going. --no-logs polls instead,
-    # but it also exits 0 for failed runs, so the run status must be asserted explicitly.
-    $buildRun = Invoke-AzJson -Arguments @(
-        'acr', 'build',
-        '--registry', $registryName,
-        '--image', "$imageRepository`:$ImageTag",
-        '--file', (Join-Path $sourceRoot 'Dockerfile'),
-        $sourceRoot,
-        '--no-logs'
-    )
-    if ($buildRun.status -ne 'Succeeded') {
-        throw "Azure Container Registry build failed with status '$($buildRun.status)'. Inspect the logs with: az acr task logs --registry $registryName --run-id $($buildRun.runId)"
+    if ($FoundationOnly) {
+        Write-Output "Foundation ready. Build a commit-addressed image with the GitHub workflow before deploying the authenticated app."
+        return
+    }
+
+    if ([string]::IsNullOrWhiteSpace($ImageTag)) {
+        throw 'ImageTag is required unless FoundationOnly is specified. Use the 12-character commit tag built by the GitHub workflow.'
+    }
+
+    $credentialDisplayName = "container-app-auth-$ImageTag"
+    $image = "$($outputs.registryLoginServer.value)/$imageRepository`:$ImageTag"
+    & az acr repository show `
+        --name $registryName `
+        --image "$imageRepository`:$ImageTag" `
+        --output none `
+        --only-show-errors
+    if ($LASTEXITCODE -ne 0) {
+        throw "The commit-addressed image '$imageRepository`:$ImageTag' is not in ACR. Build it with the GitHub runner before bootstrap deploys the app."
     }
 
     $applications = Invoke-AzJson -Arguments @('ad', 'app', 'list', '--display-name', $appDisplayName)

@@ -6,6 +6,14 @@ Notable changes to behaviour, with the reasoning that is not visible in a diff.
 
 ### Added
 
+- Azure sample documentation and architecture package. The root README now follows a demo-first
+  overview, architecture, stage, quick-start, deployment, security, cost, cleanup, and troubleshooting
+  flow. Two self-contained Azure SVG diagrams and editable Excalidraw sources show the migration pipeline
+  and live development topology. The fleet catalog now includes `aws-samples/sample-oracleforms-to-angular`
+  as workshop guidance for staged extraction, traceable generation, equivalence tests, and shadow comparison.
+  Its six `.fmb` files are recorded as six modules, not Forms version 6; their `ROS.60050` headers and the
+  sample's heuristic printable-run parser are not treated as Forms 6i or general binary compatibility proof.
+
 - Generated application build and static validation. `BuildAndStaticValidation` now runs after application
   conversion and invokes fixed, host-owned commands for Maven packaging and React production compilation.
   Generated Java targets release 21; generated React passes `tsc --noEmit` before Vite builds it. Command,
@@ -73,6 +81,15 @@ Notable changes to behaviour, with the reasoning that is not visible in a diff.
   create an unreviewed write path into a customer subscription.
 
 ### Fixed
+
+- Workbench capability disclosure now follows the runtime configuration. The UI no longer promises that
+  databases are never touched while offering an approved PostgreSQL sandbox run. Bootstrap marks the
+  host-fixed database target active only when `SANDBOX_PGHOST` and `SANDBOX_PGUSER` bind the gateway, and
+  states that sandbox writes require separate execution approval while differential testing and production
+  cutover remain unavailable. Workbench images are now built only by GitHub Actions; first-time bootstrap
+  consumes an existing 12-character commit tag and cannot start a workstation ACR build. Runtime attribution
+  now names model-assisted review on both application and database conversion and compiler-bounded routine
+  repair during sandbox migration; no phase is presented as model-owned.
 
 - The generation gate no longer blocks a phase on evidence that phase does not read. Converting the Northstar
   Oracle schema was refused for want of Forms `.fmb` binaries, which a schema conversion never opens. Each

@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720" role="img" aria-labelledby="title desc">
+  <title id="title">Oracle Forms Migration Fleet development architecture on Azure</title>
+  <desc id="desc">Operators authenticate to an Azure Container Apps workbench that calls Microsoft Foundry using managed identity. The source replica connects to an internal Oracle demo database. The migrated React and Spring application connects passwordlessly to Azure Database for PostgreSQL. GitHub Actions builds images in Azure Container Registry and telemetry flows to Application Insights and Log Analytics.</desc>
+  <defs>
+    <style>
+      .title{font:700 26px 'Segoe UI',Arial,sans-serif;fill:#172b4d}.subtitle{font:14px 'Segoe UI',Arial,sans-serif;fill:#5b6573}.group{fill:#fff;stroke:#0078d4;stroke-width:2}.group-title{font:700 14px 'Segoe UI',Arial,sans-serif;fill:#172b4d}.tile{stroke-width:2;rx:6}.label{font:700 13px 'Segoe UI',Arial,sans-serif;fill:#172b4d}.small{font:12px 'Segoe UI',Arial,sans-serif;fill:#394657}.tiny{font:11px 'Segoe UI',Arial,sans-serif;fill:#5b6573}.badge{font:700 14px 'Segoe UI',Arial,sans-serif;fill:#fff}.flow{fill:none;stroke:#46576b;stroke-width:2;marker-end:url(#arrow)}.identity{fill:none;stroke:#5c2d91;stroke-width:2;stroke-dasharray:7 5;marker-end:url(#arrowPurple)}.telemetry{fill:none;stroke:#0078d4;stroke-width:1.8;stroke-dasharray:5 4;marker-end:url(#arrowBlue)}
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#46576b"/></marker>
+    <marker id="arrowPurple" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#5c2d91"/></marker>
+    <marker id="arrowBlue" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#0078d4"/></marker>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-opacity=".13"/></filter>
+  </defs>
+  <rect width="1280" height="720" fill="#f7f9fc"/>
+  <text x="40" y="43" class="title">Development target architecture</text>
+  <text x="40" y="67" class="subtitle">Microsoft Foundry workbench · source workflow replica · migrated React/Java application · PostgreSQL target</text>
+
+  <rect x="34" y="150" width="126" height="92" class="tile" fill="#fff" stroke="#65758b" filter="url(#shadow)"/>
+  <circle cx="72" cy="184" r="18" fill="#65758b"/><text x="72" y="189" text-anchor="middle" class="badge">OP</text>
+  <text x="98" y="181" class="label">Operator</text><text x="98" y="199" class="tiny">browser</text><text x="52" y="225" class="small">HTTPS</text>
+
+  <rect x="192" y="88" width="1048" height="560" rx="10" class="group"/>
+  <rect x="192" y="88" width="1048" height="38" rx="8" fill="#0078d4"/>
+  <text x="214" y="113" style="font:700 15px 'Segoe UI',Arial,sans-serif;fill:#fff">Microsoft Azure · development environment</text>
+
+  <rect x="220" y="146" width="186" height="92" class="tile" fill="#e8daef" stroke="#5c2d91" filter="url(#shadow)"/>
+  <rect x="238" y="164" width="34" height="34" rx="5" fill="#5c2d91"/><text x="255" y="187" text-anchor="middle" class="badge">ID</text>
+  <text x="286" y="176" class="label">Microsoft Entra ID</text><text x="286" y="194" class="small">Container Apps Easy Auth</text><text x="238" y="220" class="tiny">single-tenant operator allowlist</text>
+  <path d="M160 196 H212" class="flow"/>
+
+  <rect x="430" y="134" width="520" height="396" rx="8" fill="none" stroke="#65758b" stroke-width="2" stroke-dasharray="7 5"/>
+  <text x="448" y="158" class="group-title">Azure Container Apps environment</text>
+
+  <rect x="450" y="178" width="230" height="80" class="tile" fill="#dceeff" stroke="#0078d4" filter="url(#shadow)"/>
+  <rect x="466" y="194" width="34" height="34" rx="5" fill="#0078d4"/><text x="483" y="217" text-anchor="middle" class="badge">CA</text>
+  <text x="514" y="206" class="label">Migration Fleet workbench</text><text x="514" y="224" class="small">ASP.NET 10 + React</text><text x="466" y="246" class="tiny">plan · generate · review · validate</text>
+  <path d="M406 192 H420 V218 H442" class="flow"/>
+
+  <rect x="990" y="146" width="214" height="92" class="tile" fill="#e8daef" stroke="#5c2d91" filter="url(#shadow)"/>
+  <rect x="1008" y="164" width="34" height="34" rx="5" fill="#5c2d91"/><text x="1025" y="187" text-anchor="middle" class="badge">AI</text>
+  <text x="1056" y="176" class="label">Microsoft Foundry</text><text x="1056" y="194" class="small">hosted agent + models</text><text x="1008" y="220" class="tiny">gpt-5.4-mini · gpt-5.6-sol</text>
+  <path d="M680 218 H982" class="identity"/>
+  <text x="770" y="205" class="tiny">managed identity</text>
+
+  <rect x="450" y="324" width="145" height="150" class="tile" fill="#fff4ce" stroke="#f7630c" filter="url(#shadow)"/>
+  <rect x="462" y="342" width="32" height="32" rx="5" fill="#f7630c"/><text x="478" y="364" text-anchor="middle" class="badge">SRC</text>
+  <text x="503" y="353" class="label">Source replica</text><text x="503" y="371" class="tiny">ASP.NET app</text>
+  <text x="462" y="405" class="tiny">Public HTTPS</text><text x="462" y="425" class="tiny">Workflow shell</text><text x="462" y="445" class="tiny">Synthetic demo only</text>
+
+  <rect x="610" y="324" width="150" height="150" class="tile" fill="#e8f2ff" stroke="#0078d4" filter="url(#shadow)"/>
+  <rect x="622" y="342" width="32" height="32" rx="5" fill="#0078d4"/><text x="638" y="364" text-anchor="middle" class="badge">APP</text>
+  <text x="663" y="353" class="label">Migrated app</text><text x="663" y="371" class="tiny">React + Spring</text>
+  <text x="622" y="405" class="tiny">Public HTTPS</text><text x="622" y="425" class="tiny">Java 21 API</text><text x="622" y="445" class="tiny">Fleet-generated</text>
+
+  <rect x="775" y="324" width="155" height="150" class="tile" fill="#f3f2f1" stroke="#65758b" filter="url(#shadow)"/>
+  <rect x="787" y="342" width="32" height="32" rx="5" fill="#65758b"/><text x="803" y="364" text-anchor="middle" class="badge">ORA</text>
+  <text x="828" y="353" class="label">Oracle demo</text><text x="828" y="371" class="tiny">Database Free 23</text>
+  <text x="787" y="405" class="tiny">Internal TCP 1521</text><text x="787" y="425" class="tiny">Ephemeral seed</text><text x="787" y="445" class="tiny">No public endpoint</text>
+  <path d="M522 474 V502 H852 V482" class="flow"/><text x="600" y="498" class="tiny">server-side Oracle connection</text>
+
+  <rect x="980" y="334" width="230" height="150" class="tile" fill="#dff6dd" stroke="#107c10" filter="url(#shadow)"/>
+  <rect x="998" y="352" width="34" height="34" rx="5" fill="#107c10"/><text x="1015" y="375" text-anchor="middle" class="badge">PG</text>
+  <text x="1046" y="364" class="label">Azure Database</text><text x="1046" y="382" class="small">for PostgreSQL 16</text>
+  <text x="998" y="416" class="tiny">Entra authentication</text><text x="998" y="436" class="tiny">No database password</text><text x="998" y="456" class="tiny">Migrated schema + demo data</text>
+  <path d="M685 474 V518 H1095 V492" class="identity"/><text x="800" y="514" class="tiny">pre-provisioned user-assigned identity</text>
+
+  <rect x="220" y="566" width="224" height="58" class="tile" fill="#dceeff" stroke="#0078d4"/>
+  <text x="332" y="589" text-anchor="middle" class="label">GitHub Actions</text><text x="332" y="608" text-anchor="middle" class="tiny">build · test · deploy</text>
+  <rect x="496" y="566" width="224" height="58" class="tile" fill="#dceeff" stroke="#0078d4"/>
+  <text x="608" y="589" text-anchor="middle" class="label">Azure Container Registry</text><text x="608" y="608" text-anchor="middle" class="tiny">private immutable images</text>
+  <path d="M444 595 H488" class="flow"/>
+  <path d="M608 566 V522" class="flow"/>
+
+  <rect x="772" y="566" width="438" height="58" class="tile" fill="#e8daef" stroke="#5c2d91"/>
+  <text x="991" y="589" text-anchor="middle" class="label">Application Insights + Log Analytics</text><text x="991" y="608" text-anchor="middle" class="tiny">workbench traces · Container Apps platform logs</text>
+  <path d="M680 238 H940 V548 H764" class="telemetry"/>
+
+  <text x="40" y="682" class="small">Solid arrows: application or deployment traffic. Dashed purple arrows: Microsoft Entra managed identity. Dashed blue arrows: telemetry.</text>
+  <text x="40" y="704" class="tiny">The source surface is a workflow replica, not Oracle Forms runtime. Supporting Blob Storage, Key Vault, and Azure SQL resources remain preview-only and are not shown as active.</text>
+</svg>

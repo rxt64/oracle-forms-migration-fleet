@@ -1,629 +1,284 @@
-# Oracle Forms Migration Fleet
+# Oracle Forms to React, Java, and PostgreSQL on Azure
 
-A Microsoft Foundry **hosted agent** that designs, plans, and coordinates the Oracle Forms migration
-lifecycle end to end: source
-analysis and documentation, conversion of the Forms UI to **React** and its logic to **Java/Spring Boot**,
-conversion of the Oracle database to **PostgreSQL** or the **SQL Server family** (SQL Server, Azure SQL
-Database, Azure SQL Managed Instance), build and behavior validation, sandbox data migration,
-reconciliation, human acceptance, and production cutover.
+A working sample for modernizing Oracle Forms applications with an evidence-led migration fleet on
+Microsoft Azure. The fleet inventories and normalizes authorized source evidence, plans the migration,
+generates a React and Java/Spring Boot application plus PostgreSQL artifacts, and validates the result
+with compilers, database checks, reconciliation, deployed API smoke tests, and recorded browser acceptance.
 
-> **What runs inside this service today.** `Fleet/` is deterministic and offline: it assesses, plans, and
-> gates. `Fleet/Execution/` adds authorized adapters for source analysis, Oracle-to-PostgreSQL conversion,
-> React/Java generation, sandbox schema deployment and data movement, and reconciliation. The sandbox
-> adapters reach only the PostgreSQL target configured by the host; a browser request cannot supply an
-> endpoint or credential. Artifacts are written **only** into the operator's private session workspace,
-> never into the customer's repository. The planner stays authoritative: an adapter runs only for a phase
-> resolved to `Planned`, and a phase counts as done only when its deterministic checks succeed.
+> This repository is a development sample, not a universal Oracle Forms converter or production
+> migration service. The live Northstar estate is synthetic. Review security, licensing, cost, and
+> generated code before using any part of it with customer assets.
 
-## Documentation
+## Live demonstration
 
-| Document | Read it when |
-|---|---|
-| [CONTRIBUTING.md](CONTRIBUTING.md) | Before your first change — branch naming, the PR loop, and what a change must include |
-| [docs/SECURITY.md](docs/SECURITY.md) | Before touching source acquisition, classification, auth, or anything the browser can see |
-| [docs/OPERATIONS.md](docs/OPERATIONS.md) | Deploying, rolling back, or debugging a deployment that misbehaved |
-| [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) | Understanding the exact version path demonstrated by the pilot and what is not yet claimed |
-| [docs/ORACLE_FORMS_6I_RESEARCH.md](docs/ORACLE_FORMS_6I_RESEARCH.md) | Researching 6i source recovery, Oracle normalization tooling, risk signatures, and support gates |
-| [docs/NDAPI_DOTNET_FEASIBILITY.md](docs/NDAPI_DOTNET_FEASIBILITY.md) | Evaluating NDAPI as an isolated .NET Forms extractor and ASP.NET Core/Blazor as a separate target |
-| [infra/legacy-estate/README.md](infra/legacy-estate/README.md) | Deploying the disposable synthetic Oracle database used by demonstrations |
-| [infra/forms-demo/README.md](infra/forms-demo/README.md) | Running the browser-executable banking workflow replica against that database |
-| [CHANGELOG.md](CHANGELOG.md) | Understanding why current behaviour differs from what you expected |
-
-## Product boundary
-
-| Layer | What it does | Where it lives |
+| Experience | URL | What it proves |
 |---|---|---|
-| **Deterministic planning** | Validates requests, scores the target platform, sequences assessment stages, and authorizes lifecycle phases, owners, inputs, outputs, tooling, mutation class, and approval gates | `Fleet/` — pure C#, no network, fully unit-tested |
-| **Execution adapters** | Parse acquired source, emit PostgreSQL DDL, generate React/Java, deploy the sandbox schema, load rows, and reconcile target data. Database access is host-bound and requires a planner-authorized sandbox phase. | `Fleet/Execution/` |
-| **Artifact review and repair** | Review remains advisory. During an execution-approved sandbox phase only, rejected PL/pgSQL routines may enter a two-attempt repair loop. Model output may change routine bodies only and is accepted only after PostgreSQL compiles it. | `Fleet/Execution/ArtifactReview.cs`, `Fleet/Execution/ProgramUnitRepairLoop.cs` |
-| **Attestation-backed completion** | An adapter reports back a signed `MigrationAttestation` naming a signer and citing at least one valid workspace-relative artifact. Without one, the agent must say the phase is *planned*, never *performed*. | `MigrationAttestation`, gate logic in `MigrationRunPlanner` |
+| Source workflow replica | <https://ca-ofmfleet-forms-dev-ykbpnrpd.jollyground-7a57bcec.eastus2.azurecontainerapps.io/> | The browser workflow and synthetic source data used for manual source/target comparison. It is not Oracle Forms runtime. |
+| Migrated application | <https://ca-ofmfleet-mig-dev-ykbpnrpd.jollyground-7a57bcec.eastus2.azurecontainerapps.io/> | The fleet-generated React and Spring Boot workflow running against Azure Database for PostgreSQL 16. |
 
-A model is consulted for conversation, artifact review, and bounded repair proposals. No model reaches a
-gate, approval, attestation, credential, or platform recommendation. A repair proposal can reach PostgreSQL
-only inside an already authorized sandbox phase, after the fleet proves that the complete routine envelope
-is unchanged. PostgreSQL compilation is the acceptance decision. Any unresolved routine makes the phase
-fail after valid rows finish loading, so `SandboxMigrationCompleted` is not emitted.
+Synthetic demo identities:
 
-### Models
-
-| Capability | Deployment | Why |
+| Role | User | Password |
 |---|---|---|
-| Conversation and tool calling | `gpt-5.4-mini` (`AZURE_AI_MODEL_DEPLOYMENT_NAME`) | High call volume, formatting and tool dispatch |
-| Artifact review | `gpt-5.6-sol` (`AZURE_AI_REVIEW_MODEL_DEPLOYMENT_NAME`) | Adversarial reasoning over generated DDL |
+| Customer | `500001` | `demo1234` |
+| Manager | `branch.manager` | `manager-demo-1` |
 
-The review deployment falls back to the conversation deployment when unset. On the Northstar banking schema
-the review model found four `CHECK` constraints that cannot execute on PostgreSQL — `length()` applied to a
-`bigint` column, which Oracle permits by implicit conversion — each with the cast that fixes it. The mini
-model found none of them. Its findings are still unverified and gate nothing.
+## Overview
 
-The assessment pipeline (`assess_oracle_forms_migration`) is unchanged and still produces plans only. The
-execution lifecycle (`plan_oracle_forms_migration_run`) is a separate, additive contract.
+Organizations running Oracle Forms often need to recover decades of UI behavior, PL/SQL, data rules,
+and integrations before they can replace the runtime safely. This sample demonstrates a bounded,
+testable approach:
+
+- **Inventory and normalize** Forms XML, module inventories, Oracle DDL, PL/SQL, data evidence, and
+  regression baselines with deterministic parsers. Proprietary Forms binaries are never decoded by
+  the hosted fleet.
+- **Plan and review** dependencies, modernization waves, Azure targets, risks, and approvals with a
+  Microsoft Foundry hosted agent backed by deterministic C# gates.
+- **Generate** React/TypeScript, Java 21/Spring Boot, PostgreSQL DDL, migration reports, and tests into
+  an isolated run workspace.
+- **Validate** with TypeScript, Vite, Maven, Spring tests, PostgreSQL compilation, reconciliation, live API
+  smoke tests, and browser acceptance. A model may propose a bounded repair; only compilers and tests accept it.
+
+The model does not approve a migration, select credentials, attest execution, or override a failed gate.
 
 ## Architecture
 
-The externally hosted service is a **single process**. Inside it, a model-backed outer agent fronts a
-**deterministic specialist fleet**. The model handles intake dialogue and reporting; every stage
-transition and the platform recommendation are computed by pure C# with no network, Azure, or model
-dependency, and are exposed to the model as tools.
+**Migration pipeline**
 
-```
-POST /responses
-   │
-   ▼
-Outer agent  (Microsoft.Agents.AI · Foundry Responses protocol · AgentHost)
-   │   instructions: FleetAgentInstructions.Build()
-   │   tools:        assess_oracle_forms_migration
-   │                 plan_oracle_forms_migration_run
-   │                 describe_fleet_roles
-   │                 describe_evidence_requirements
-  │                 describe_migration_landscape
-   ▼
-MigrationFleetOrchestrator   ← deterministic, offline, unit-tested
-   │
-   ├── Intake                 · Orchestrator            · validates request, rejects credential material
-   ├── InventoryAnalysis      · Inventory Analyst       · requires FormsModuleInventory
-   ├── DependencyMapping      · Dependency Mapper       · requires DatabaseSchemaExport or PlSqlProgramUnit
-   ├── TargetPlatformAdvisory · Target Platform Advisor · TargetPlatformAdvisor, explicit cited criteria
-  ├── ConversionPlanning     · Conversion Planner      · blocks approval when source/discovery evidence is absent
-   ├── ValidationReview       · Validation Reviewer     · rejects unresolved Critical findings
-   └── HumanApproval          · Orchestrator            · only path to IsAccepted == true
+[![Oracle Forms Migration Fleet pipeline on Azure](docs/architecture-pipeline.svg)](docs/architecture-pipeline.svg)
 
-MigrationRunPlanner          ← deterministic, offline, unit-tested
-   │
-   ├── SourceAcquisition          · Inventory Analyst          · None
-   ├── SourceAnalysis             · Dependency Mapper          · WorkspaceArtifactWrite
-   ├── DocumentationGeneration    · Documentation Author       · WorkspaceArtifactWrite
-   ├── SourceNormalization        · Application Code Converter · WorkspaceArtifactWrite
-   ├── ApplicationCodeConversion  · Application Code Converter · WorkspaceArtifactWrite  → React + Java/Spring Boot
-   ├── DatabaseConversion         · Database Converter         · WorkspaceArtifactWrite  → SSMA or Ora2Pg by target
-   ├── BuildAndStaticValidation   · Build and Test Engineer    · WorkspaceArtifactWrite
-   ├── DifferentialBehaviorTesting· Build and Test Engineer    · SandboxDatabaseWrite    ← execution approval
-   ├── SandboxDataMigration       · Data Migration Engineer    · SandboxDatabaseWrite    ← execution approval
-   ├── DataReconciliation         · Reconciliation Analyst     · WorkspaceArtifactWrite  ← execution approval
-   ├── HumanAcceptance            · Acceptance Coordinator     · None                    ← execution approval
-   └── ProductionCutover          · Orchestrator               · ProductionWrite         ← production approval
-                                                                                            + attestations
-```
+Simplified editable concept: [docs/architecture-pipeline.excalidraw](docs/architecture-pipeline.excalidraw)
 
-The pipeline halts at the first blocking stage. Stages after a halt never run and are absent from the
-returned plan, so the output can never imply work that was not performed.
+**Development target architecture**
 
-| File | Responsibility |
-|---|---|
-| `Fleet/FleetContracts.cs` | Immutable records and enums for request, evidence, findings, recommendation, stage status, and the final plan |
-| `Fleet/MigrationRunContracts.cs` | Execution-lifecycle contracts: target stack, execution mode, lifecycle phase, mutation class, artifact reference, attestation, run request and run plan |
-| `Fleet/MigrationRunPlanner.cs` | Deterministic lifecycle planner, workspace-path rules, target-specific tooling, and the execution/production gates |
-| `Fleet/FleetRoleCatalog.cs` | Separate prompt/configuration definition per specialist role, for both the assessment stages and the execution lifecycle |
-| `Fleet/MigrationFleetOrchestrator.cs` | Deterministic stage machine and `MigrationStageSequence` |
-| `Fleet/TargetPlatformAdvisor.cs` | Azure SQL Database vs Managed Instance decision from explicit criteria |
-| `Fleet/LegacyModernizationCatalog.cs` | Forms/runtime/integration risk signals, severities, evidence needs, and remediation tasks |
-| `Fleet/MigrationLandscapeCatalog.cs` | Source-backed tool boundaries, exit strategies, vendor-claim labels, and mandatory human reviews |
-| `Fleet/RequestValidator.cs` | Input validation and secret rejection |
-| `Fleet/FleetGuardrails.cs` | Security boundaries, disclaimers, credential detection |
-| `Fleet/FleetTools.cs` | The fleet exposed to the model as `AITool` instances |
-| `Fleet/FleetAgentInstructions.cs` | Outer agent system prompt |
+[![Development target architecture on Azure](docs/architecture-target.svg)](docs/architecture-target.svg)
 
-### Target platform decision
+Simplified editable concept: [docs/architecture-target.excalidraw](docs/architecture-target.excalidraw)
 
-The advisor evaluates three explicit criterion sets, each citing the evidence identifiers it came from.
+## How it works
 
-**Hard constraints — a validated requirement to preserve one in the database forces Azure SQL Managed Instance:**
-`SqlAgentRequired`, `ClrRequiredInDatabase`, `ServiceBrokerRequired`,
-`InstanceLevelCollationRequired`.
-
-**Soft indicators — majority vote when no hard constraint applies:**
-toward Managed Instance: `ScheduledDatabaseJobs`, `ClrOrExternalAssemblies`, `CrossDatabaseQueries`,
-`DistributedTransactions`, `VnetIsolationRequired`, `LargeDatabaseFootprint`;
-toward SQL Database: `SelfContainedSchema`, `PerDatabaseElasticScale`, `ServerlessCostSensitivity`.
-
-**Platform-agnostic blockers — must be redesigned on either target:**
-`DatabaseLinksInUse`, `FileSystemAccess`, `ExternalProcedureCalls`. These halt target advisory until
-the redesign requirement is resolved; they do not advance to plan approval.
-
-Confidence is `High` for a verified hard constraint, `Medium` for a clear verified soft-indicator
-majority, and `Low` on a tie or when no verified `WorkloadProfile` evidence was supplied. Unverified
-signals and signals attached to an unrelated evidence kind are ignored and recorded as assumptions.
-`Insufficient` means no qualifying signals were extracted. An `Undetermined` result blocks
-the pipeline; it is never reported as a recommendation.
-
-## Request schema
-
-The model calls `assess_oracle_forms_migration` with a `MigrationAssessmentRequest`:
-
-| Field | Type | Notes |
+| Stage | Azure and fleet components | What it does |
 |---|---|---|
-| `engagementId` | string | Required. Audit identifier. |
-| `applicationName` | string | Required. |
-| `oracleFormsVersion` | string | Operator-supplied release; defaults to `unknown`. Canonicalized by `OracleLegacyVersionCatalog` into a family (`6i`, `9i`, `10g`, `11g`, `12c`, plus `pre-6i` and `14c` for assessment) and reported as a finding. It is not a compatibility assertion and selects no converter: binary Forms source still needs an operator-produced textual export. An uninterpretable string is rejected rather than guessed. |
-| `oracleDatabaseVersion` | string | Operator-supplied release; defaults to `unknown`. Canonicalized into `6`, `7`, `8`, `8i`, `9i`, `10g`, `11g`, `12c`, `18c`, `19c`, `21c`, or `23ai` and reported as a finding. The fleet has no live Oracle extraction adapter, so it can never verify this value. |
-| `evidence[]` | `EvidenceItem` | `id`, `kind`, `source`, `summary`, `isVerified`, `signals[]`. |
-| `businessConstraints[]` | string | Regulatory/downtime constraints. |
-| `approval` | `HumanApproval` | `decision` (`Pending` \| `Approved` \| `Rejected`), `approverId`, `notes`. |
+| **1 · Parse and normalize** | .NET execution adapters · isolated session workspace | Inventories `.fmb`, `.mmb`, `.pll`, `.olb`, and text evidence; safely parses operator-produced Forms XML; binds source provenance into `forms-ir.json`; accounts for every Oracle SQL statement. Deterministic, no model. |
+| **2 · Plan and review** | Microsoft Foundry hosted agent · `gpt-5.4-mini` · `gpt-5.6-sol` · `MigrationRunPlanner` | Maps dependencies and risks, recommends an Azure target from cited evidence, creates migration waves, and permits bounded review/repair proposals. Human approvals and deterministic gates remain authoritative. |
+| **3 · Generate and migrate** | React/TypeScript emitter · Java 21/Spring Boot emitter · PostgreSQL converter | Produces the browser client, workflow API, converted schema, data-load artifacts, and traceable conversion reports. The recognized Northstar profile generates full banking workflows rather than generic CRUD. |
+| **4 · Validate** | Maven · TypeScript/Vite · Spring tests · PostgreSQL · GitHub Actions | Compiles both application tiers, verifies database routines, reconciles data, runs deployed API smoke workflows, blocks unsafe generic endpoints, and requires explicit acceptance before cutover. |
 
-Evidence covers Forms source and XML exports; menus, PLLs, OLBs, and Reports; PL/SQL and schema;
-integrations, identity, business processes, data profiling, regression baselines, cutover/rollback,
-support/licensing, usage/business value, compliance, network, and workload profiling. Call
-`describe_evidence_requirements` for the exact enum values accepted by the current agent version.
-
-Even when the minimum pipeline evidence is present, the inventory stage reports missing
-cross-functional evidence and the planner adds `CT-DISCOVERY`. Conversion planning remains
-`BlockedOnEvidence`, and human approval is not reached, until those gaps are closed or formally waived.
-A clean schema conversion percentage therefore cannot hide missing workflow, identity, integration,
-test, cutover, support, or business-value analysis.
-
-## Run request schema
-
-The model calls `plan_oracle_forms_migration_run` with a `MigrationRunRequest`:
-
-| Field | Type | Notes |
-|---|---|---|
-| `engagementId` / `applicationName` | string | Required. Audit identifiers. |
-| `requestedMode` | `ExecutionMode` | `PlanOnly` \| `GenerateArtifacts` \| `SandboxMigration` \| `ProductionCutover`. The planner may authorize less. |
-| `target` | `TargetStack` | `frontEnd` (React), `backEnd` (JavaSpringBoot), `database` (`PostgreSql` \| `SqlServer` \| `AzureSqlDatabase` \| `AzureSqlManagedInstance`). |
-| `sourceRoot` / `outputRoot` | string | **Workspace-relative only.** Rooted, UNC, URI, and `..` traversal paths are rejected and produce a plan with no phases. |
-| `evidence[]` | `EvidenceItem` | Same evidence model as the assessment request. |
-| `planApproval` / `executionApproval` / `productionApproval` | `HumanApproval` | Three independent gates. They are never interchangeable. |
-| `attestations[]` | `MigrationAttestation` | `kind`, `succeeded`, `attestedBy`, `artifacts[]`. Returned by execution adapters. An attestation only unlocks a gate when it cites at least one artifact whose path is workspace-relative and credential-free. |
-
-Every phase in the returned plan carries its owner, required inputs, expected workspace-relative output
-artifacts, tooling, mutation class, approval requirement, status, and blockers. Artifact references never
-contain a credential, connection string, or URL.
-
-### Gates
-
-- **GenerateArtifacts** is checked per phase, against the evidence that phase actually reads.
-  `DatabaseConversion` requires `DatabaseSchemaExport` and `PlSqlProgramUnit`; the source and code-conversion
-  phases require `FormsModuleSource` **or** `FormsXmlExport`; `TestBaseline` is required by the phases that
-  make a behavioural claim, not by emitting DDL into a workspace. An inventory alone is never enough.
-
-  Gating every phase on the union looks stricter and is not: a schema conversion refused for want of Forms
-  binaries it never opens teaches operators to tick the box falsely, and a false attestation in an auditable
-  plan is the outcome these gates exist to prevent.
-
-  Evidence is not the whole gate for `ApplicationCodeConversion`. A run that supplies a schema and no Forms
-  source still generates an application tier, from database structure alone, and its report says so: that
-  output is CRUD over the converted tables and is never presented as a migration of a Forms UI. A run that
-  does supply Forms source of any kind — a module of any Forms type in the tree, an XML export, or declared
-  `FormsModuleSource`/`FormsXmlExport` evidence — additionally requires `SourceNormalization` to have
-  succeeded in the same run and to have written the intermediate representation this phase reads. That is
-  the phase that decides whether the source was readable at all, so without it the conversion is blocked
-  rather than falling back to generating screens from table structure and captioning them with the module
-  names it never opened.
-- **SandboxMigration** requires an `executionApproval` with `Approved` and an `approverId`.
-  Assessment plan approval does **not** authorize execution.
-- **ProductionCutover** requires a `productionApproval` separate from the execution approval, plus
-  successful `SandboxMigrationCompleted`, `DataReconciliationPassed`, and `HumanAcceptanceSigned`
-  attestations, each with an attesting identity and at least one backing artifact. Every cited artifact
-  path must be workspace-relative, and credential-like paths, descriptions, signers, or summaries are
-  rejected. The planner is pure, so it validates the reference, not the file on disk.
-
-Generated artifacts are proposals: they require human review and acceptance before use. Planning a phase
-in `PlanOnly` or `GenerateArtifacts` is not an approval and never stands in for the separate sandbox and
-production approvals.
-
-When a gate fails, `authorizedMode` is downgraded and the affected phases report
-`BlockedOnEvidence`, `BlockedOnApproval`, or `BlockedOnAttestation`. Phases above the requested mode
-report `NotRequested` rather than pretending to be blocked.
-
-### Conversion ownership
-
-- **Database only:** SSMA for Oracle on the SQL Server family; Ora2Pg on PostgreSQL. The planner selects
-  one or the other from `target.database` and never both.
-- **Forms UI and logic:** owned by the fleet's own conversion adapter plus a compiler-driven and
-  AI-assisted repair loop. The conversion adapter emits React and Java/Spring Boot projects, and the following
-  build phase runs fixed host-owned Maven and npm commands. Java must compile with release 21, and React must
-  pass TypeScript checking and a Vite production build. Results are retained in
-  `reports/build-and-static-analysis.json`; missing tools, descriptors, or nonzero exits fail the phase. PL/pgSQL
-  repair is implemented separately in the execution-approved sandbox phase. Neither SSMA nor Ora2Pg converts
-  Forms UI or runtime behavior, and the planner never lists them for `ApplicationCodeConversion`.
-
-### Program-unit repair
-
-Translated routines are deployed separately from structural DDL. When PostgreSQL rejects a routine, the
-gateway records the exact statement and diagnostic. `ProgramUnitRepairLoop` submits only those rejected
-routines and diagnostics to the SQL repair agent, with a maximum of two attempts.
-
-The loop fails closed:
-
-- the number and complete envelope of every function or procedure must remain byte-for-byte stable;
-- only the dollar-quoted routine body may change;
-- extra DDL, renamed routines, signature/return/language/security changes, and incomplete diagnostic
-  attribution are rejected before acceptance;
-- accepted SQL is written to `program-unit-repairs.sql`, and attempts and outstanding diagnostics are
-  written to `program-unit-repair-audit.md`;
-- accepted repairs survive a workbench output reset, but are checked against the current generated routines
-  and recompiled by PostgreSQL before reuse; supplied `.fleet-run` content is removed during source ingestion;
-- model failure, compiler failure, or remaining routines prevents sandbox completion attestation while
-  preserving the migration report and repair diagnostics as failed-phase artifacts.
-
-## Legacy exit strategy
-
-Do not assume every Forms application should be rewritten. The fleet exposes these options through
-`describe_migration_landscape` and requires evidence before choosing among them:
-
-| Option | Best fit | Principal caution |
-|---|---|---|
-| Retire and archive | Low/no usage or records retained only for compliance | Preserve searchable records, legal hold, evidentiary integrity, access audit, and deletion policy |
-| Replace with SaaS/package | Commodity process with a credible fit-to-standard product | Validate process fit, integrations, export rights, identity, compliance, lock-in, and total cost |
-| Stabilize and upgrade | Unsupported Forms estate needs a safer bridge | Time-box it; an upgrade retains Forms and Oracle coupling |
-| Encapsulate behind APIs | Consumers must be decoupled before replacement | Legacy runtime remains and can become a distributed monolith |
-| Strangler by business capability | Large estate needs phased value and rollback | Define system-of-record ownership, coexistence sync, reconciliation, and compatibility contracts |
-| Full replacement | Process and technology both require redesign | Highest delivery/cutover risk; demands characterization tests and rehearsed rollback |
-
-### Tool boundaries
-
-- **Oracle Forms 14.1.2 upgrade tooling** can stabilize old applications, including 6i-era sources.
-  It is an upgrade path, not an exit to Azure SQL.
-- **Forms2XML / Forms XML Converter and JDAPI** help extract module, menu, and object-library
-  structure. They require compatible tooling and authoritative source; XML is not a behavioral test.
-- **SQL Server Migration Assistant (SSMA) for Oracle** assesses and converts Oracle database schema
-  and code, reviews type mappings, and migrates data. It does not convert Forms UI/runtime behavior;
-  conversion reports still require remediation and testing, and SYS/SYSTEM schemas are excluded.
-- **SSMA Tester** helps compare database objects and data. It does not prove end-to-end workflow,
-  security, concurrency, performance, printing, or UX parity.
-- **Azure Database Migration Service through SSMA** supports scaled one-time Oracle movement to
-  Azure SQL as an offline preview scenario. Low-downtime/online cutovers require separately validated
-  replication tooling and reconciliation controls.
-- **Azure Migrate / GitHub Copilot modernization** can help with infrastructure discovery and
-  supported ASP.NET/Java code. Current Microsoft documentation does not establish Oracle Forms code
-  conversion support.
-- **Oracle APEX** is a credible Forms modernization target when retaining Oracle is acceptable. It is
-  not an Oracle-to-Azure-SQL exit and still requires UI/workflow redesign. Oracle desupported the old
-  APEX Migration Workbench in APEX 21.1, so do not plan around that historical conversion wizard.
-- **KodeSage, ORMIT OpenJava, PITSS, AuraPlayer, GAPVelocity/Forms2Net, Ispirer, and Pretius** are examples of commercial accelerators and vendor guidance.
-  Their automation and conversion coverage are vendor claims: prove them on the hardest modules,
-  shared libraries, desktop integrations, reports, and tests before procurement or planning credit.
-  KodeSage's complexity-based automation, visual testing, timeline, cost/ROI, and production-support
-  claims require reproducible customer evidence; the cited article says ORMIT testing and UAT remain manual.
-  Pretius contributes useful technical prompts, but its timeline, cost, licensing, scale, and commercial
-  claims require independent verification and it is not execution proof.
-- **Open-source implementations** (`aoreshkov/oracle-forms-mcp`, Ora2Pg, `franklingjr/oracle-forms-migration`)
-  are catalogued as `OpenSourceImplementation`. Each covers one narrow slice: Forms parsing/indexing,
-  Oracle-to-PostgreSQL database conversion, or Object List Report to PL/SQL package generation. None of
-  them is end-to-end Forms-to-React/Java conversion proof.
-- **Oracle Forms MCP** is a candidate parser/indexer for `SourceNormalization` only. It needs JDK/JRE 21
-  or later plus either the licensed Oracle `frmf2xml`/`frmcmp_batch` utilities via `ORACLE_HOME` or
-  adjacent pre-converted XML/PLD input. The fleet does not redistribute the proprietary Oracle utilities,
-  and the MCP never generates target code.
-- **Workshop and reference estates** (Cognition workshop HRMS/workflow, SierraSystems reference,
-  `patrickmonaco/formstools`, `armandoblanco/legacy-modernization-playbook`) are catalogued as
-  `WorkshopReference`: illustrative, procedural, or historical only, never proof of a repeatable migration.
-  The Armando Blanco playbook contributes pilot-first process, mapping, and parity guidance; it is not
-  validated executable tooling.
-
-### Reference estate status
-
-| Estate | Status | Why |
-|---|---|---|
-| Cognition workshop HRMS/workflow | **Not imported** | Synthetic single-commit static source. Verified tree: 5 Forms XML, 2 PLLs as SQL, 1 menu as SQL, packages and triggers, schema and seed SQL. No `.fmb`, no runtime, no regression baseline, no setup runner, and no standalone LICENSE text. The README's MIT statement alone is not sufficient redistribution proof, so the fixture stays out of this repository pending explicit license text. Useful only as static-analysis or pilot input. |
-| SierraSystems reference | **Not imported** | Ships `.fmb` modules, an Oracle schema with data, and Java/Quarkus plus React layers, but stays Oracle-backed and has no verified clear license. Illustrative architecture only, not reusable proof. |
-| `patrickmonaco/formstools` | **Not imported** | Obsolete high-privilege APEX Forms Migration loader. Historical reference only. |
-| `armandoblanco/legacy-modernization-playbook` | **Not imported** | Agent-facing process guidance: pilot-first sequencing, Forms-to-target mapping conventions, and parity checkpoints. Ships no runnable converter, so it is not validated executable tooling and not conversion proof. |
-
-No reference estate above is treated as end-to-end conversion proof, and none is a substitute for a
-customer-owned pilot with its own regression baseline.
-
-### Pitfalls encoded as deterministic signals
-
-The fleet creates cited findings and remediation tasks for client-side PL/SQL; trigger/navigation and
-commit semantics; multi-record blocks; ENTER-QUERY; POST-QUERY; PLL/OLB coupling; Java Beans/PJCs;
-WebUtil/OLE/Jacob; HOST commands; Oracle Reports; dynamic SQL; Oracle AQ; VPD/RLS; NLS and
-empty-string/NULL semantics; locking/concurrency; legacy
-authentication; inaccessible source; missing regression baselines; online cutover; coexistence;
-retirement/archive candidates; and package-replacement candidates.
-
-Planning also requires versioned global design rules plus form-level exceptions, and it creates
-dependency-clustered migration-wave tasks. Expert-session recordings and vision comparison can add
-runtime evidence, but they do not replace source analysis, data reconciliation, accessibility,
-security, concurrency, performance, or user acceptance.
-
-WebUtil/OLE/Jacob, HOST execution, VPD/RLS parity, and inaccessible authoritative source are
-`Critical` and stop the plan at validation until remediated. This does not mean other `High` risks are
-production-ready: identity, data mappings, generated code, workflow fidelity, performance, operations,
-licensing, and rollback always require human acceptance.
-
-### Research basis
-
-Checked on **2026-09-09**. Product capabilities and support dates change; the URL and current product
-documentation, not this snapshot, are authoritative.
-
-- [Oracle Forms 14.1.2 documentation](https://docs.oracle.com/en/middleware/developer-tools/forms/14.1.2/index.html)
-  and [6i upgrade guide (December 2024)](https://docs.oracle.com/en/middleware/developer-tools/forms/14.1.2/upgrade-forms/index.html)
-- [SSMA for Oracle overview](https://learn.microsoft.com/sql/ssma/oracle/migrating-oracle-databases-to-sql-server-oracletosql)
-- [Oracle to Azure SQL Database guide](https://learn.microsoft.com/azure/azure-sql/migration-guides/database/oracle-to-sql-database-guide)
-  and [Oracle to SQL Managed Instance guide](https://learn.microsoft.com/azure/azure-sql/migration-guides/managed-instance/oracle-to-managed-instance-guide)
-- [DMS supported scenarios](https://learn.microsoft.com/azure/dms/resource-scenario-status)
-  and [migration tools matrix](https://learn.microsoft.com/azure/dms/dms-tools-matrix)
-- [Azure SQL Database and Managed Instance feature comparison](https://learn.microsoft.com/azure/azure-sql/database/features-comparison)
-- [Azure Migrate code insights prerequisites](https://learn.microsoft.com/azure/migrate/add-copilot-code-insights)
-- [Oracle APEX modernization overview](https://blogs.oracle.com/apex/post/modernizing-oracle-forms-using-oracle-apex)
-- [Oracle APEX 21.1 release notes: Migration Workbench desupported](https://docs.oracle.com/en/database/oracle/application-express/21.1/htmrn/)
-- [KodeSage Oracle Forms migration article](https://kodesage.ai/blog/oracle-forms-migration) — used only
-  for vendor-claim cataloging and practical Forms UI risk prompts; commercial performance, cost,
-  timeline, ROI, automation, and support claims are not treated as independently verified facts.
-- [aoreshkov/oracle-forms-mcp](https://github.com/aoreshkov/oracle-forms-mcp) — Apache-2.0 Kotlin/JVM
-  Forms parser and indexer. Authority: open-source implementation. Requires JDK/JRE 21+ and licensed
-  Oracle `frmf2xml`/`frmcmp_batch` via `ORACLE_HOME`, or adjacent pre-converted XML/PLD. Generates no
-  React or Java and migrates no database.
-- [Ora2Pg](https://github.com/darold/ora2pg) — GPL-3.0 Oracle-to-PostgreSQL assessment, schema/data
-  conversion, partial PL/SQL conversion, and validation aid. Authority: open-source implementation.
-  Manual remediation required; no Forms UI capability. Also listed as PostgreSQL database tooling above.
-- [franklingjr/oracle-forms-migration](https://github.com/franklingjr/oracle-forms-migration) — MIT
-  utility that reads Forms Object List Reports and emits an Oracle PL/SQL package for APEX-oriented
-  work. Authority: open-source implementation. Limited fallback when Forms XML is unavailable; not a
-  React/Java path and not an Oracle database exit.
-- [Cognition workshop HRMS/workflow estate](https://github.com/Cognition-Partner-Workshops/ts-plsql-oracle-forms-hrms)
-  — reviewed locally. Authority: workshop reference. Not imported; see **Reference estate status**.
-- [SierraSystems Oracle Forms reference application](https://github.com/SierraSystems/Oracle-Modernization)
-  — reviewed locally; no verified clear license. Authority: workshop reference. Not imported;
-  Oracle-backed and not reusable proof.
-- [patrickmonaco/formstools](https://github.com/patrickmonaco/formstools) — obsolete high-privilege APEX
-  Forms Migration loader. Authority: workshop reference. Historical context only.
-- [armandoblanco/legacy-modernization-playbook — Oracle Forms migration agent](https://github.com/armandoblanco/legacy-modernization-playbook/blob/main/.github/agents/java/oracle-forms-migration.agent.md)
-  — pilot-first process, mapping, and parity guidance. Authority: workshop reference. It is not validated
-  executable tooling and is not end-to-end conversion proof.
-- [Pretius: migrating Oracle Forms](https://pretius.com/blog/migrating-oracle-forms) — vendor guidance.
-  Authority: vendor claim. Its technical prompts about triggers, blocks, reports, and target-stack choice
-  are useful for risk enumeration, but timeline, cost, licensing, scale, and commercial claims require
-  independent verification, and the article is not execution proof.
-
-### Example
-
-This example uses the version declared by the synthetic Northstar Forms XML. Supplying the value records
-provenance; it does not establish support for every Forms 12c application.
-
-```json
-{
-  "engagementId": "ENG-4471",
-  "applicationName": "ORDERS",
-  "oracleFormsVersion": "12.2.1.4",
-  "oracleDatabaseVersion": "23ai",
-  "evidence": [
-    { "id": "EV-INV",     "kind": "FormsModuleInventory", "source": "forms-inventory.csv", "summary": "142 modules, 1,908 triggers.", "isVerified": true },
-    { "id": "EV-PLSQL",   "kind": "PlSqlProgramUnit",     "source": "plsql-units.sql",     "summary": "312 packages and procedures.", "isVerified": true },
-    { "id": "EV-SCHEMA",  "kind": "DatabaseSchemaExport", "source": "schema.dmp.manifest", "summary": "Schema object manifest.",      "isVerified": true },
-    { "id": "EV-PROFILE", "kind": "WorkloadProfile",      "source": "awr-summary.txt",     "summary": "Peak 2.1k TPS, DBMS_SCHEDULER jobs present.",
-      "isVerified": true, "signals": ["ScheduledDatabaseJobs", "VnetIsolationRequired"] }
-  ],
-  "businessConstraints": ["Maximum 4-hour cutover window"],
-  "approval": { "decision": "Pending" }
-}
-```
-
-That request treats `ScheduledDatabaseJobs` as a redesignable Managed Instance indicator, not a hard
-constraint. It also lacks Forms source and cross-functional discovery evidence, so it produces
-planning tasks and halts at `ConversionPlanning` with `BlockedOnEvidence`. A validated requirement to
-retain SQL Agent scheduling in the database must use `SqlAgentRequired`; external scheduling remains
-an alternative that can keep Azure SQL Database viable.
+The full lifecycle contains twelve independently gated phases, from source acquisition through
+production cutover. `DifferentialBehaviorTesting` is defined and gated but has no execution adapter yet;
+the recorded source/destination browser checks are manual acceptance evidence, not that phase. See
+[docs/OPERATIONS.md](docs/OPERATIONS.md) for execution and rollback behavior.
 
 ## Prerequisites
 
-1. **[.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)** or later.
-2. **Azure Developer CLI (`azd`)** — [install](https://learn.microsoft.com/en-us/azure/developer/azure-developer-cli/install-azd), then `azd ext install microsoft.foundry`.
-3. A Foundry project with a deployed chat model, and `azd auth login` completed, is required for the
-  model-backed `/responses` endpoint. The deterministic operator workbench runs without either.
-4. For the model-backed endpoint, copy `src/oracle-forms-migration-fleet/.env.example` to `.env` and
-  set `AZURE_OPENAI_ENDPOINT` and `AZURE_AI_MODEL_DEPLOYMENT_NAME` when running without `azd`.
-  `FOUNDRY_PROJECT_ENDPOINT`, `AZURE_OPENAI_ENDPOINT`, and
-  `APPLICATIONINSIGHTS_CONNECTION_STRING` are injected from the azd environment in hosted containers.
-5. RBAC: the developer or hosted identity needs **Cognitive Services OpenAI User** on the Foundry
-  account to invoke the deployed model. Local runs use `AzureDeveloperCliCredential`; hosted runs
-  fall back to the project's system-assigned managed identity.
+For local build and deterministic tests:
 
-`.env` and the `.azure/` environment directory are git-ignored and must never be committed.
+- [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
+- Node.js 22 and npm
+- Git
 
-## Build, test, run
+For generated-application builds and Azure deployment:
 
-```bash
+- Java 21 and Maven 3.9+
+- [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli)
+- [Azure Developer CLI](https://learn.microsoft.com/azure/developer/azure-developer-cli/install-azd) 1.27.1+
+- [GitHub CLI](https://cli.github.com/) for dispatching reviewed deployment workflows
+- Docker, or permission to use Azure Container Registry Tasks
+- An Azure subscription with permission to deploy resources and assign the narrowly scoped roles
+  described in [infra/workbench/README.md](infra/workbench/README.md)
+
+Oracle Forms Builder, Forms Services, WebLogic, and `ORACLE_HOME` are not bundled. Operators must run
+licensed Oracle extraction or normalization tools in their own authorized environment.
+
+## Quick start
+
+Build the workbench client and run all offline tests:
+
+```powershell
 cd src/oracle-forms-migration-fleet/ClientApp
 npm ci
 npm run build
 cd ../../..
-dotnet build
-dotnet test                                  # offline: no Azure or model access required
-azd ai agent run --no-client                 # local host on http://localhost:8088
-azd ai agent invoke --local "Assess ENG-4471 for ORDERS."
+dotnet restore
+dotnet build --no-restore
+dotnet test --no-build
 ```
 
-Run `npm ci` before `dotnet build`: the csproj regenerates the client only when
-`ClientApp/node_modules` already exists, and `wwwroot/` is generated and git-ignored, so a fresh clone
-that skips it builds cleanly and then serves an empty page.
+Run the operator workbench locally:
 
-Or without `azd`:
-
-```bash
-cd src/oracle-forms-migration-fleet
-dotnet run
-curl -X POST http://localhost:8088/responses \
-  -H "Content-Type: application/json" \
-  -d '{"input": "What evidence do you need to assess an Oracle Forms application?", "stream": false}'
+```powershell
+dotnet run --project src/oracle-forms-migration-fleet
 ```
 
-When the two Azure OpenAI settings are absent, `dotnet run` still serves `/` and
-`/api/workbench/*`; `/responses` returns `503 Foundry model is not configured`. This offline mode
-does not create a credential or make an authenticated Azure call.
+Open <http://localhost:8088/>. Without Foundry configuration the deterministic workbench remains
+available and model-backed requests return an explicit `503` instead of simulating a response.
 
-Continue a conversation by passing the previous response id as `previous_response_id`.
+Run the Forms 6i-through-12c textual pipeline matrix:
 
-In VS Code with the [Foundry Toolkit](https://marketplace.visualstudio.com/items?itemName=ms-windows-ai-studio.windows-ai-studio)
-and [C# Dev Kit](https://marketplace.visualstudio.com/items?itemName=ms-dotnettools.csdevkit), press **F5**
-to start the agent and open the Agent Inspector.
-
-### Operator workbench GUI
-
-The same process serves a React 19 and TypeScript operator console. Start the host, then open
-<http://localhost:8088/>. Vite builds `ClientApp` into the fixed `wwwroot/index.html`,
-`wwwroot/styles.css`, and `wwwroot/app.js` paths consumed by the host; there are no runtime CDN
-dependencies. The generated `wwwroot` files remain committed so Foundry code deployment does not
-require Node.js. After `npm ci`, normal local .NET builds rebuild the client only when its inputs are
-newer than those outputs. The Dockerfile uses a dedicated Node build stage.
-
-The console walks six macro steps — **Analyze source · Plan modernization · Convert application ·
-Transform database · Migrate and validate · Cut over destination** — which together own all twelve
-`MigrationPhase` values exactly once. Selecting a step filters the phase list. Step state
-(`Current`, `Ready`, `Blocked`, `Planned`) is derived from a real plan, never simulated.
-
-| Endpoint | Purpose |
-| --- | --- |
-| `GET /` | Static operator console from `wwwroot`. |
-| `GET /api/workbench/bootstrap` | Macro steps, lifecycle ownership, evidence kinds, Azure destinations, execution modes, Azure component readiness, topology, execution boundary. |
-| `POST /api/workbench/plan` | Calls `MigrationRunPlanner.Plan` and returns the plan plus the macro-step projection. |
-| `POST /api/workbench/agent` | Proxies one non-persistent message to the allowlisted Foundry hosted-agent Responses endpoint when `FOUNDRY_AGENT_ENDPOINT` is configured; otherwise an explicit `503`. |
-| `POST /responses` | Foundry Responses protocol endpoint when the model is configured; otherwise an explicit `503`. |
-
-Enums cross the API as strings. The console persists only controlled selections (destination,
-execution mode, and evidence toggles) to `localStorage`. Free-text identifiers, paths, approver
-identities, attestations, and secrets are never persisted.
-
-### Azure component boundary
-
-| Component | State | Why |
-| --- | --- | --- |
-| Microsoft Foundry hosted agent | **Active when connected** | The local model-backed endpoint uses `AddFoundryResponses`/`MapFoundryResponses`. The Container Apps workbench instead proxies to an allowlisted hosted-agent Responses endpoint without exposing that endpoint or Azure credentials to the browser. |
-| Azure Container Apps and ACR | **Implemented in `infra/workbench`** | The Bicep stack provisions the public web host, registry, environment, diagnostics, and image pull path. Provisioning still requires an authorized Azure deployment identity. |
-| Managed identity | **Implemented in `infra/workbench`** | A user-assigned identity receives only ACR pull and Foundry Agent Consumer at the existing project scope. The backend uses it for Foundry calls. |
-| Application Insights | **Implemented in `infra/workbench`** | The deployment provisions Application Insights and injects its connection string into the Container App. The value is never returned by an API. |
-| Microsoft Entra ID | **Implemented in `infra/workbench`** | The deployment script creates or updates a dedicated single-tenant app registration and Container Apps built-in authentication. Anonymous readiness remains available for probes. |
-| Azure Key Vault | Planned | No Key Vault client; the console never handles a secret value. |
-| Azure Blob Storage | Planned | The planner emits workspace-relative artifact paths and writes no file. |
-| Azure SQL Database / Azure SQL Managed Instance / Azure Database for PostgreSQL | Planned | Selectable destinations only. No driver or connection string is used anywhere. |
-| Migration execution adapters | Planned | Designed and gated here, not implemented. Adapter-dependent steps show **Adapter not connected** and their run command stays disabled. |
-
-### Local Foundry smoke evaluation
-
-The checked-in seed dataset at
-`src/oracle-forms-migration-fleet/.foundry/datasets/oracle-forms-migration-fleet-eval-seed-v1.jsonl`
-contains Foundry-ready `query` and `expected_behavior` rows for evidence gating, target selection,
-tool authority, Forms UI semantics, critical legacy risks, secret rejection, and non-execution.
-Use its prompts in Agent Inspector while the local host is running. The `tools` and `signals` fields
-are local coverage metadata that keep the dataset aligned with the deterministic fleet. Rows that
-expect a specific assessment outcome also include an `assessment` fixture: offline tests bind every
-signal to its authoritative evidence kind, execute the fixture through the orchestrator, and verify
-the expected target, confidence, final stage, status, acceptance state, and required task identifiers.
-
-Validate the dataset without Azure or model inference:
-
-```bash
-dotnet test --filter "FullyQualifiedName~EvalDatasetTests"
+```powershell
+dotnet test tests/oracle-forms-migration-fleet.Tests/oracle-forms-migration-fleet.Tests.csproj `
+  --filter "FullyQualifiedName~A_text_export_from_each_intake_family_reaches_strict_ir_and_application_generation"
 ```
 
-The offline validator checks JSONL structure, registered tool names, workload-signal names, every
-Critical legacy risk, executable platform and stage outcomes, authority labels, and safety boundaries.
-A model-backed Foundry evaluation remains a separate step because it requires available deployment
-capacity.
+The five rows cover 6i, 9i, 10g, 11g, and 12c version declarations over a common synthetic XML
+shape. They prove normalization-to-generation regression coverage, not native binary or runtime compatibility.
 
 ## Deploy
 
-Deploy the Foundry hosted agent with `azd`:
+Deploy the Microsoft Foundry hosted agent declared in [azure.yaml](azure.yaml):
 
-```bash
+```powershell
+azd auth login
 azd deploy
-azd ai agent invoke "Assess ENG-4471 for ORDERS."
 ```
 
-See [Deploy a hosted agent](https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/deploy-hosted-agent).
-
-Deploy the authenticated React workbench to Azure Container Apps with the separate
-`infra/workbench` stack. Preview first; the preview is read-only and prints resource type/name changes
-without expanded resource properties. These scripts require PowerShell 7.2 or later:
+Deploy the authenticated Azure Container Apps workbench from the GitHub runner. The runner builds and
+tags the image from the commit, authenticates to Azure with OIDC, and updates the Container App:
 
 ```powershell
-.\infra\workbench\Preview-WorkbenchInfrastructure.ps1 `
-  -ResourceGroupName '<resource-group>'
-
-.\infra\workbench\Deploy-Workbench.ps1 `
-  -ResourceGroupName '<resource-group>' `
-  -FoundryAgentEndpoint 'https://<account>.services.ai.azure.com/api/projects/<project>/agents/<agent>/endpoint/protocols/openai/responses?api-version=v1'
+gh workflow run deploy.yml --repo rxt64/oracle-forms-migration-fleet -f migrate-data=true
 ```
 
-The deployment identity needs permission to create resources and role assignments at the target
-resource group, such as **Contributor** plus **User Access Administrator**, and permission to create
-or update the dedicated Entra application. The web identity itself receives neither those deployment
-roles nor access to Storage, Key Vault, Oracle, or a destination database.
+The workflow also runs automatically after a reviewed change reaches `main`. The repository's GitHub
+Actions workflows build, test, publish immutable images to ACR, deploy the workbench and migrated demo,
+and run live workflow verification. Infrastructure preview and break-glass operational scripts are
+documented in [docs/OPERATIONS.md](docs/OPERATIONS.md); deployable images are built by CI, not a workstation.
 
-`dev.bicepparam` supplies the Entra object IDs authorized to open the confidential workbench through
-`operatorPrincipalObjectIds`; update that allowlist before deploying to another environment. The
-deployment creates a new Easy Auth credential without deleting the previous one. Remove superseded
-credentials only after the authenticated browser login and callback have been smoke-tested, so a
-failed revision cannot invalidate the last working sign-in path. The script reports each retained key
-ID and refuses to create a third retained workbench credential. After a successful smoke test, remove
-the superseded credential explicitly:
+## What gets deployed
 
-```powershell
-$appId = az ad app list `
-  --display-name 'Migration Fleet Workbench - dev' `
-  --query '[0].appId' `
-  --output tsv
-az ad app credential delete --id $appId --key-id '<retained-key-id>'
+| Component | Azure service | Purpose |
+|---|---|---|
+| Migration fleet agent | Microsoft Foundry hosted agent | Conversation and tool coordination over the deterministic fleet. |
+| Operator workbench | Azure Container Apps | Entra-protected ASP.NET 10 and React interface for planning and authorized execution. |
+| Container images | Azure Container Registry | Private images pulled with managed identity; registry admin access is disabled. |
+| Authentication | Microsoft Entra ID · Container Apps Easy Auth | Single-tenant operator authentication and allowlisting. |
+| Workload identity | User-assigned managed identities | ACR pull, Foundry Agent Consumer, and pre-provisioned destination PostgreSQL authentication without database passwords. |
+| Observability | Application Insights · Log Analytics | Workbench traces and Container Apps platform logs. |
+| Source demo | Azure Container Apps | Internal-only Oracle Database Free 23 plus a public ASP.NET workflow replica. |
+| Migrated demo | Azure Container Apps · Azure Database for PostgreSQL 16 | React and Spring Boot replacement using PostgreSQL as the data path. |
+
+The optional [infra/supporting](infra/supporting) stack previews Blob Storage, Key Vault, and Azure SQL
+foundations. Those resources are not presented as active migration dependencies until an adapter uses them.
+
+## Sample legacy application
+
+The included Northstar scenario is a legally clean, independently implemented banking demonstration:
+
+- Synthetic Oracle schema, PL/SQL, and seed data in [infra/legacy-estate](infra/legacy-estate).
+- Browser-executable source workflow replica in [src/oracle-forms-demo](src/oracle-forms-demo).
+- Fleet-generated migrated application in [demo/northstar-migrated](demo/northstar-migrated).
+- Customer and manager workflows for account requests, approval, registration, login, statements,
+  transactions, and interest calculation.
+
+The demonstrated path is a hand-authored Oracle Forms `12.2.1.4`-style XML fixture backed by Oracle
+Database Free 23, migrated to Azure Database for PostgreSQL 16. It is not an export from a licensed
+Forms runtime. Exact evidence and limits are in [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
+
+## Project structure
+
+```text
+src/oracle-forms-migration-fleet/   ASP.NET/React workbench, Foundry host, and deterministic fleet
+  ClientApp/                        React and TypeScript operator interface
+  Fleet/                            Planning, evidence, version, risk, and approval contracts
+  Fleet/Execution/                  Source, code, database, build, migration, and validation adapters
+  Hosting/                          Workspaces, build gateway, and workbench endpoints
+src/oracle-forms-demo/              Source banking workflow replica over the synthetic Oracle database
+demo/northstar-migrated/            Generated React + Java/Spring Boot destination
+infra/workbench/                    ACR, identity, Entra auth, telemetry, and workbench Container App
+infra/legacy-estate/                Disposable Oracle Database Free 23 source demo
+infra/forms-demo/                   Source workflow replica deployment
+infra/northstar-migrated/           Migrated application deployment
+infra/supporting/                    Preview-only destination foundations
+docs/                               Security, operations, compatibility, research, and diagrams
+tests/                              Offline unit, integration, generation, and regression tests
+.github/workflows/                  CI and Azure deployment workflows
 ```
 
-This deployment makes the planning workbench and hosted-agent consultation functional. It does not
-connect an execution adapter: source extraction, React/Java generation, database conversion, data
-movement, reconciliation, and cutover remain blocked until separately implemented adapters return
-the required artifacts and attestations.
+## Security
 
-## Limitations
+- The browser receives no Azure token, Foundry endpoint, Oracle credential, or PostgreSQL credential.
+- Container Apps calls Foundry and PostgreSQL with managed identity and least-privilege RBAC.
+- Structured inputs and chat prompts that resemble credential material are rejected before model calls.
+- Workspace paths reject rooted paths, UNC paths, URIs, traversal, drive prefixes, and alternate streams.
+- Forms XML parsing disables DTDs and external resolution and enforces the Oracle Forms namespace.
+- Model-generated routine repairs cannot change signatures or envelopes and are accepted only after
+  PostgreSQL compiles them.
+- Sandbox execution, human acceptance, and production cutover require separate approvals and artifacts.
 
-- **No database is contacted and no Azure resource is created.** Nothing connects to Oracle, PostgreSQL,
-  Azure SQL Database, or Azure SQL Managed Instance. Every artifact is written inside the operator's private
-  session workspace, which is deleted after four hours. There is no deploy action, and a customer-tenant
-  sign-in would have nothing to call: no adapter in this repository provisions anything. Each plan states
-  the resources and role assignments a deployment *would* need so that list can be reviewed before anyone
-  grants it.
-- **Generated PostgreSQL DDL has not been executed anywhere.** The schema conversion emits real
-  `CREATE TABLE`, `CREATE SEQUENCE`, and constraint statements, and its report names the type mappings and
-  the constructs it refused to translate. DDL that parses is not DDL that runs: nothing here has been
-  validated against a live server, and the review model's findings are explicitly unverified.
-- **PL/SQL is not translated.** Packages, procedures, functions, triggers, `%ROWTYPE`, and `STANDARD_HASH`
-  are reported as manual PL/pgSQL rewrites with reasons. No attempt is made to convert a body.
-- **Forms binaries are never opened.** `.fmb`, `.mmb`, `.pll`, and `.olb` files are indexed by name and size
-  only; their contents are a proprietary binary format requiring Forms Builder or the JDAPI, so no trigger,
-  block, or program unit is extracted from one. React and Java source *is* generated, from two inputs and no
-  others: the converted database schema, and the structure of any Forms **XML export** an operator supplies.
-  An estate that supplies only binaries is refused by `SourceNormalization` rather than generated from, and
-  an estate that supplies only a schema generates CRUD over the converted tables, which is not a Forms UI and
-  is never reported as one. Trigger and program-unit behaviour is not translated in either case.
-- **Evidence is taken as attested, not independently verified.** The service does not parse `.fmb`
-  files. It ignores platform signals attached to unrelated artifact kinds; `isVerified` remains a
-  human attestation; unverified artifacts do not satisfy evidence gates or drive recommendations.
-- **Forms2XML/JDAPI, SSMA, DMS, and vendor outputs must be supplied by an operator.** This hosted
-  service does not install those products, connect to source systems, or execute their output.
-- **Static extraction is not process discovery.** Trigger order, navigation, informal workarounds,
-  printer/device use, batch timing, and exception handling require observation and business-owner review.
-- **Vendor claims are not guarantees.** Conversion percentages, complexity labels, AI dependency
-  analysis, visual comparisons, timelines, cost/ROI estimates, and production-support claims do not
-  establish maintainability, security, performance, operational readiness, or functional acceptance.
-- **Findings are only as complete as the supplied signals.** A dependency that was never signalled
-  cannot be detected.
-- **Feature parity is not tracked at runtime.** Azure SQL Database and Managed Instance capabilities
-  change; re-confirm the recommendation against current Microsoft documentation before execution.
-- **Effort and risk levels are relative rankings**, not estimates in hours or cost.
-- **No autonomous production changes.** `MigrationPlan.IsAccepted` is only ever true after all
-  evidence blockers are closed and a human plan-approval decision carries an approver identity.
-  Plan approval is not production acceptance; production readiness is a separate workstream.
-- **Secrets are rejected, not redacted.** The chat-client pipeline returns a fixed refusal before
-  credential-like chat content is delegated to model inference. Structured assessment fields are
-  also checked by intake validation. Neither path echoes the detected value.
-- **Conversation history** is in-process locally and durable only when hosted by Foundry. A local host
-  may still persist its own `.checkpoints/` state on disk between restarts; that state is git-ignored,
-  is not an audit trail, and is never evidence that a phase ran.
+Read [docs/SECURITY.md](docs/SECURITY.md) before connecting customer source or changing authentication.
+
+## Cost
+
+The development environment uses billable Microsoft Foundry model capacity, Azure Container Apps,
+Azure Container Registry, Azure Database for PostgreSQL, Application Insights, and Log Analytics.
+The Oracle demo database is the largest continuously running Container App. Scale demo resources to
+zero when idle and monitor ingestion/model usage. Exact commands are in the infrastructure READMEs.
+
+## Cleanup
+
+There is intentionally no repository-wide destroy command because the resource group contains shared
+Foundry and Container Apps resources. Use the targeted teardown sections in:
+
+- [infra/forms-demo/README.md](infra/forms-demo/README.md)
+- [infra/legacy-estate/README.md](infra/legacy-estate/README.md)
+- [infra/workbench/README.md](infra/workbench/README.md)
+
+Preview Bicep changes before deletion and preserve resources shared by the source and destination demos.
+
+## Troubleshooting
+
+- **A workbench request returns 504:** the workbench stays warm at one replica; inspect revision health,
+  startup logs, Easy Auth, and traffic weight rather than treating it as a cold start.
+- **A route briefly returns 404 after deployment:** traffic may still be switching between revisions.
+- **Browser shows an old UI:** disable browser cache; the Vite bundle uses fixed asset names.
+- **ACR build appears successful with `--no-logs`:** query the ACR run status explicitly.
+- **Foundry returns 429:** retry after capacity is available; never treat a missing review as success.
+- **Generated app does not build:** Java 21, Maven, Node, and npm are required; missing tools fail the phase.
+- **Binary-only estate is refused:** supply complete operator-produced Forms XML for every module or add
+  an isolated, licensed extraction worker. The hosted fleet does not decode `.fmb` files.
+
+See [docs/OPERATIONS.md](docs/OPERATIONS.md) for the full runbook.
+
+## Compatibility
+
+| Evidence path | Current status |
+|---|---|
+| Forms 6i, 9i, 10g, 11g, 12c versioned synthetic XML | Normalization-to-generation matrix passes in CI. |
+| Forms 12.2.1.4-style Northstar synthetic path | Generated, compiled, deployed, and browser-validated. |
+| Native `.fmb`, `.mmb`, `.pll`, `.olb` extraction | Not implemented in the hosted process; binary-only estates fail closed. |
+| General release-wide Forms compatibility | Not claimed until authorized representative projects pass extraction, compilation, deployment, and differential tests. |
+
+Research for an isolated NDAPI worker and an optional ASP.NET Core/Blazor target is documented in
+[docs/NDAPI_DOTNET_FEASIBILITY.md](docs/NDAPI_DOTNET_FEASIBILITY.md). Forms 6i normalization and upgrade
+constraints are documented in [docs/ORACLE_FORMS_6I_RESEARCH.md](docs/ORACLE_FORMS_6I_RESEARCH.md).
+
+## Reference experience
+
+The documentation structure and two-diagram presentation were informed by the MIT-0
+[AWS sample-oracleforms-to-angular](https://github.com/aws-samples/sample-oracleforms-to-angular)
+project. Its third-party notice attributes the included FMB/SQL artifacts to an MIT-licensed upstream
+project. No AWS source code, third-party FMB, or diagram asset is copied here.
+
+That sample includes **six** `.fmb` modules; the number is a file count, not Oracle Forms version 6.
+All six inspected files begin with `ROS.60050`, and the sample parser describes them as Forms 10g/12c
+object stores. Its parser extracts printable runs and associates nearby `BEGIN ... END;` text with
+trigger markers. That is useful research and sample-specific evidence, not a general binary decoder or
+proof of Forms 6i support. Our hosted fleet therefore continues to refuse binary-only source.
+
+## Documentation
+
+| Document | Purpose |
+|---|---|
+| [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) | Demonstrated versions, textual matrix, and claim boundaries. |
+| [docs/SECURITY.md](docs/SECURITY.md) | Threat model, identity, source handling, and non-negotiable guardrails. |
+| [docs/OPERATIONS.md](docs/OPERATIONS.md) | Deployment, verification, rollback, and failure modes. |
+| [docs/ORACLE_FORMS_6I_RESEARCH.md](docs/ORACLE_FORMS_6I_RESEARCH.md) | Forms 6i source recovery and upgrade path. |
+| [docs/NDAPI_DOTNET_FEASIBILITY.md](docs/NDAPI_DOTNET_FEASIBILITY.md) | Isolated native extraction and .NET target feasibility. |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Development and pull-request workflow. |
+| [CHANGELOG.md](CHANGELOG.md) | Behavior and release history. |
+
+## License and provenance
+
+This repository currently has no root license file; do not assume redistribution rights beyond your
+organization's authorization. Third-party products, packages, images, and source estates remain under
+their own licenses. Oracle Forms and WebLogic binaries are proprietary and are not redistributed here.

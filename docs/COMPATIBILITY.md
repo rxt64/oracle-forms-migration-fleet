@@ -11,7 +11,7 @@ link is not compatibility evidence.
 |---|---|---|
 | Oracle Forms source format | `12.2.1.4` | The synthetic XML fixture declares `FormsVersion="12.2.1.4"` and uses the shape produced by Forms2XML. It is hand-authored test evidence, not an export from a licensed Forms runtime. |
 | Oracle source database | Oracle Database Free 23 | The disposable source uses `gvenzl/oracle-free:23-slim-faststart`. Its schema, PL/SQL, and data are synthetic. |
-| PostgreSQL target | Azure Database for PostgreSQL 16 | The live development target reports major version `16`. |
+| PostgreSQL target | Azure Database for PostgreSQL 16 | The deployment workflow reads the live server resource version and refuses a major version other than `16`. |
 | Application target | Java 21 / Spring Boot 3.3.5 and a browser client | GitHub Actions compiles the generated application and runs its generated route tests before deployment. |
 
 ### Live acceptance evidence
@@ -85,7 +85,8 @@ generation for each intake family: Forms 6i (`6.0.8.28`), 9i (`9.0.2.0`), 10g (`
 and source-file provenance, IR authority metadata, and key generated Java and browser descriptor content. The existing negative
 matrix verifies that a binary-only estate fails closed for every family.
 
-With these five matrix rows, the current local solution passes all 1,067 tests.
+With these five matrix rows and the reference-catalog checks, the current local solution passes all
+1,072 tests.
 
 Run the positive matrix locally with:
 
@@ -115,6 +116,22 @@ clean conversion is evidence about the export it was given and not about the rel
 fleet records and canonicalizes both, but uses neither to bypass an evidence check or select a
 converter. `unknown` remains the correct value when the authoritative source version has not been
 verified.
+
+## External sample evidence
+
+The MIT-0 [AWS sample-oracleforms-to-angular](https://github.com/aws-samples/sample-oracleforms-to-angular)
+repository contributes useful workshop patterns: separate pipeline and target diagrams, deterministic
+extraction before model generation, per-rule traceability, generated equivalence tests, and optional
+source-versus-target shadow comparison. No source code or diagram asset from that repository is copied
+into this project. Its third-party notice attributes the included FMB and SQL artifacts to a separate
+MIT-licensed upstream project; none of those artifacts is copied here either.
+
+Its Oracle Forms input contains six `.fmb` modules. **Six is the file count, not Oracle Forms version
+6.** Every inspected binary begins with `ROS.60050`; the sample parser describes the files as Forms
+10g/12c object stores. The parser extracts printable byte runs and associates nearby `BEGIN ... END;`
+text with trigger-name markers. That can be useful characterization evidence for those sample files,
+but it is not a general FMB decoder and provides no Forms 6i compatibility evidence. The sample's
+published target also retains Oracle, so it does not prove an Oracle-to-Azure-PostgreSQL database exit.
 
 ## Adding a compatibility claim
 

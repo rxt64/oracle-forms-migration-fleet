@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="760" viewBox="0 0 1280 760" role="img" aria-labelledby="title desc">
+  <title id="title">Oracle Forms Migration Fleet pipeline on Azure</title>
+  <desc id="desc">Customer-authorized Oracle Forms and database evidence flows through deterministic normalization, Microsoft Foundry assisted review, application generation, and compiler-led validation. Artifacts and reports are written to an isolated session workspace.</desc>
+  <defs>
+    <style>
+      .title{font:700 26px 'Segoe UI',Arial,sans-serif;fill:#172b4d}.subtitle{font:14px 'Segoe UI',Arial,sans-serif;fill:#5b6573}.group{fill:#fff;stroke:#0078d4;stroke-width:2}.group-title{font:700 14px 'Segoe UI',Arial,sans-serif;fill:#172b4d}.tile{stroke-width:2;rx:6}.label{font:700 13px 'Segoe UI',Arial,sans-serif;fill:#172b4d}.small{font:12px 'Segoe UI',Arial,sans-serif;fill:#394657}.tiny{font:11px 'Segoe UI',Arial,sans-serif;fill:#5b6573}.badge{font:700 15px 'Segoe UI',Arial,sans-serif;fill:#fff}.flow{fill:none;stroke:#46576b;stroke-width:2;marker-end:url(#arrow)}.dash{fill:none;stroke:#0078d4;stroke-width:2;stroke-dasharray:7 5;marker-end:url(#arrowBlue)}
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#46576b"/></marker>
+    <marker id="arrowBlue" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#0078d4"/></marker>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-opacity=".13"/></filter>
+  </defs>
+  <rect width="1280" height="760" fill="#f7f9fc"/>
+  <text x="40" y="43" class="title">Oracle Forms Migration Fleet</text>
+  <text x="40" y="67" class="subtitle">Evidence-led modernization pipeline · deterministic gates · Microsoft Foundry assistance · compiler authority</text>
+
+  <rect x="36" y="108" width="156" height="520" rx="8" fill="#fff" stroke="#65758b" stroke-width="2"/>
+  <text x="54" y="137" class="group-title">Authorized source</text>
+  <rect x="54" y="165" width="120" height="92" class="tile" fill="#e8f2ff" stroke="#0078d4" filter="url(#shadow)"/>
+  <rect x="68" y="180" width="32" height="32" rx="4" fill="#0078d4"/><text x="84" y="202" text-anchor="middle" class="badge">OF</text>
+  <text x="110" y="193" class="label">Forms XML</text><text x="110" y="211" class="small">exports</text><text x="68" y="235" class="tiny">FMB/MMB inventory</text><text x="68" y="249" class="tiny">PLL/OLB inventory</text>
+  <rect x="54" y="290" width="120" height="92" class="tile" fill="#fff4ce" stroke="#f7630c" filter="url(#shadow)"/>
+  <rect x="68" y="305" width="32" height="32" rx="4" fill="#f7630c"/><text x="84" y="327" text-anchor="middle" class="badge">DB</text>
+  <text x="110" y="318" class="label">Oracle DDL</text><text x="110" y="336" class="small">and PL/SQL</text><text x="68" y="359" class="tiny">schema · data</text><text x="68" y="373" class="tiny">test baselines</text>
+  <rect x="54" y="422" width="120" height="122" rx="6" fill="#fde7e9" stroke="#d13438" stroke-width="2"/>
+  <text x="68" y="448" class="label">Fail closed</text><text x="68" y="471" class="small">Binary-only Forms</text><text x="68" y="489" class="small">estates do not</text><text x="68" y="507" class="small">unlock generation.</text><text x="68" y="531" class="tiny">No Oracle tool runs here.</text>
+
+  <rect x="222" y="88" width="876" height="590" rx="10" class="group"/>
+  <rect x="222" y="88" width="876" height="38" rx="8" fill="#0078d4"/>
+  <text x="244" y="113" style="font:700 15px 'Segoe UI',Arial,sans-serif;fill:#fff">Microsoft Azure</text>
+
+  <rect x="252" y="146" width="816" height="98" rx="7" fill="#f3f2f1" stroke="#65758b" stroke-width="2" stroke-dasharray="7 5"/>
+  <text x="270" y="171" class="group-title">Orchestration and guardrails</text>
+  <rect x="278" y="185" width="210" height="42" class="tile" fill="#dceeff" stroke="#0078d4"/>
+  <text x="383" y="202" text-anchor="middle" class="label">Azure Container Apps</text><text x="383" y="218" text-anchor="middle" class="tiny">ASP.NET + React workbench</text>
+  <rect x="554" y="185" width="210" height="42" class="tile" fill="#e8daef" stroke="#5c2d91"/>
+  <text x="659" y="202" text-anchor="middle" class="label">Microsoft Foundry agent</text><text x="659" y="218" text-anchor="middle" class="tiny">conversation + bounded review</text>
+  <rect x="830" y="185" width="210" height="42" class="tile" fill="#dff6dd" stroke="#107c10"/>
+  <text x="935" y="202" text-anchor="middle" class="label">MigrationRunPlanner</text><text x="935" y="218" text-anchor="middle" class="tiny">approvals · evidence · attestations</text>
+  <path d="M488 206 H546" class="dash"/><path d="M764 206 H822" class="dash"/>
+
+  <text x="252" y="280" class="group-title">Four-stage migration pipeline</text>
+  <g filter="url(#shadow)">
+    <rect x="252" y="302" width="174" height="178" class="tile" fill="#e8f2ff" stroke="#0078d4"/>
+    <circle cx="280" cy="330" r="17" fill="#0078d4"/><text x="280" y="336" text-anchor="middle" class="badge">1</text>
+    <text x="307" y="327" class="label">Parse + normalize</text>
+    <text x="270" y="360" class="small">Inventory every source file</text><text x="270" y="380" class="small">Validate Forms XML safely</text><text x="270" y="400" class="small">Create provenance-bound IR</text><text x="270" y="420" class="small">Account for every SQL statement</text>
+    <text x="270" y="455" class="tiny">Deterministic · no model</text>
+
+    <rect x="456" y="302" width="174" height="178" class="tile" fill="#e8daef" stroke="#5c2d91"/>
+    <circle cx="484" cy="330" r="17" fill="#5c2d91"/><text x="484" y="336" text-anchor="middle" class="badge">2</text>
+    <text x="511" y="327" class="label">Plan + review</text>
+    <text x="474" y="360" class="small">Map dependencies and risks</text><text x="474" y="380" class="small">Choose the Azure target</text><text x="474" y="400" class="small">gpt-5.4-mini coordinates</text><text x="474" y="420" class="small">gpt-5.6-sol reviews repairs</text>
+    <text x="474" y="455" class="tiny">Models advise · gates decide</text>
+
+    <rect x="660" y="302" width="174" height="178" class="tile" fill="#fff4ce" stroke="#f7630c"/>
+    <circle cx="688" cy="330" r="17" fill="#f7630c"/><text x="688" y="336" text-anchor="middle" class="badge">3</text>
+    <text x="715" y="327" class="label">Generate</text>
+    <text x="678" y="360" class="small">React + TypeScript client</text><text x="678" y="380" class="small">Java 21 + Spring Boot API</text><text x="678" y="400" class="small">PostgreSQL schema + reports</text><text x="678" y="420" class="small">Rule and source traceability</text>
+    <text x="678" y="455" class="tiny">One isolated run workspace</text>
+
+    <rect x="864" y="302" width="174" height="178" class="tile" fill="#dff6dd" stroke="#107c10"/>
+    <circle cx="892" cy="330" r="17" fill="#107c10"/><text x="892" y="336" text-anchor="middle" class="badge">4</text>
+    <text x="919" y="327" class="label">Validate</text>
+    <text x="882" y="360" class="small">Maven + TypeScript builds</text><text x="882" y="380" class="small">PostgreSQL compiler checks</text><text x="882" y="400" class="small">Reconciliation + security</text><text x="882" y="420" class="small">Deployed API smoke tests</text>
+    <text x="882" y="455" class="tiny">Compilers and tests decide</text>
+  </g>
+  <path d="M426 389 H448" class="flow"/><path d="M630 389 H652" class="flow"/><path d="M834 389 H856" class="flow"/>
+
+  <rect x="252" y="524" width="816" height="122" rx="7" fill="#fff" stroke="#65758b" stroke-width="2"/>
+  <text x="270" y="549" class="group-title">Security, evidence, and operations</text>
+  <rect x="278" y="568" width="220" height="54" class="tile" fill="#dceeff" stroke="#0078d4"/>
+  <text x="388" y="589" text-anchor="middle" class="label">Microsoft Entra ID</text><text x="388" y="607" text-anchor="middle" class="tiny">Easy Auth + managed identity</text>
+  <rect x="548" y="568" width="220" height="54" class="tile" fill="#f3f2f1" stroke="#65758b"/>
+  <text x="658" y="589" text-anchor="middle" class="label">Session workspace</text><text x="658" y="607" text-anchor="middle" class="tiny">IR · generated code · reports</text>
+  <rect x="818" y="568" width="220" height="54" class="tile" fill="#e8daef" stroke="#5c2d91"/>
+  <text x="928" y="589" text-anchor="middle" class="label">Azure Monitor</text><text x="928" y="607" text-anchor="middle" class="tiny">App Insights · Log Analytics</text>
+
+  <rect x="1128" y="234" width="116" height="240" rx="8" fill="#fff" stroke="#107c10" stroke-width="2"/>
+  <text x="1146" y="262" class="group-title">Outputs</text>
+  <rect x="1146" y="286" width="80" height="52" rx="5" fill="#fff4ce" stroke="#f7630c"/><text x="1186" y="308" text-anchor="middle" class="label">Code</text><text x="1186" y="325" text-anchor="middle" class="tiny">React + Java</text>
+  <rect x="1146" y="354" width="80" height="52" rx="5" fill="#dff6dd" stroke="#107c10"/><text x="1186" y="376" text-anchor="middle" class="label">Database</text><text x="1186" y="393" text-anchor="middle" class="tiny">PostgreSQL</text>
+  <rect x="1146" y="422" width="80" height="36" rx="5" fill="#f3f2f1" stroke="#65758b"/><text x="1186" y="445" text-anchor="middle" class="label">Reports</text>
+  <path d="M1098 389 H1120" class="flow"/>
+  <path d="M192 336 H244" class="flow"/>
+
+  <text x="40" y="716" class="small">Claim boundary: the fleet reads operator-produced Forms XML and textual database evidence. Proprietary Forms binaries are inventoried but not decoded in-process.</text>
+  <text x="40" y="739" class="tiny">Implemented development path shown in solid lines. Model output cannot approve, attest, select credentials, or overrule compiler/test failures.</text>
+</svg>

@@ -67,20 +67,27 @@ The eval seed dataset and several test fixtures deliberately contain strings suc
 ## 5. Least privilege at runtime
 
 The container runs as a non-root `app` user and holds a user-assigned managed identity with exactly two
-role assignments:
+Azure role assignments:
 
 - **AcrPull**, scoped to the registry — to pull its own image.
 - **Azure AI Foundry Agent Consumer**, scoped to the project — to call its own agent.
 
-Sign-in is Microsoft Entra ID, single tenant.
+Sign-in is Microsoft Entra ID, single tenant. The same identity is separately pre-provisioned as a
+PostgreSQL principal with only the sandbox schema privileges required by migration and reconciliation.
+That database authorization is not an Azure RBAC assignment. The host fixes `SANDBOX_PGHOST`,
+`SANDBOX_PGUSER`, and `SANDBOX_PGDATABASE`; a browser request cannot select another server or credential.
 
-## 6. Planning only
+## 6. Approval-gated execution
 
-`ExecutionAdapterConnected` is `false` and must stay that way until a real adapter exists. The product
-plans and gates; it does not connect to Oracle, PostgreSQL, or SQL Server, and it does not move data. A
-lifecycle phase counts as performed only when an adapter returns artifacts **plus** a matching signed
-attestation. Anything that would let the UI imply work was performed when it was not is a security bug,
-not a UX bug.
+Source analysis, normalization, conversion, build validation, PostgreSQL sandbox migration, and
+reconciliation adapters are implemented. Conversion artifacts are confined to the owner-scoped session
+workspace. Database writes occur only when the host has bound the PostgreSQL gateway and the planner has
+accepted a separate execution approval. The target endpoint is host-owned, never caller-supplied.
+
+Differential behavior testing, human acceptance, and production cutover have no execution adapter. A
+lifecycle phase counts as performed only when its adapter succeeds and any required attestation cites a
+real artifact. Anything that lets the UI hide a sandbox mutation or imply unperformed work is a security
+bug, not a UX bug.
 
 ## Reporting
 

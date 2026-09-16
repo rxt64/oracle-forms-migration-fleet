@@ -22,6 +22,7 @@ env:
   IMAGE: northstar-migrated
   RESOURCE_GROUP: rg-oracle-forms-migration-fleet-dev-b9f0e875
   CONTAINER_APP: ca-ofmfleet-mig-dev-ykbpnrpd
+  POSTGRES_SERVER: pg-ofmfleet-dev-ykbpnrpd
 
 jobs:
   validate:
@@ -104,6 +105,13 @@ jobs:
 
       - name: Verify migrated banking workflows
         run: |
+          POSTGRES_VERSION=$(az postgres flexible-server show \
+            --name "$POSTGRES_SERVER" \
+            --resource-group "$RESOURCE_GROUP" \
+            --query version \
+            --output tsv)
+          test "${POSTGRES_VERSION%%.*}" = '16'
+
           FQDN=$(az containerapp show \
             --name "$CONTAINER_APP" \
             --resource-group "$RESOURCE_GROUP" \
@@ -204,5 +212,5 @@ jobs:
           test "$CRUD_STATUS" = '404'
           test "$(jq -r .error removed-crud.json)" = 'No such endpoint.'
 
-          echo "Verified request $REQUEST_ID, account $ACCOUNT_ID, transaction $(jq -r .transactionId transaction.json)."
+          echo "Verified PostgreSQL $POSTGRES_VERSION, request $REQUEST_ID, account $ACCOUNT_ID, transaction $(jq -r .transactionId transaction.json)."
           echo "Migrated application: https://$FQDN"

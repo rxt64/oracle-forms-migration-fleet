@@ -12,6 +12,17 @@ public class FleetAttributionTests
             "gpt-5.4-mini",
             review);
 
+    private static FleetAttribution DescribeRuntime() =>
+        FleetAttributionMap.Describe(
+            [
+                MigrationPhase.SourceAnalysis,
+                MigrationPhase.ApplicationCodeConversion,
+                MigrationPhase.DatabaseConversion,
+                MigrationPhase.SandboxDataMigration,
+            ],
+            "gpt-5.4-mini",
+            "gpt-5.6-sol");
+
     private static PhaseAttribution Phase(FleetAttribution attribution, MigrationPhase phase) =>
         attribution.Phases.Single(candidate => candidate.Phase == phase);
 
@@ -62,12 +73,40 @@ public class FleetAttributionTests
     {
         Assert.DoesNotContain(
             Describe().Phases,
-            phase => phase.Engine is not (PhaseEngine.Deterministic or PhaseEngine.DeterministicWithModelReview or PhaseEngine.NotImplemented));
+            phase => phase.Engine is not (
+                PhaseEngine.Deterministic
+                or PhaseEngine.DeterministicWithModelReview
+                or PhaseEngine.DeterministicWithBoundedModelRepair
+                or PhaseEngine.NotImplemented));
     }
 
     [Fact]
     public void Exactly_one_phase_consults_a_model() =>
         Assert.Single(Describe().Phases, phase => phase.ModelDeployment is not null);
+
+    [Fact]
+    public void Runtime_attributes_every_reachable_review_and_repair_path()
+    {
+        FleetAttribution attribution = DescribeRuntime();
+
+        Assert.Equal(
+            PhaseEngine.DeterministicWithModelReview,
+            Phase(attribution, MigrationPhase.ApplicationCodeConversion).Engine);
+        Assert.Equal(
+            PhaseEngine.DeterministicWithModelReview,
+            Phase(attribution, MigrationPhase.DatabaseConversion).Engine);
+        Assert.Equal(
+            PhaseEngine.DeterministicWithBoundedModelRepair,
+            Phase(attribution, MigrationPhase.SandboxDataMigration).Engine);
+        Assert.All(
+            new[]
+            {
+                MigrationPhase.ApplicationCodeConversion,
+                MigrationPhase.DatabaseConversion,
+                MigrationPhase.SandboxDataMigration,
+            },
+            phase => Assert.Equal("gpt-5.6-sol", Phase(attribution, phase).ModelDeployment));
+    }
 
     [Fact]
     public void The_disclaimers_say_roles_are_not_independent_agents() =>
@@ -80,7 +119,7 @@ public class FleetAttributionTests
     {
         FleetAttribution attribution = Describe();
 
-        Assert.Equal(2, attribution.Models.Count);
+        Assert.Equal(3, attribution.Models.Count);
         Assert.Contains(attribution.Models, model => model.Deployment == "gpt-5.4-mini");
         Assert.Contains(attribution.Models, model => model.Deployment == "gpt-5.6-sol");
     }

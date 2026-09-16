@@ -169,13 +169,15 @@ SourceWorkspaceService sourceWorkspaces = new(Environment.GetEnvironmentVariable
 
 // The sandbox database target is configured here, never by a caller, so a request can ask for a data
 // migration but cannot choose where the rows land.
-if (Environment.GetEnvironmentVariable("SANDBOX_PGHOST") is { Length: > 0 } sandboxHost &&
-    Environment.GetEnvironmentVariable("SANDBOX_PGUSER") is { Length: > 0 } sandboxUser)
+string? sandboxHost = Environment.GetEnvironmentVariable("SANDBOX_PGHOST");
+string? sandboxUser = Environment.GetEnvironmentVariable("SANDBOX_PGUSER");
+bool sandboxDatabaseConfigured = !string.IsNullOrWhiteSpace(sandboxHost) && !string.IsNullOrWhiteSpace(sandboxUser);
+if (sandboxDatabaseConfigured)
 {
     builder.Services.AddSingleton<IDataMigrationGateway>(new PostgresDataMigrationGateway(
-        sandboxHost,
+        sandboxHost!,
         Environment.GetEnvironmentVariable("SANDBOX_PGDATABASE") ?? "postgres",
-        sandboxUser,
+        sandboxUser!,
         string.IsNullOrWhiteSpace(managedIdentityClientId)
             ? new AzureDeveloperCliCredential(new AzureDeveloperCliCredentialOptions { ProcessTimeout = TimeSpan.FromSeconds(30) })
             : new ManagedIdentityCredential(ManagedIdentityId.FromUserAssignedClientId(managedIdentityClientId))));
@@ -203,6 +205,7 @@ builder.RegisterProtocol("responses", endpoints =>
         remoteAgentClient,
         managedIdentityConfigured,
         entraAuthenticationConfigured,
+        sandboxDatabaseConfigured,
         sourceWorkspaces);
 });
 

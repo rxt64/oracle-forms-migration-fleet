@@ -138,8 +138,9 @@ public static class MigrationWorkbenchCatalog
     public const bool ProductionAdapterConnected = false;
 
     public const string ExecutionBoundary =
-        "This console plans and gates a migration. No execution adapter is connected in this repository, " +
-        "so conversion, database transformation, sandbox migration, and cutover can be planned and gated here but not executed here.";
+        "This console plans and runs only planner-authorized adapters. Conversion and build phases write to the private session workspace. " +
+        "When the host configures PostgreSQL, separately approved sandbox phases may write schema and data there. " +
+        "Differential behavior testing, human acceptance, and production cutover are not executable here.";
 
     /// <summary>Evidence kinds the planner requires before any artifact may be generated.</summary>
     private static readonly EvidenceKind[] s_generationEvidence =
@@ -250,7 +251,8 @@ public static class MigrationWorkbenchCatalog
         bool modelConfigured = true,
         bool agentChatAvailable = false,
         bool managedIdentityConfigured = false,
-        bool entraAuthenticationConfigured = false) =>
+        bool entraAuthenticationConfigured = false,
+        bool sandboxDatabaseConfigured = false) =>
     [
         new("foundry-hosted-agent", "Microsoft Foundry hosted agent", "Microsoft.CognitiveServices/accounts",
             modelConfigured || agentChatAvailable ? AzureComponentState.Active : AzureComponentState.NotConfigured,
@@ -290,17 +292,19 @@ public static class MigrationWorkbenchCatalog
         new("blob-storage", "Azure Blob Storage", "Microsoft.Storage/storageAccounts",
             AzureComponentState.Planned,
             "Would persist generated artifacts, conversion reports, and reconciliation output.",
-            "The planner emits workspace-relative artifact paths only and writes no file."),
+            "Execution artifacts are currently written to an owner-scoped local session workspace; no Blob Storage client is connected."),
 
         new("database-target", "Selected Azure database destination", "Azure SQL Database, Azure SQL Managed Instance, or Azure Database for PostgreSQL",
-            AzureComponentState.Planned,
+            sandboxDatabaseConfigured ? AzureComponentState.Active : AzureComponentState.NotConfigured,
             "Destination for the converted schema, PL/SQL, and migrated data.",
-            "No database driver or connection string is used anywhere in this repository."),
+            sandboxDatabaseConfigured
+                ? "SANDBOX_PGHOST and SANDBOX_PGUSER bind the host-owned PostgreSQL gateway; callers cannot select another endpoint."
+                : "No host-owned sandbox PostgreSQL target is configured in this environment."),
 
         new("execution-adapters", "Migration execution adapters", "Not an Azure resource",
-            AzureComponentState.Planned,
-            "Would perform conversion, sandbox migration, reconciliation, and cutover and return signed attestations.",
-            "Designed and planned in this repository; no adapter implementation is present."),
+            AzureComponentState.Active,
+            "Perform source analysis, normalization, conversion, build validation, approved sandbox migration, and reconciliation.",
+            "MigrationExecutor registers the implemented adapters. Differential behavior testing, human acceptance, and production cutover remain unimplemented."),
     ];
 
     /// <summary>Operational request path from the operator's browser to the selected destination.</summary>
@@ -309,7 +313,8 @@ public static class MigrationWorkbenchCatalog
         bool modelConfigured = true,
         bool agentChatAvailable = false,
         bool managedIdentityConfigured = false,
-        bool entraAuthenticationConfigured = false) =>
+        bool entraAuthenticationConfigured = false,
+        bool sandboxDatabaseConfigured = false) =>
     [
         new(1, "Browser", "Operator console served from wwwroot by the hosted agent.", AzureComponentState.Active),
         new(2, "Microsoft Entra ID",
@@ -329,8 +334,12 @@ public static class MigrationWorkbenchCatalog
             applicationInsightsConfigured
                 ? "Application Insights is configured. Key Vault and Blob Storage are planned."
                 : "Secrets, artifacts, and telemetry. None of the three is configured.",
-            AzureComponentState.Planned),
-        new(6, "Selected Azure database", "Azure SQL Database, Azure SQL Managed Instance, or Azure Database for PostgreSQL.", AzureComponentState.Planned),
+            applicationInsightsConfigured ? AzureComponentState.Active : AzureComponentState.NotConfigured),
+        new(6, "Sandbox PostgreSQL destination",
+            sandboxDatabaseConfigured
+                ? "The host has bound a PostgreSQL target for separately approved sandbox writes."
+                : "No sandbox PostgreSQL target is configured in this environment.",
+            sandboxDatabaseConfigured ? AzureComponentState.Active : AzureComponentState.NotConfigured),
     ];
 
     public static WorkbenchBootstrap Bootstrap(
@@ -339,14 +348,15 @@ public static class MigrationWorkbenchCatalog
         bool agentChatAvailable = false,
         bool managedIdentityConfigured = false,
         bool entraAuthenticationConfigured = false,
+        bool sandboxDatabaseConfigured = false,
         FleetAttribution? attribution = null) => new(
         Steps,
         MigrationRunPlanner.Lifecycle,
         EvidenceKinds,
         DatabaseTargets,
         ExecutionModes,
-        AzureComponents(applicationInsightsConfigured, modelConfigured, agentChatAvailable, managedIdentityConfigured, entraAuthenticationConfigured),
-        Topology(applicationInsightsConfigured, modelConfigured, agentChatAvailable, managedIdentityConfigured, entraAuthenticationConfigured),
+        AzureComponents(applicationInsightsConfigured, modelConfigured, agentChatAvailable, managedIdentityConfigured, entraAuthenticationConfigured, sandboxDatabaseConfigured),
+        Topology(applicationInsightsConfigured, modelConfigured, agentChatAvailable, managedIdentityConfigured, entraAuthenticationConfigured, sandboxDatabaseConfigured),
         attribution ?? FleetAttributionMap.Describe([], null, null),
         agentChatAvailable,
         ExecutionBoundary,

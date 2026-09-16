@@ -50,6 +50,7 @@ public class FleetToolsTests
     [InlineData("felipebz/ndapi", ToolAuthority.OpenSourceImplementation)]
     [InlineData("Ora2Pg", ToolAuthority.OpenSourceImplementation)]
     [InlineData("franklingjr/oracle-forms-migration", ToolAuthority.OpenSourceImplementation)]
+    [InlineData("aws-samples/sample-oracleforms-to-angular", ToolAuthority.WorkshopReference)]
     [InlineData("Cognition workshop", ToolAuthority.WorkshopReference)]
     [InlineData("SierraSystems", ToolAuthority.WorkshopReference)]
     [InlineData("patrickmonaco/formstools", ToolAuthority.WorkshopReference)]
@@ -65,10 +66,11 @@ public class FleetToolsTests
         Assert.Contains("not end-to-end conversion proof", tool.Limitations, StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>The seven third-party sources supplied for this fleet, each with the authority it was researched under.</summary>
+    /// <summary>Third-party sources supplied for this fleet, each with the authority it was researched under.</summary>
     [Theory]
     [InlineData("https://github.com/aoreshkov/oracle-forms-mcp", ToolAuthority.OpenSourceImplementation)]
     [InlineData("https://github.com/franklingjr/oracle-forms-migration", ToolAuthority.OpenSourceImplementation)]
+    [InlineData("https://github.com/aws-samples/sample-oracleforms-to-angular", ToolAuthority.WorkshopReference)]
     [InlineData("https://github.com/patrickmonaco/formstools", ToolAuthority.WorkshopReference)]
     [InlineData("https://github.com/Cognition-Partner-Workshops/ts-plsql-oracle-forms-hrms", ToolAuthority.WorkshopReference)]
     [InlineData("https://github.com/SierraSystems/Oracle-Modernization", ToolAuthority.WorkshopReference)]
@@ -109,6 +111,25 @@ public class FleetToolsTests
             landscape.Tools, t => t.Name.Contains("Pretius", StringComparison.OrdinalIgnoreCase));
         Assert.Contains("independent verification", pretius.Limitations, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("not execution proof", pretius.Limitations, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Aws_sample_is_shadow_testing_guidance_not_forms_6_or_general_binary_proof()
+    {
+        MigrationToolDefinition tool = Assert.Single(
+            FleetTools.DescribeMigrationLandscape().Tools,
+            candidate => candidate.Name.Contains("aws-samples", StringComparison.OrdinalIgnoreCase));
+
+        Assert.Contains("shadow comparison", tool.BestFor, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("MIT-0", tool.BestFor, StringComparison.Ordinal);
+        Assert.Contains("separate MIT-licensed upstream", tool.BestFor, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("six modules, not Oracle Forms version 6", tool.Limitations, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("ROS.60050", tool.Limitations, StringComparison.Ordinal);
+        Assert.Contains("Forms 10g/12c", tool.Limitations, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("printable runs", tool.Limitations, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("not a general FMB decoder", tool.Limitations, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("retains Oracle", tool.Limitations, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("not end-to-end conversion proof", tool.Limitations, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

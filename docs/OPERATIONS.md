@@ -23,45 +23,33 @@ az group show -n rg-oracle-forms-migration-fleet-dev-b9f0e875 --query id -o tsv
 az ad app list --display-name 'Migration Fleet Workbench - dev' --query "[0].appId" -o tsv
 ```
 
-## Full deploy
+## Deploy an application revision
 
-Use this when infrastructure, authentication, or configuration changed.
+Deployable images are built by the GitHub runner and tagged from the commit. Dispatch the same workflow
+that runs automatically after a reviewed change reaches `main`:
 
 ```powershell
-.\infra\workbench\Deploy-Workbench.ps1 `
-  -ResourceGroupName 'rg-oracle-forms-migration-fleet-dev-b9f0e875' `
-  -ImageTag 'vN' `
-  -FoundryAgentEndpoint '<canonical endpoint>'
+gh workflow run deploy.yml --repo rxt64/oracle-forms-migration-fleet -f migrate-data=true
 ```
 
-The endpoint must be the canonical hosted-agent form or the script refuses to deploy:
+The runner authenticates with OIDC, builds and pushes the commit-addressed image, configures the
+host-owned PostgreSQL sandbox and model deployments, and updates the Container App. Do not run
+`az acr build` or `docker build` from a workstation for a deployable image.
+
+The Foundry endpoint configured by infrastructure must use the canonical hosted-agent form:
 
 ```
 https://<account>.services.ai.azure.com/api/projects/<project>/agents/<agent>/endpoint/protocols/openai/responses?api-version=v1
 ```
 
-The script rotates the Entra client secret on every run. It **throws if two `container-app-auth-*`
-credentials already exist**, which is intentional: you are meant to smoke-test the new revision, then
-delete the superseded credential before rotating again.
+`Deploy-Workbench.ps1` is a privileged first-time infrastructure and Entra bootstrap tool, not the
+application release path. It rotates the Entra client secret and **throws if two `container-app-auth-*`
+credentials already exist**. Smoke-test a bootstrap revision, then delete the superseded credential.
+It accepts only a 12-character commit tag that already exists in ACR and never builds an image. The
+foundation/build-only/auth sequence is documented in [infra/workbench/README.md](../infra/workbench/README.md).
 
 ```powershell
 az ad app credential delete --id <appId> --key-id <oldKeyId>
-```
-
-## Image-only redeploy
-
-Use this when **only application code changed**. It is faster, and it touches neither Microsoft Graph nor
-the existing auth credential — which matters when Graph is unavailable (see Failure modes).
-
-```powershell
-az acr build --registry acrofmfleedevykbpnrpd `
-  --image migration-fleet-workbench:vN `
-  --file src\oracle-forms-migration-fleet\Dockerfile `
-  src\oracle-forms-migration-fleet --no-logs -o json
-
-az containerapp update --name ca-ofmfleet-dev-ykbpnrpd `
-  --resource-group rg-oracle-forms-migration-fleet-dev-b9f0e875 `
-  --image acrofmfleedevykbpnrpd.azurecr.io/migration-fleet-workbench:vN
 ```
 
 ## Verify a deploy
@@ -103,30 +91,13 @@ az containerapp update -n ca-ofmfleet-dev-ykbpnrpd -g rg-oracle-forms-migration-
 
 ## Failure modes
 
-**`az acr build --no-logs` exits 0 even when the build failed.** This is the most dangerous one, because
-it looks like success. Always assert the status explicitly:
-
-```powershell
-if ($buildRun.status -ne 'Succeeded') { throw "ACR build failed: $($buildRun.status)" }
-```
-
-**Streaming ACR logs crashes the Azure CLI on Windows.** The CLI writes build output through colorama to
-a cp1252 console, so a single non-ASCII character — vite's `✓` is enough — aborts the client with
-`UnicodeEncodeError: 'charmap' codec can't encode character '\u2713'`. The *server-side build keeps
-going*; only the local streamer died. This is why the deploy script uses `--no-logs`. To read logs
-safely, redirect to a file:
-
-```powershell
-az acr task logs --registry acrofmfleedevykbpnrpd --run-id <id> 2>&1 | Out-File "$env:TEMP\acr.log" -Encoding utf8
-```
-
 **Continuous access evaluation blocks Graph while ARM still works.** `az ad app ...` fails with
-`InteractionRequired` / `TokenCreatedWithOutdatedPolicies` while `az acr build` and `az containerapp
-update` succeed normally. Credential rotation needs Graph; an image-only redeploy does not. If you only
-changed code, take the image-only path rather than re-authenticating.
+`InteractionRequired` / `TokenCreatedWithOutdatedPolicies` while ARM calls still work. Credential
+rotation in the privileged bootstrap needs Graph; a normal GitHub runner release does not rotate that
+credential. If only application code changed, use the runner workflow rather than re-running bootstrap.
 
-**`minReplicas` is 0.** The first request after a new revision can take 60–90 seconds or return 504.
-Warm it before concluding anything is broken.
+**The workbench stays warm at one replica.** A 504 is not an expected cold start. Inspect revision health,
+startup logs, Easy Auth, and traffic weight before retrying.
 
 **A request during a revision switch can 404.** Routes that exist will briefly appear missing while
 traffic moves. Re-probe before debugging the route.

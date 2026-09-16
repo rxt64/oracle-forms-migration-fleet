@@ -6,6 +6,10 @@ name: Deploy workbench
 on:
   workflow_dispatch:
     inputs:
+      deploy-app:
+        description: 'Update the existing Container App after building the image'
+        type: boolean
+        default: true
       migrate-data:
         description: 'Configure the sandbox database target on the workbench'
         type: boolean
@@ -73,7 +77,7 @@ jobs:
           echo "TAG=$TAG" >> "$GITHUB_ENV"
 
       - name: Configure the sandbox database target
-        if: ${{ inputs.migrate-data }}
+        if: ${{ github.event_name == 'push' || (inputs.deploy-app && inputs.migrate-data) }}
         run: |
           az containerapp update \
             --name "$CONTAINER_APP" \
@@ -85,6 +89,7 @@ jobs:
             --output none
 
       - name: Configure the review and repair agents
+        if: ${{ github.event_name == 'push' || inputs.deploy-app }}
         run: |
           az containerapp update \
             --name "$CONTAINER_APP" \
@@ -96,6 +101,7 @@ jobs:
             --output none
 
       - name: Deploy the image
+        if: ${{ github.event_name == 'push' || inputs.deploy-app }}
         run: |
           az containerapp update \
             --name "$CONTAINER_APP" \
@@ -104,6 +110,7 @@ jobs:
             --output none
 
       - name: Report what is running
+        if: ${{ github.event_name == 'push' || inputs.deploy-app }}
         run: |
           az containerapp show \
             --name "$CONTAINER_APP" \

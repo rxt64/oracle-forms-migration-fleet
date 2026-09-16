@@ -10,8 +10,7 @@ namespace OracleFormsMigrationFleet.Tests;
 /// </summary>
 public class MigrationWorkbenchCatalogTests
 {
-    private static readonly string[] s_neverConnected =
-        ["key-vault", "blob-storage", "database-target", "execution-adapters"];
+    private static readonly string[] s_neverConnected = ["key-vault", "blob-storage"];
 
     private static MigrationRunRequest Request(
         ExecutionMode mode,
@@ -139,6 +138,8 @@ public class MigrationWorkbenchCatalogTests
         Assert.Equal(AzureComponentState.Active, components.Single(c => c.Id == "foundry-hosted-agent").State);
         Assert.Equal(AzureComponentState.NotConfigured, components.Single(c => c.Id == "managed-identity").State);
         Assert.Equal(AzureComponentState.NotConfigured, components.Single(c => c.Id == "entra-id").State);
+        Assert.Equal(AzureComponentState.NotConfigured, components.Single(c => c.Id == "database-target").State);
+        Assert.Equal(AzureComponentState.Active, components.Single(c => c.Id == "execution-adapters").State);
         Assert.All(components, component =>
         {
             Assert.False(string.IsNullOrWhiteSpace(component.Evidence));
@@ -208,8 +209,10 @@ public class MigrationWorkbenchCatalogTests
         Assert.Equal([1, 2, 3, 4, 5, 6], [.. hops.Select(h => h.Order)]);
         Assert.Equal(AzureComponentState.NotConfigured, hops.Single(h => h.Order == 2).State);
         Assert.Equal(AzureComponentState.NotConfigured, hops.Single(h => h.Order == 4).State);
-        Assert.Equal(AzureComponentState.Planned, hops.Single(h => h.Order == 6).State);
-        Assert.Equal(AzureComponentState.Planned, hops.Single(h => h.Order == 5).State);
+        Assert.Equal(AzureComponentState.NotConfigured, hops.Single(h => h.Order == 6).State);
+        Assert.Equal(
+            telemetryConfigured ? AzureComponentState.Active : AzureComponentState.NotConfigured,
+            hops.Single(h => h.Order == 5).State);
     }
 
     [Fact]
@@ -222,7 +225,8 @@ public class MigrationWorkbenchCatalogTests
         Assert.Equal(MigrationRunPlanner.Disclaimers, bootstrap.Disclaimers);
         Assert.Equal(MigrationWorkbenchCatalog.ExecutionBoundary, bootstrap.ExecutionBoundary);
         Assert.False(bootstrap.AgentChatAvailable);
-        Assert.Contains("No execution adapter is connected", bootstrap.ExecutionBoundary, StringComparison.Ordinal);
+        Assert.Contains("approved sandbox phases may write", bootstrap.ExecutionBoundary, StringComparison.Ordinal);
+        Assert.Contains("production cutover are not executable", bootstrap.ExecutionBoundary, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -254,6 +258,24 @@ public class MigrationWorkbenchCatalogTests
             bootstrap.AzureComponents.Single(c => c.Id == "entra-id").State);
         Assert.All(bootstrap.AzureComponents.Where(c => s_neverConnected.Contains(c.Id)),
             component => Assert.Equal(AzureComponentState.Planned, component.State));
+    }
+
+    [Fact]
+    public void Host_configured_sandbox_activates_the_database_target_without_claiming_cutover()
+    {
+        WorkbenchBootstrap bootstrap = MigrationWorkbenchCatalog.Bootstrap(
+            applicationInsightsConfigured: true,
+            managedIdentityConfigured: true,
+            sandboxDatabaseConfigured: true);
+
+        Assert.Equal(
+            AzureComponentState.Active,
+            bootstrap.AzureComponents.Single(component => component.Id == "database-target").State);
+        Assert.Equal(
+            AzureComponentState.Active,
+            bootstrap.Topology.Single(hop => hop.Order == 6).State);
+        Assert.False(MigrationWorkbenchCatalog.ProductionAdapterConnected);
+        Assert.Contains("separately approved", bootstrap.Topology.Single(hop => hop.Order == 6).Detail, StringComparison.Ordinal);
     }
 
     [Fact]

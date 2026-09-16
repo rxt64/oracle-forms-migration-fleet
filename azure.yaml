@@ -45,7 +45,7 @@ services:
             resources:
                 cpu: "0.5"
                 memory: 1Gi
-        description: Assessment and migration-planning fleet for Oracle Forms applications targeting Azure SQL Database or Azure SQL Managed Instance. A model-backed outer agent fronts a deterministic specialist fleet (inventory analyst, dependency mapper, target-platform advisor, conversion planner, validation reviewer) with a human approval gate. Assessment and planning only — no migration is executed.
+        description: Assessment and migration-planning agent for Oracle Forms applications targeting PostgreSQL or the Azure SQL family. A companion Entra-protected Container Apps workbench runs deterministic, approval-gated source normalization, React/Java generation, PostgreSQL conversion, build, sandbox migration, and reconciliation adapters. The hosted agent does not independently deploy customer resources or approve production cutover.
         displayName: Oracle Forms Migration Fleet (.NET, Agent Framework)
         kind: hosted
         metadata:
@@ -56,6 +56,7 @@ services:
                 - .NET
                 - Oracle Forms
                 - Azure SQL
+                - PostgreSQL
         name: oracle-forms-migration-fleet
         protocols:
             - protocol: responses
