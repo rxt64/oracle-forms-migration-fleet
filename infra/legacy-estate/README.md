@@ -71,7 +71,7 @@ private endpoint, Key Vault, persistent storage, backup, and recovery controls.
 Select the intended subscription before deploying:
 
 ```powershell
-az account set --subscription d4394e57-c076-4c92-a870-5de6bf44f255
+az account set --subscription '<subscription-id-or-name>'
 ```
 
 ## Deploy

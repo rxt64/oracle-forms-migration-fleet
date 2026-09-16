@@ -27,6 +27,12 @@ $clientSecret = $null
 $deploymentParameters = $null
 $deploymentParametersJson = $null
 
+$operatorPrincipalObjectIds = @($env:WORKBENCH_OPERATOR_PRINCIPAL_OBJECT_IDS -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+if ($operatorPrincipalObjectIds.Count -eq 0 -or
+    @($operatorPrincipalObjectIds | Where-Object { $_ -notmatch '^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$' }).Count -gt 0) {
+    throw 'WORKBENCH_OPERATOR_PRINCIPAL_OBJECT_IDS must contain one or more comma-separated Microsoft Entra object IDs.'
+}
+
 function Invoke-AzJson {
     param([Parameter(Mandatory)][string[]] $Arguments)
     $result = & az @Arguments --output json --only-show-errors 2>&1

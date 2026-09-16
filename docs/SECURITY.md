@@ -91,5 +91,5 @@ bug, not a UX bug.
 
 ## Reporting
 
-This is a private repository. Raise a security concern as a GitHub issue with the `security` label, or
-directly to the repository owner.
+Report security concerns directly to the repository owner. Do not place credentials, exploit details,
+customer data, or other sensitive material in a public GitHub issue.

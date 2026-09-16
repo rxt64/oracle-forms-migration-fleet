@@ -81,6 +81,12 @@ Notable changes to behaviour, with the reasoning that is not visible in a diff.
 
 ### Fixed
 
+- Public-release hygiene removes tenant-specific operator and subscription identifiers from the current
+  source tree. The workbench operator allowlist is now supplied through
+  `WORKBENCH_OPERATOR_PRINCIPAL_OBJECT_IDS`, validated before bootstrap, and consumed only while Bicep
+  parameters are compiled. Generated ARM JSON is no longer tracked, and security reporting no longer
+  directs sensitive disclosures into a public issue.
+
 - Workbench capability disclosure now follows the runtime configuration. The UI no longer promises that
   databases are never touched while offering an approved PostgreSQL sandbox run. Bootstrap marks the
   host-fixed database target active only when `SANDBOX_PGHOST` and `SANDBOX_PGUSER` bind the gateway, and

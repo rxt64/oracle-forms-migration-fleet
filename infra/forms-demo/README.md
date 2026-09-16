@@ -51,13 +51,13 @@ They require their own authorized representative artifacts and differential acce
 - Azure CLI with the Bicep component
 - Rights to build in the existing ACR, read the database Container App secret, deploy resource-group
   resources, and assign registry-scoped `AcrPull`
-- Subscription `d4394e57-c076-4c92-a870-5de6bf44f255`
+- An Azure subscription containing the shared migration-fleet development resources
 - Resource group `rg-oracle-forms-migration-fleet-dev-b9f0e875` in `eastus2`
 
 Select the intended subscription before deployment:
 
 ```powershell
-az account set --subscription d4394e57-c076-4c92-a870-5de6bf44f255
+az account set --subscription '<subscription-id-or-name>'
 ```
 
 ## Deploy

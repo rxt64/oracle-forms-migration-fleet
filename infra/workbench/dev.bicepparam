@@ -5,6 +5,4 @@ param workloadToken = 'ofmfleet'
 param environmentName = 'dev'
 param foundryAccountName = 'cog-czusrhcg4gpm2'
 param foundryProjectName = 'oracle-forms-migration-fleet-dev'
-param operatorPrincipalObjectIds = [
-	'dd84da40-177f-47b9-9c4d-4b657ee4de36'
-]
+param operatorPrincipalObjectIds = split(readEnvironmentVariable('WORKBENCH_OPERATOR_PRINCIPAL_OBJECT_IDS'), ',')

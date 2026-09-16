@@ -1,5 +1,7 @@
 # azd environment — endpoints and secrets, never commit
 .azure
+infra/workbench/dev.json
+infra/workbench/main.json
 
 # Local environment files — never commit
 .env

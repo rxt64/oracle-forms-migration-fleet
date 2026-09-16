@@ -15,11 +15,15 @@ The browser never receives an Azure token or the hosted-agent endpoint. The ASP.
 From an already authenticated Azure CLI session:
 
 ```powershell
+$env:WORKBENCH_OPERATOR_PRINCIPAL_OBJECT_IDS = '<entra-object-id>[,<entra-object-id>]'
+
 .\infra\workbench\Preview-WorkbenchInfrastructure.ps1 `
   -ResourceGroupName 'rg-oracle-forms-migration-fleet-dev-b9f0e875'
 ```
 
-The preview compiles Bicep, runs resource-group what-if, and prints only sanitized resource type/name changes.
+The allowlist accepts comma-separated Microsoft Entra object IDs and is read at Bicep parameter-build
+time; it is not stored in source control. The preview compiles Bicep, runs resource-group what-if, and
+prints only sanitized resource type/name changes.
 
 ## Deploy application revisions
 
