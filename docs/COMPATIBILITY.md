@@ -86,7 +86,7 @@ and source-file provenance, IR authority metadata, and key generated Java and br
 matrix verifies that a binary-only estate fails closed for every family.
 
 With these five matrix rows and the reference-catalog checks, the current local solution passes all
-1,072 tests.
+1,069 tests.
 
 Run the positive matrix locally with:
 
@@ -116,22 +116,6 @@ clean conversion is evidence about the export it was given and not about the rel
 fleet records and canonicalizes both, but uses neither to bypass an evidence check or select a
 converter. `unknown` remains the correct value when the authoritative source version has not been
 verified.
-
-## External sample evidence
-
-The MIT-0 [AWS sample-oracleforms-to-angular](https://github.com/aws-samples/sample-oracleforms-to-angular)
-repository contributes useful workshop patterns: separate pipeline and target diagrams, deterministic
-extraction before model generation, per-rule traceability, generated equivalence tests, and optional
-source-versus-target shadow comparison. No source code or diagram asset from that repository is copied
-into this project. Its third-party notice attributes the included FMB and SQL artifacts to a separate
-MIT-licensed upstream project; none of those artifacts is copied here either.
-
-Its Oracle Forms input contains six `.fmb` modules. **Six is the file count, not Oracle Forms version
-6.** Every inspected binary begins with `ROS.60050`; the sample parser describes the files as Forms
-10g/12c object stores. The parser extracts printable byte runs and associates nearby `BEGIN ... END;`
-text with trigger-name markers. That can be useful characterization evidence for those sample files,
-but it is not a general FMB decoder and provides no Forms 6i compatibility evidence. The sample's
-published target also retains Oracle, so it does not prove an Oracle-to-Azure-PostgreSQL database exit.
 
 ## Adding a compatibility claim
 

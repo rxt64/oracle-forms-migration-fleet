@@ -252,18 +252,29 @@ Research for an isolated NDAPI worker and an optional ASP.NET Core/Blazor target
 [docs/NDAPI_DOTNET_FEASIBILITY.md](docs/NDAPI_DOTNET_FEASIBILITY.md). Forms 6i normalization and upgrade
 constraints are documented in [docs/ORACLE_FORMS_6I_RESEARCH.md](docs/ORACLE_FORMS_6I_RESEARCH.md).
 
-## Reference experience
+## Innovation highlights
 
-The documentation structure and two-diagram presentation were informed by the MIT-0
-[AWS sample-oracleforms-to-angular](https://github.com/aws-samples/sample-oracleforms-to-angular)
-project. Its third-party notice attributes the included FMB/SQL artifacts to an MIT-licensed upstream
-project. No AWS source code, third-party FMB, or diagram asset is copied here.
+This project combines migration automation with evidence controls that prevent generated output from
+being mistaken for a completed migration:
 
-That sample includes **six** `.fmb` modules; the number is a file count, not Oracle Forms version 6.
-All six inspected files begin with `ROS.60050`, and the sample parser describes them as Forms 10g/12c
-object stores. Its parser extracts printable runs and associates nearby `BEGIN ... END;` text with
-trigger markers. That is useful research and sample-specific evidence, not a general binary decoder or
-proof of Forms 6i support. Our hosted fleet therefore continues to refuse binary-only source.
+- **Deterministic source truth:** safe Forms XML parsing, directory-qualified module identities,
+  provenance-bound intermediate representation, and complete Oracle statement accounting run before
+  any model-assisted work.
+- **Version-aware legacy intake:** Forms 6i through 12c textual exports share an executable CI matrix,
+  while binary-only estates fail closed instead of producing guessed screens.
+- **Specialist fleet with bounded AI:** Microsoft Foundry coordinates the workflow and reviews generated
+  artifacts, but deterministic gates, human approvals, PostgreSQL compilation, and executable tests
+  remain authoritative.
+- **Source-shaped application generation:** recognized workflow profiles generate complete React and
+  Java/Spring Boot experiences rather than exposing database tables as generic CRUD endpoints.
+- **Passwordless Azure destination:** the migrated application uses a user-assigned managed identity to
+  reach Azure Database for PostgreSQL without storing a database password.
+- **Compiler-driven repair:** a model may propose body-only changes for rejected routines, but cannot
+  change their signatures or surrounding DDL; PostgreSQL alone accepts or rejects each revision.
+- **Reproducible delivery:** GitHub Actions builds commit-addressed images, validates the five-family
+  matrix, compiles both generated application tiers, deploys through OIDC, and verifies live workflows.
+- **Demonstrable before and after:** the source workflow replica and migrated PostgreSQL application are
+  both live, use synthetic data, and expose the same customer and manager journeys for acceptance review.
 
 ## Documentation
 

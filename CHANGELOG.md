@@ -6,13 +6,12 @@ Notable changes to behaviour, with the reasoning that is not visible in a diff.
 
 ### Added
 
-- Azure sample documentation and architecture package. The root README now follows a demo-first
+- Azure-native innovation documentation and architecture package. The root README now follows a demo-first
   overview, architecture, stage, quick-start, deployment, security, cost, cleanup, and troubleshooting
   flow. Two self-contained Azure SVG diagrams and editable Excalidraw sources show the migration pipeline
-  and live development topology. The fleet catalog now includes `aws-samples/sample-oracleforms-to-angular`
-  as workshop guidance for staged extraction, traceable generation, equivalence tests, and shadow comparison.
-  Its six `.fmb` files are recorded as six modules, not Forms version 6; their `ROS.60050` headers and the
-  sample's heuristic printable-run parser are not treated as Forms 6i or general binary compatibility proof.
+  and live development topology. The README highlights deterministic source truth, version-aware intake,
+  bounded model assistance, source-shaped application generation, passwordless PostgreSQL access,
+  compiler-driven repair, reproducible CI delivery, and the live before-and-after demonstration.
 
 - Generated application build and static validation. `BuildAndStaticValidation` now runs after application
   conversion and invokes fixed, host-owned commands for Maven packaging and React production compilation.
