@@ -22,9 +22,11 @@ The development deployment was revalidated on 2026-09-16:
 - Migrated destination: <https://ca-ofmfleet-mig-dev-ykbpnrpd.jollyground-7a57bcec.eastus2.azurecontainerapps.io/>
 - Both applications passed customer authentication and loaded account `500001`, its balance, and posted transactions from their respective databases.
 - Both applications passed manager authentication and loaded the authorization-gated submitted-account-request worklist.
-- The destination reported a connected PostgreSQL database. Azure reported revision `ca-ofmfleet-mig-dev-ykbpnrpd--0000008` running and ready from image `northstar-migrated:3c496b0e2d22`.
+- Fleet regeneration through `MigrationExecutor` completed with no difference from the committed destination. The deployment gate repeated that proof with `FLEET_REGENERATE_DEMO=0` before compiling or deploying anything.
+- GitHub Actions run `35145533631` built a new image from the validated commit, resolved its immutable manifest, and deployed `northstar-migrated@sha256:b79f52a82773d3b5ca828ae056528ff5ddb885b6d7b195923bf9dc2a162a9154`.
+- Azure reported revision `ca-ofmfleet-mig-dev-ykbpnrpd--0000010` running and ready from that exact digest. The workflow verified PostgreSQL 16 and completed request `1012`, account `500009`, and transaction `9017`.
 - The deployed destination `app.js` matched the fleet-generated artifact byte-for-byte at SHA-256 `0169ef470cecca57785e1ef4e5f31736a60a8c8b8ebeb50cf29f7623e892e22b`.
-- At that acceptance checkpoint, the local solution passed all 1,062 tests, and GitHub Actions CI run `35055850554` passed its build, test, and container-image jobs.
+- The local solution passed all 1,069 tests, and GitHub Actions CI run `35145533573` passed its build, test, five-family textual matrix, and container-image jobs.
 
 This evidence applies only to the synthetic Northstar path and the deployment above. It does not establish general Oracle Forms release compatibility.
 
