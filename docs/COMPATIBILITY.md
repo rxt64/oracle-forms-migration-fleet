@@ -14,6 +14,20 @@ link is not compatibility evidence.
 | PostgreSQL target | Azure Database for PostgreSQL 16 | The live development target reports major version `16`. |
 | Application target | Java 21 / Spring Boot 3.3.5 and a browser client | GitHub Actions compiles the generated application and runs its generated route tests before deployment. |
 
+### Live acceptance evidence
+
+The development deployment was revalidated on 2026-09-16:
+
+- Source workflow replica: <https://ca-ofmfleet-forms-dev-ykbpnrpd.jollyground-7a57bcec.eastus2.azurecontainerapps.io/>
+- Migrated destination: <https://ca-ofmfleet-mig-dev-ykbpnrpd.jollyground-7a57bcec.eastus2.azurecontainerapps.io/>
+- Both applications passed customer authentication and loaded account `500001`, its balance, and posted transactions from their respective databases.
+- Both applications passed manager authentication and loaded the authorization-gated submitted-account-request worklist.
+- The destination reported a connected PostgreSQL database. Azure reported revision `ca-ofmfleet-mig-dev-ykbpnrpd--0000008` running and ready from image `northstar-migrated:3c496b0e2d22`.
+- The deployed destination `app.js` matched the fleet-generated artifact byte-for-byte at SHA-256 `0169ef470cecca57785e1ef4e5f31736a60a8c8b8ebeb50cf29f7623e892e22b`.
+- The local solution passed all 1,062 tests, and GitHub Actions CI run `35055850554` passed its build, test, and container-image jobs.
+
+This evidence applies only to the synthetic Northstar path and the deployment above. It does not establish general Oracle Forms release compatibility.
+
 The defensible demo statement is:
 
 > A representative migration from an Oracle Forms 12.2.1.4-style XML export backed by Oracle
