@@ -81,6 +81,14 @@ Notable changes to behaviour, with the reasoning that is not visible in a diff.
 
 ### Fixed
 
+- Migrated-demo deployment now runs the fleet's generator-drift test as a required validation step before
+  compiling or deploying the destination. The test executes `MigrationExecutor` over the checked-in Oracle
+  estate and Forms XML and compares every generated application file with `demo/northstar-migrated`.
+  Hand-edited, missing, or stale application source therefore blocks deployment rather than racing an
+  independent CI failure. The deployment always rebuilds from that commit, resolves the ACR manifest digest,
+  deploys the immutable digest rather than a mutable tag, and verifies the Container App references the exact
+  image. Fixture discovery is recursive, and changes to generator code or source-estate inputs trigger the gate.
+
 - Public-release hygiene removes tenant-specific operator and subscription identifiers from the current
   source tree. The workbench operator allowlist is now supplied through
   `WORKBENCH_OPERATOR_PRINCIPAL_OBJECT_IDS`, validated before bootstrap, and consumed only while Bicep

@@ -7,7 +7,11 @@ on:
     paths:
       - .github/workflows/deploy-migrated-demo.yml
       - demo/northstar-migrated/**
+      - infra/forms-demo/estate/**
+      - infra/legacy-estate/oracle/initdb/**
       - infra/northstar-migrated/**
+      - src/oracle-forms-migration-fleet/Fleet/Execution/**
+      - tests/oracle-forms-migration-fleet.Tests/DemoFixtureTests.cs
 
 permissions:
   contents: read
@@ -31,6 +35,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -43,6 +51,14 @@ jobs:
           node-version: '22'
           cache: npm
           cache-dependency-path: demo/northstar-migrated/frontend/package-lock.json
+
+      - name: Prove destination is fleet-generated
+        env:
+          FLEET_REGENERATE_DEMO: '0'
+        run: >-
+          dotnet test tests/oracle-forms-migration-fleet.Tests/oracle-forms-migration-fleet.Tests.csproj
+          --filter "FullyQualifiedName~DemoFixtureTests.The_checked_in_demo_is_what_the_fleet_generates"
+          --verbosity minimal
 
       - name: Build browser client
         working-directory: demo/northstar-migrated/frontend
@@ -71,27 +87,32 @@ jobs:
       - name: Build and publish migrated image
         run: |
           TAG="${GITHUB_SHA::12}"
-          if az acr repository show \
+          az acr build \
+            --registry "$REGISTRY" \
+            --resource-group "$RESOURCE_GROUP" \
+            --image "$IMAGE:$TAG" \
+            --file demo/northstar-migrated/Dockerfile \
+            demo/northstar-migrated
+          DIGEST=$(az acr repository show \
             --name "$REGISTRY" \
             --image "$IMAGE:$TAG" \
-            --output none 2>/dev/null; then
-            echo "Reusing $REGISTRY.azurecr.io/$IMAGE:$TAG"
-          else
-            az acr build \
-              --registry "$REGISTRY" \
-              --resource-group "$RESOURCE_GROUP" \
-              --image "$IMAGE:$TAG" \
-              --file demo/northstar-migrated/Dockerfile \
-              demo/northstar-migrated
-          fi
+            --query digest \
+            --output tsv)
+          case "$DIGEST" in
+            sha256:*) ;;
+            *) echo "ACR returned an invalid digest: $DIGEST"; exit 1 ;;
+          esac
+          IMAGE_REF="$REGISTRY.azurecr.io/$IMAGE@$DIGEST"
           echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "IMAGE_REF=$IMAGE_REF" >> "$GITHUB_ENV"
+          echo "Built fleet-validated image $IMAGE_REF"
 
       - name: Preview destination deployment
         run: |
           az deployment group what-if \
             --resource-group "$RESOURCE_GROUP" \
             --template-file infra/northstar-migrated/main.bicep \
-            --parameters containerImage="$REGISTRY.azurecr.io/$IMAGE:$TAG" \
+            --parameters containerImage="$IMAGE_REF" \
             --no-pretty-print
 
       - name: Deploy destination application
@@ -100,7 +121,7 @@ jobs:
             --name "northstar-migrated-${GITHUB_RUN_NUMBER}" \
             --resource-group "$RESOURCE_GROUP" \
             --template-file infra/northstar-migrated/main.bicep \
-            --parameters containerImage="$REGISTRY.azurecr.io/$IMAGE:$TAG" \
+            --parameters containerImage="$IMAGE_REF" \
             --output none
 
       - name: Verify migrated banking workflows
@@ -117,6 +138,12 @@ jobs:
             --resource-group "$RESOURCE_GROUP" \
             --query properties.configuration.ingress.fqdn \
             --output tsv)
+          DEPLOYED_IMAGE=$(az containerapp show \
+            --name "$CONTAINER_APP" \
+            --resource-group "$RESOURCE_GROUP" \
+            --query properties.template.containers[0].image \
+            --output tsv)
+          test "$DEPLOYED_IMAGE" = "$IMAGE_REF"
 
           curl_json() {
             curl --fail --show-error --silent \

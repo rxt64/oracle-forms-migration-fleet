@@ -37,13 +37,22 @@ public class DemoFixtureTests
         using TemporaryWorkspace workspace = new();
 
         foreach (string script in Directory.EnumerateFiles(
-            Path.Combine(repository, "infra", "legacy-estate", "oracle", "initdb"), "*.sql"))
+            Path.Combine(repository, "infra", "legacy-estate", "oracle", "initdb"),
+            "*.sql",
+            SearchOption.AllDirectories))
         {
-            workspace.WriteFile($"legacy/forms/db/{Path.GetFileName(script)}", File.ReadAllText(script));
+            string relative = Path.GetRelativePath(
+                Path.Combine(repository, "infra", "legacy-estate", "oracle", "initdb"),
+                script).Replace(Path.DirectorySeparatorChar, '/');
+            workspace.WriteFile($"legacy/forms/db/{relative}", File.ReadAllText(script));
         }
 
-        string formsExport = Path.Combine(repository, "infra", "forms-demo", "estate", "005_bank_account_request_form.xml");
-        workspace.WriteFile($"legacy/forms/ui/{Path.GetFileName(formsExport)}", File.ReadAllText(formsExport));
+        string formsRoot = Path.Combine(repository, "infra", "forms-demo", "estate");
+        foreach (string formsExport in Directory.EnumerateFiles(formsRoot, "*.xml", SearchOption.AllDirectories))
+        {
+            string relative = Path.GetRelativePath(formsRoot, formsExport).Replace(Path.DirectorySeparatorChar, '/');
+            workspace.WriteFile($"legacy/forms/ui/{relative}", File.ReadAllText(formsExport));
+        }
 
         MigrationExecutionResult result = await new MigrationExecutor(workspace.Root, MigrationExecutor.DefaultAdapters())
             .ExecuteAsync(Request(), "migration-operator@contoso.com");
