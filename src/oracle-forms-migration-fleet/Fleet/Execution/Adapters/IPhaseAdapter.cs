@@ -18,6 +18,13 @@ public sealed record PhaseExecutionContext(
 
     public WorkspaceWriter Workspace => _workspace ??= new WorkspaceWriter(WorkspaceRoot);
 
+    /// <summary>
+    /// Outcomes of the phases the executor already ran in this run, in order. An adapter reads this to
+    /// find out whether an upstream phase produced the model it should consume; it is never a gate the
+    /// adapter can open for itself, because the executor refuses a dependent phase before calling it.
+    /// </summary>
+    public IReadOnlyList<PhaseOutcome> CompletedPhases { get; init; } = [];
+
     public void Info(string text) => Report?.Invoke("info", text);
 
     public void Warn(string text) => Report?.Invoke("warn", text);

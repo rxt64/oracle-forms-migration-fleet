@@ -162,7 +162,7 @@ export interface ExecutedArtifact {
 export interface ExecutedPhase {
   phase: string;
   plannedStatus: string;
-  state: "Executed" | "SkippedByPlanner" | "AdapterNotImplemented" | "Failed";
+  state: "Executed" | "SkippedByPlanner" | "AdapterNotImplemented" | "Failed" | "BlockedByDependency";
   detail: string | null;
   artifacts: ExecutedArtifact[];
   findings: string[];
@@ -190,6 +190,8 @@ export interface RunFields {
   applicationName: string;
   sourceRoot: string;
   outputRoot: string;
+  oracleFormsVersion: string;
+  oracleDatabaseVersion: string;
   executionApprover: string;
   productionApprover: string;
 }

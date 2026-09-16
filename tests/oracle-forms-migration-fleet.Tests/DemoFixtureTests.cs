@@ -141,6 +141,7 @@ public class DemoFixtureTests
         Evidence =
         [
             Requests.Evidence("EV-INV", EvidenceKind.FormsModuleInventory),
+            Requests.Evidence("EV-XML", EvidenceKind.FormsXmlExport),
             Requests.Evidence("EV-PLSQL", EvidenceKind.PlSqlProgramUnit),
             Requests.Evidence("EV-SCHEMA", EvidenceKind.DatabaseSchemaExport),
             Requests.Evidence("EV-TEST", EvidenceKind.TestBaseline),

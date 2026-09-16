@@ -17,6 +17,12 @@ public enum PhaseExecutionState
     Executed,
 
     Failed,
+
+    /// <summary>
+    /// A prerequisite phase ran in this same run and failed, so this phase was not invoked. The outcome
+    /// detail names the prerequisite; nothing was generated and nothing was attested.
+    /// </summary>
+    BlockedByDependency,
 }
 
 public sealed record ExecutionProgress(string Level, string Text);
@@ -70,6 +76,7 @@ public sealed class MigrationExecutor
         IApplicationBuildGateway? applicationBuild = null) =>
     [
         new SourceAnalysisAdapter(),
+        new SourceNormalizationAdapter(),
         new DatabaseConversionAdapter(reviewer, orchestrator),
         new ApplicationCodeConversionAdapter(reviewer),
         new BuildAndStaticValidationAdapter(applicationBuild),
@@ -90,6 +97,112 @@ public sealed class MigrationExecutor
         MigrationPhase.DataReconciliation => AttestationKind.DataReconciliationPassed,
         _ => null,
     };
+
+    /// <summary>
+    /// Phases whose output another phase reads, and the condition under which that prerequisite applies.
+    ///
+    /// The rule is deliberately narrow and stated once: when a dependency applies, the prerequisite has to
+    /// have reached <see cref="PhaseExecutionState.Executed"/> in this run. Nothing else counts.
+    /// <see cref="PhaseExecutionState.SkippedByPlanner"/> is tolerated only where the dependency does not
+    /// apply at all — a database-only run has no Forms source for normalization to adjudicate — and
+    /// <see cref="PhaseExecutionState.AdapterNotImplemented"/> is never success: a phase nobody ran refused
+    /// nothing and confirmed nothing.
+    ///
+    /// The earlier version bound only on an explicit failure, which meant a normalization phase that was
+    /// skipped or unimplemented left the application converter free to re-read the same tree and generate
+    /// from it, which is the exact silent-success failure this fleet is built to prevent.
+    /// </summary>
+    private sealed record PhaseDependency(MigrationPhase Prerequisite, Func<DependencyScope, bool> Applies);
+
+    /// <summary>Everything a dependency's applicability test may look at.</summary>
+    private sealed record DependencyScope(
+        MigrationRunRequest Request,
+        WorkspaceWriter Workspace,
+        MigrationRunPlan Plan,
+        IReadOnlySet<MigrationPhase> Registered)
+    {
+        /// <summary>True when the run is set up to produce the prerequisite's output at all.</summary>
+        public bool Produces(MigrationPhase phase) =>
+            Registered.Contains(phase) && Plan.Phases.Any(candidate => candidate.Phase == phase);
+    }
+
+    private static readonly Dictionary<MigrationPhase, PhaseDependency[]> s_dependencies = new()
+    {
+        // Applies whenever the run has Forms source of any kind. Without it there is nothing to normalize
+        // and a schema-only conversion is the honest outcome, so the phase may legitimately be skipped.
+        [MigrationPhase.ApplicationCodeConversion] =
+        [
+            new(MigrationPhase.SourceNormalization, FormsSourceApplies),
+        ],
+
+        // Applies whenever this run is the one that produces the application tier. Building output the run
+        // did not generate would validate whatever an earlier run happened to leave in the workspace.
+        [MigrationPhase.BuildAndStaticValidation] =
+        [
+            new(MigrationPhase.ApplicationCodeConversion, scope => scope.Produces(MigrationPhase.ApplicationCodeConversion)),
+        ],
+
+        [MigrationPhase.DifferentialBehaviorTesting] =
+        [
+            new(MigrationPhase.BuildAndStaticValidation, scope => scope.Produces(MigrationPhase.BuildAndStaticValidation)),
+        ],
+    };
+
+    /// <summary>
+    /// Whether this run has Forms source for normalization to adjudicate.
+    ///
+    /// A workspace that exceeds an intake limit answers neither yes nor no, so it answers yes: the
+    /// prerequisite applies, the conversion stays blocked, and the run cannot reach a generated
+    /// application tier on the strength of a question nothing was able to settle.
+    /// </summary>
+    private static bool FormsSourceApplies(DependencyScope scope)
+    {
+        try
+        {
+            return FormsSourcePresence.Applies(scope.Request, scope.Workspace, WorkspacePath.Normalize(scope.Request.SourceRoot));
+        }
+        catch (WorkspaceLimitExceededException)
+        {
+            return true;
+        }
+    }
+
+    /// <summary>The unmet prerequisite and why it is unmet, or nothing when every prerequisite is clear.</summary>
+    private static (MigrationPhase Prerequisite, string Reason)? BlockingDependency(        MigrationPhase phase,
+        IReadOnlyList<PhaseOutcome> completed,
+        DependencyScope scope)
+    {
+        if (!s_dependencies.TryGetValue(phase, out PhaseDependency[]? required))
+        {
+            return null;
+        }
+
+        foreach (PhaseDependency dependency in required)
+        {
+            if (!dependency.Applies(scope))
+            {
+                continue;
+            }
+
+            PhaseOutcome? outcome = completed.FirstOrDefault(candidate => candidate.Phase == dependency.Prerequisite);
+
+            if (outcome is { State: PhaseExecutionState.Executed })
+            {
+                continue;
+            }
+
+            return (dependency.Prerequisite, outcome?.State switch
+            {
+                PhaseExecutionState.Failed => "it failed in this run",
+                PhaseExecutionState.BlockedByDependency => "it was itself blocked by an unmet prerequisite",
+                PhaseExecutionState.SkippedByPlanner => "the planner did not authorize it, so nothing adjudicated the source it covers",
+                PhaseExecutionState.AdapterNotImplemented => "no adapter is registered for it, so nothing adjudicated the source it covers",
+                _ => "it did not run",
+            });
+        }
+
+        return null;
+    }
 
     public async Task<MigrationExecutionResult> ExecuteAsync(
         MigrationRunRequest request,
@@ -126,7 +239,11 @@ public sealed class MigrationExecutor
             Report("warn", "No usable operator identity was supplied, so no attestation will be produced for any phase.");
         }
 
-        foreach (PhasePlan phase in plan.Phases.OrderBy(phase => phase.Phase))
+        // Declaration order of MigrationPhase is an identity scheme with frozen numbers, not a sequence.
+        // Sorting by the enum would run source normalization after the conversion that depends on it.
+        DependencyScope scope = new(request, _workspace, plan, _adapters.Keys.ToHashSet());
+
+        foreach (PhasePlan phase in plan.Phases.OrderBy(phase => MigrationLifecycle.PositionOf(phase.Phase)))
         {
             cancellationToken.ThrowIfCancellationRequested();
 
@@ -146,6 +263,18 @@ public sealed class MigrationExecutor
                 continue;
             }
 
+            if (BlockingDependency(phase.Phase, outcomes, scope) is { } blocking)
+            {
+                string detail =
+                    $"{phase.Phase} was not run because its prerequisite {blocking.Prerequisite} did not complete successfully in this run: " +
+                    $"{blocking.Reason}. Running it anyway would generate from source nothing in this run adjudicated, so nothing was " +
+                    "generated and nothing was attested.";
+
+                Report("error", $"{phase.Phase}: {detail}");
+                outcomes.Add(new PhaseOutcome(phase.Phase, phase.Status, PhaseExecutionState.BlockedByDependency, [], [detail], detail));
+                continue;
+            }
+
             Report("info", $"{phase.Phase}: running {adapter.GetType().Name}.");
 
             PhaseExecutionContext context = new(
@@ -154,7 +283,10 @@ public sealed class MigrationExecutor
                 request.OutputRoot,
                 phase,
                 request,
-                Report);
+                Report)
+            {
+                CompletedPhases = [.. outcomes],
+            };
 
             PhaseExecutionResult result;
             try
@@ -165,7 +297,8 @@ public sealed class MigrationExecutor
             {
                 throw;
             }
-            catch (Exception exception) when (exception is WorkspacePathException or IOException or UnauthorizedAccessException or NotSupportedException)
+            catch (Exception exception) when (exception is WorkspaceLimitExceededException or WorkspacePathException
+                or IOException or UnauthorizedAccessException or NotSupportedException)
             {
                 result = PhaseExecutionResult.Failure($"{adapter.GetType().Name} was stopped: {exception.Message}");
             }

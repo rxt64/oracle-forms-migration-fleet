@@ -8,6 +8,20 @@ namespace OracleFormsMigrationFleet.Tests;
 /// </summary>
 internal static class OracleSamples
 {
+    /// <summary>A Forms export in the shape frmf2xml produces, declaring whichever release a test needs.</summary>
+    public static string FormsXml(string? version, string moduleName = "ORDER_ENTRY") =>
+        $"""
+         <?xml version="1.0" encoding="UTF-8"?>
+         <Module xmlns="http://xmlns.oracle.com/Forms"{(version is null ? string.Empty : $" version=\"{version}\" FormsVersion=\"{version}\"")}>
+           <FormModule Name="{moduleName}" Title="Order entry">
+             <Trigger Name="WHEN-NEW-FORM-INSTANCE" TriggerText="BEGIN NULL; END;"/>
+             <Block Name="ORDER_BLOCK" QueryDataSourceName="BANK_ACCOUNT" RecordsDisplayCount="10">
+               <Item Name="ACCOUNT_ID" ItemType="Text Item" DataType="Number" ColumnName="ACCOUNT_ID" Prompt="Account" Required="true"/>
+             </Block>
+           </FormModule>
+         </Module>
+         """;
+
     public const string Schema = """
         -- Independently designed schema for the demo legacy estate.
 

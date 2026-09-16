@@ -62,6 +62,10 @@ public static class MigrationFleetOrchestrator
 
         StageResult inventory = RunInventory(request);
         stages.Add(inventory);
+
+        assumptions.Add($"Oracle Forms release: {OracleLegacyVersionCatalog.Forms(request.OracleFormsVersion).Disposition}");
+        assumptions.Add($"Oracle Database release: {OracleLegacyVersionCatalog.Database(request.OracleDatabaseVersion).Disposition}");
+
         if (MigrationStageSequence.IsHalting(inventory.Status))
         {
             return Build(request, stages, EmptyRecommendation(inventory), [], assumptions, blockers);
@@ -143,6 +147,8 @@ public static class MigrationFleetOrchestrator
             new(role.Role, "INV-001", "Forms estate catalogued", Severity.Info,
                 "Inventory established from the supplied module inventory artifacts.",
                 [.. Cite(request, EvidenceKind.FormsModuleInventory)]),
+            VersionFinding(role.Role, "INV-004", "Oracle Forms release", OracleLegacyVersionCatalog.Forms(request.OracleFormsVersion)),
+            VersionFinding(role.Role, "INV-005", "Oracle Database release", OracleLegacyVersionCatalog.Database(request.OracleDatabaseVersion)),
         ];
 
         if (!request.Evidence.Any(e => e.Kind == EvidenceKind.FormsModuleSource && e.IsVerified))
@@ -170,8 +176,27 @@ public static class MigrationFleetOrchestrator
             "Inventory analysis complete.", findings, []);
     }
 
-    private static StageResult RunDependencyMapping(MigrationAssessmentRequest request)
-    {
+    /// <summary>
+    /// Records how an operator-supplied release string was interpreted. The value is intake metadata: it
+    /// cites no evidence because nothing verified it, and it opens nothing.
+    /// </summary>
+    private static Finding VersionFinding(FleetRole role, string code, string title, OracleVersionAssessment assessment) => new(
+        role,
+        code,
+        title,
+        assessment.Readiness switch
+        {
+            OracleConversionReadiness.Rejected => Severity.High,
+            OracleConversionReadiness.Unknown => Severity.Medium,
+            OracleConversionReadiness.AssessmentOnly => Severity.Medium,
+            _ => Severity.Info,
+        },
+        $"Supplied '{(assessment.Supplied.Length > 0 ? assessment.Supplied : OracleLegacyVersionCatalog.UnknownFamily)}', " +
+        $"interpreted as {assessment.Label} ({assessment.Readiness}). {assessment.Disposition}" +
+        (assessment.Warnings.Count > 0 ? " " + string.Join(" ", assessment.Warnings) : string.Empty),
+        []);
+
+    private static StageResult RunDependencyMapping(MigrationAssessmentRequest request)    {
         FleetRoleDefinition role = FleetRoleCatalog.Get(FleetRole.DependencyMapper);
         IReadOnlyList<string> missing = MissingEvidence(request, role.RequiredEvidence, requireAll: false);
         if (missing.Count > 0)

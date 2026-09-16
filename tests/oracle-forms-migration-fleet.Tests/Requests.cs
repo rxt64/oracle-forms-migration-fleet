@@ -43,11 +43,14 @@ internal static class Requests
         IReadOnlyList<EvidenceItem>? evidence = null,
         HumanApproval? approval = null,
         string engagementId = "ENG-001",
-        string applicationName = "ORDERS") => new()
+        string applicationName = "ORDERS",
+        string oracleFormsVersion = "12c",
+        string oracleDatabaseVersion = "19c") => new()
         {
             EngagementId = engagementId,
             ApplicationName = applicationName,
-            OracleFormsVersion = "12c",
+            OracleFormsVersion = oracleFormsVersion,
+            OracleDatabaseVersion = oracleDatabaseVersion,
             Evidence = evidence ?? [],
             Approval = approval ?? HumanApproval.Pending,
         };

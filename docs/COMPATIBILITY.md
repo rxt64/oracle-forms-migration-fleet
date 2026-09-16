@@ -35,9 +35,50 @@ The researched intake and normalization path for 6i is documented in
 [ORACLE_FORMS_6I_RESEARCH.md](ORACLE_FORMS_6I_RESEARCH.md). It keeps 6i at **accepted for assessment**
 until an authorized representative pilot passes the stated readiness gates.
 
-`oracleFormsVersion` is assessment metadata supplied by the operator. The fleet records it but does
-not use the value to bypass evidence checks or select a converter. `unknown` remains the correct value
-when the authoritative source version has not been verified.
+## Intake status by release
+
+`OracleLegacyVersionCatalog` canonicalizes the release an operator supplies and decides what evidence
+would have to arrive before an artifact could be generated. Every status below is an **intake and
+normalization route**, not a tested conversion. No row means a generated application from that release
+has been compiled, deployed, or behaviourally tested.
+
+### Oracle Forms
+
+| Release | Intake | Readiness | What the fleet actually requires |
+|---|---|---|---|
+| pre-6i (3.x, 4.x, 4.5, 5.x) | Recognized, outside the implemented range | `NormalizedTextRequired` | Oracle requires an upgrade to Forms 10.1.2 with every module and library recompiled first. Database-resident modules must be saved to the file system and client-side PL/SQL v1/v2 converted. |
+| 6i (6.0.8.x) | Accepted for assessment | `NormalizedTextRequired` | Operator-produced Forms XML. Oracle recommends bridging through Forms 10.1.2 in most cases; `FRM-18130` proves that bridge is mandatory where it is raised. Upgrade order is `.olb`, `.pll`, `.mmb`, `.fmb`. `.fmt`/`.mmt` need 6i tooling to become 6i `.fmb`/`.mmb` first. |
+| 9i | Accepted for assessment | `NormalizedTextRequired` | Operator-produced Forms XML, upgraded in the same dependency order. |
+| 10g (9.0.4, 10.1.2.x) | Accepted for assessment | `NormalizedTextRequired` | Operator-produced Forms XML. |
+| 11g (11.1.x) | Accepted for assessment | `NormalizedTextRequired` | Operator-produced Forms XML. |
+| 12c (12.2.1.x) | Accepted for assessment; the demonstrated fixture declares 12.2.1.4 | `NormalizedTextRequired` | Operator-produced Forms XML. The demonstrated path uses a synthetic hand-authored export in this shape. |
+| 14c (14.1.2) | Recognized, newer than the implemented range | `AssessmentOnly` | Recorded only. No conversion claim. |
+| unknown | Accepted | `Unknown` | Planning and assessment continue. Artifact generation reports the gap; an export that also declares no version fails the normalization phase closed. |
+| anything else | Rejected | `Rejected` | Nothing downstream treats the string as a version. |
+
+At **every** Forms release, a `.fmb`, `.mmb`, `.pll`, or `.olb` is a proprietary binary this fleet does
+not open. It counts those files by name and size and never decodes them. `SourceNormalization` fails
+closed on a binary-only estate, and `ApplicationCodeConversion` refuses to generate an application tier
+when Forms binaries exist and no readable `FormModule` XML accompanies them, at every release including
+12c. Normalization is performed by the operator, on their own Oracle installation, under their own
+licence and support terms: the fleet runs no Oracle tool and holds no `ORACLE_HOME`.
+
+### Oracle Database
+
+The database converter reads supplied DDL and PL/SQL **text**. It connects to no Oracle instance, so a
+clean conversion is evidence about the export it was given and not about the release that produced it.
+
+| Release | Intake | Readiness | Limit |
+|---|---|---|---|
+| 6, 7, 8, 8i, 9i, 10g, 11g, 12c (12.1/12.2) | Accepted | `TextEvidenceReady` | Converts the constructs present in the supplied export. Not release-wide support. |
+| 18c, 19c, 21c, 23ai / Free 23 | Accepted | `TextEvidenceReady` | Same limit. The demonstrated source database is Oracle Database Free 23. |
+| unknown | Accepted with a warning | `Unknown` | Conversion still runs from verified SQL; the report states the release was never established. |
+| anything else | Rejected | `Rejected` | The phase fails before writing any DDL. |
+
+`oracleFormsVersion` and `oracleDatabaseVersion` are assessment metadata supplied by the operator. The
+fleet records and canonicalizes both, but uses neither to bypass an evidence check or select a
+converter. `unknown` remains the correct value when the authoritative source version has not been
+verified.
 
 ## Adding a compatibility claim
 

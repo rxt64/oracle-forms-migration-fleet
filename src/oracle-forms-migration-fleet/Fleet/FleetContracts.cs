@@ -202,6 +202,9 @@ public sealed record MigrationAssessmentRequest
     [Description("Oracle Forms version, or 'unknown' when not supplied.")]
     public string OracleFormsVersion { get; init; } = "unknown";
 
+    [Description("Oracle Database version of the source estate, or 'unknown' when not supplied.")]
+    public string OracleDatabaseVersion { get; init; } = "unknown";
+
     [Description("Supplied source artifacts. An empty list produces an evidence-blocked assessment.")]
     public IReadOnlyList<EvidenceItem> Evidence { get; init; } = [];
 

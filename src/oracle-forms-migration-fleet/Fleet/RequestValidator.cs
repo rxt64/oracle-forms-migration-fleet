@@ -27,11 +27,12 @@ public static class RequestValidator
         }
 
         if (FleetGuardrails.ContainsPotentialSecret(request.EngagementId) ||
-            FleetGuardrails.ContainsPotentialSecret(request.ApplicationName) ||
-            FleetGuardrails.ContainsPotentialSecret(request.OracleFormsVersion))
+            FleetGuardrails.ContainsPotentialSecret(request.ApplicationName))
         {
             errors.Add("Request identifiers appear to contain credential material and were rejected.");
         }
+
+        errors.AddRange(OracleVersionIntake.Validate(request.OracleFormsVersion, request.OracleDatabaseVersion));
 
         if (request.Evidence is null)
         {

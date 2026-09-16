@@ -169,6 +169,182 @@ public class MigrationExecutorTests
         Assert.Equal(1, adapter.Invocations);
     }
 
+    /// <summary>
+    /// The application converter reads the same tree the normalization gate just refused, so without an
+    /// explicit dependency it would happily generate screens from table structure and present them as a
+    /// migration of modules nobody opened.
+    /// </summary>
+    [Fact]
+    public async Task A_failed_normalization_blocks_application_conversion_and_generates_nothing()
+    {
+        using TemporaryWorkspace workspace = SeededWorkspace();
+
+        MigrationExecutionResult result = await new MigrationExecutor(
+                workspace.Root,
+                [new SourceNormalizationAdapter(), new ApplicationCodeConversionAdapter()])
+            .ExecuteAsync(Request(), Operator);
+
+        Assert.Equal(PhaseExecutionState.Failed, Outcome(result, MigrationPhase.SourceNormalization).State);
+
+        PhaseOutcome application = Outcome(result, MigrationPhase.ApplicationCodeConversion);
+        Assert.Equal(PhaseExecutionState.BlockedByDependency, application.State);
+        Assert.Contains("SourceNormalization", application.Detail!, StringComparison.Ordinal);
+        Assert.Empty(application.Artifacts);
+
+        Assert.False(workspace.Exists("out/orders/application/CONVERSION_NOTES.md"));
+        Assert.False(Directory.Exists(workspace.Absolute("out/orders/application")));
+    }
+
+    [Fact]
+    public async Task A_declared_release_that_contradicts_the_run_blocks_application_conversion()
+    {
+        using TemporaryWorkspace workspace = new();
+        workspace.WriteFile("legacy/forms/db/001_schema.sql", OracleSamples.Schema);
+        workspace.WriteFile("legacy/forms/ui/ORDER_ENTRY.xml", OracleSamples.FormsXml("12.2.1.4"));
+
+        MigrationRunRequest request = Request() with { OracleFormsVersion = "6i" };
+
+        MigrationExecutionResult result = await new MigrationExecutor(
+                workspace.Root,
+                [new SourceNormalizationAdapter(), new ApplicationCodeConversionAdapter()])
+            .ExecuteAsync(request, Operator);
+
+        Assert.Equal(PhaseExecutionState.Failed, Outcome(result, MigrationPhase.SourceNormalization).State);
+        Assert.Equal(PhaseExecutionState.BlockedByDependency, Outcome(result, MigrationPhase.ApplicationCodeConversion).State);
+        Assert.False(Directory.Exists(workspace.Absolute("out/orders/application")));
+    }
+
+    [Fact]
+    public async Task A_failed_forms_normalization_does_not_stop_the_database_conversion()
+    {
+        using TemporaryWorkspace workspace = SeededWorkspace();
+
+        MigrationExecutionResult result = await new MigrationExecutor(
+                workspace.Root,
+                [new SourceNormalizationAdapter(), new DatabaseConversionAdapter()])
+            .ExecuteAsync(Request(), Operator);
+
+        Assert.Equal(PhaseExecutionState.Failed, Outcome(result, MigrationPhase.SourceNormalization).State);
+        Assert.Equal(PhaseExecutionState.Executed, Outcome(result, MigrationPhase.DatabaseConversion).State);
+        Assert.True(workspace.Exists("out/orders/database/postgresql/schema/schema.sql"));
+    }
+
+    /// <summary>
+    /// A phase nobody ran refused nothing and confirmed nothing. Letting the conversion proceed on that
+    /// basis is how a run with Forms source it never opened produced screens from table structure.
+    /// </summary>
+    [Fact]
+    public async Task An_unregistered_normalization_adapter_blocks_application_conversion_when_forms_source_exists()
+    {
+        using TemporaryWorkspace workspace = SeededWorkspace();
+
+        RecordingAdapter application = new(MigrationPhase.ApplicationCodeConversion);
+
+        MigrationExecutionResult result = await new MigrationExecutor(workspace.Root, [application])
+            .ExecuteAsync(Request(), Operator);
+
+        Assert.Equal(PhaseExecutionState.AdapterNotImplemented, Outcome(result, MigrationPhase.SourceNormalization).State);
+
+        PhaseOutcome outcome = Outcome(result, MigrationPhase.ApplicationCodeConversion);
+        Assert.Equal(PhaseExecutionState.BlockedByDependency, outcome.State);
+        Assert.Contains("no adapter is registered for it", outcome.Detail!, StringComparison.Ordinal);
+        Assert.Equal(0, application.Invocations);
+    }
+
+    /// <summary>
+    /// A database-only estate has no Forms source for normalization to adjudicate, so requiring the phase
+    /// there would refuse a schema conversion that opens no Forms file.
+    /// </summary>
+    [Fact]
+    public async Task A_database_only_run_converts_the_application_without_source_normalization()
+    {
+        using TemporaryWorkspace workspace = new();
+        workspace.WriteFile("legacy/forms/db/001_schema.sql", OracleSamples.Schema);
+
+        IReadOnlyList<EvidenceItem> noForms =
+            [.. FullEvidence().Where(item => item.Kind is not (EvidenceKind.FormsModuleSource or EvidenceKind.FormsXmlExport))];
+
+        RecordingAdapter application = new(MigrationPhase.ApplicationCodeConversion);
+
+        MigrationExecutionResult result = await new MigrationExecutor(workspace.Root, [application])
+            .ExecuteAsync(Request(evidence: noForms), Operator);
+
+        Assert.Equal(PhaseExecutionState.SkippedByPlanner, Outcome(result, MigrationPhase.SourceNormalization).State);
+        Assert.Equal(PhaseExecutionState.Executed, Outcome(result, MigrationPhase.ApplicationCodeConversion).State);
+        Assert.Equal(1, application.Invocations);
+    }
+
+    [Fact]
+    public async Task A_dependency_block_cascades_to_the_phases_downstream_of_it()
+    {
+        using TemporaryWorkspace workspace = SeededWorkspace();
+
+        RecordingAdapter build = new(MigrationPhase.BuildAndStaticValidation);
+
+        MigrationExecutionResult result = await new MigrationExecutor(
+                workspace.Root,
+                [new SourceNormalizationAdapter(), new ApplicationCodeConversionAdapter(), build])
+            .ExecuteAsync(Request(), Operator);
+
+        Assert.Equal(PhaseExecutionState.BlockedByDependency, Outcome(result, MigrationPhase.ApplicationCodeConversion).State);
+        Assert.Equal(PhaseExecutionState.BlockedByDependency, Outcome(result, MigrationPhase.BuildAndStaticValidation).State);
+        Assert.Equal(0, build.Invocations);
+    }
+
+    /// <summary>
+    /// Once normalization has adjudicated the estate, its intermediate representation is the only Forms
+    /// model the converter may read. Re-parsing the original export would let the two phases reach
+    /// different conclusions about the same tree.
+    /// </summary>
+    [Fact]
+    public async Task Application_conversion_reads_the_normalized_representation_rather_than_the_original_export()
+    {
+        using TemporaryWorkspace workspace = new();
+        workspace.WriteFile("legacy/forms/db/001_schema.sql", OracleSamples.Schema);
+        workspace.WriteFile("legacy/forms/ui/ORDER_ENTRY.xml", OracleSamples.FormsXml("12.2.1.4"));
+
+        MigrationExecutionResult result = await new MigrationExecutor(
+                workspace.Root,
+                [new SourceNormalizationAdapter(), new ApplicationCodeConversionAdapter()])
+            .ExecuteAsync(Request() with { OracleFormsVersion = "12c" }, Operator);
+
+        Assert.Equal(PhaseExecutionState.Executed, Outcome(result, MigrationPhase.SourceNormalization).State);
+        Assert.Equal(PhaseExecutionState.Executed, Outcome(result, MigrationPhase.ApplicationCodeConversion).State);
+
+        Assert.Contains(result.Progress, entry =>
+            entry.Text.Contains("normalized Forms module(s) from out/orders/intermediate/forms-ir.json", StringComparison.Ordinal)
+            && entry.Text.Contains("original exports were not re-read", StringComparison.Ordinal));
+
+        // The module reached the generated application through the IR, not through a second parse.
+        Assert.Contains("**1 Forms module(s) were read from an XML export.**", workspace.Read("out/orders/application/CONVERSION_NOTES.md"), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_corrupt_normalized_representation_refuses_rather_than_generating_from_the_schema()
+    {
+        using TemporaryWorkspace workspace = new();
+        workspace.WriteFile("legacy/forms/db/001_schema.sql", OracleSamples.Schema);
+        workspace.WriteFile("legacy/forms/ui/ORDER_ENTRY.xml", OracleSamples.FormsXml("12.2.1.4"));
+        workspace.WriteFile("out/orders/intermediate/forms-ir.json", "{ \"modules\": 7 }");
+
+        MigrationRunRequest request = Request() with { OracleFormsVersion = "12c" };
+        PhasePlan plan = MigrationRunPlanner.Plan(request).Phases.Single(phase => phase.Phase == MigrationPhase.ApplicationCodeConversion);
+
+        PhaseExecutionResult result = await new ApplicationCodeConversionAdapter().ExecuteAsync(
+            new PhaseExecutionContext(workspace.Root, request.SourceRoot, request.OutputRoot, plan, request, (_, _) => { })
+            {
+                CompletedPhases =
+                [
+                    new PhaseOutcome(MigrationPhase.SourceNormalization, PhaseStatus.Planned, PhaseExecutionState.Executed, [], [], null),
+                ],
+            },
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("was refused", result.FailureReason!, StringComparison.Ordinal);
+        Assert.False(workspace.Exists("out/orders/application/CONVERSION_NOTES.md"));
+    }
+
     [Fact]
     public void An_approved_sandbox_run_is_authorized_without_forms_evidence()
     {
@@ -451,7 +627,10 @@ public class MigrationExecutorTests
         MigrationExecutor executor = new(workspace.Root, [new SourceAnalysisAdapter(), new DatabaseConversionAdapter()]);
         MigrationExecutionResult result = await executor.ExecuteAsync(Request(), Operator, streamed.Add);
 
-        Assert.Equal(result.Phases.Select(outcome => outcome.Phase).OrderBy(phase => phase), result.Phases.Select(outcome => outcome.Phase));
+        // MigrationPhase numbers are a frozen identity scheme, so lifecycle order is stated separately.
+        Assert.Equal(
+            result.Phases.Select(outcome => outcome.Phase).OrderBy(MigrationLifecycle.PositionOf),
+            result.Phases.Select(outcome => outcome.Phase));
         Assert.Equal(result.Progress.Count, streamed.Count);
         Assert.Contains(streamed, entry => entry.Level == "done" && entry.Text.Contains("SourceAnalysis", StringComparison.Ordinal));
 

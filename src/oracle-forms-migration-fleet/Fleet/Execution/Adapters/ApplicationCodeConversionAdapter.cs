@@ -8,6 +8,12 @@ namespace OracleFormsMigrationFleet.Fleet.Execution.Adapters;
 /// <summary>
 /// Generates the Azure-targeted application tier so a run migrates the application, not only its schema.
 ///
+/// This phase reads no Forms source directly. Whether the estate has readable Forms modules is decided by
+/// <see cref="MigrationPhase.SourceNormalization"/>, and the normalized intermediate representation it
+/// wrote is the only Forms model this adapter consumes. It used to fall back to re-parsing the original
+/// exports when normalization had not run, which meant the estate normalization refused could be read a
+/// second time here and generated from anyway; that fallback is gone, and there is no bypass for it.
+///
 /// Output goes to the operator's session workspace like every other adapter, and the phase produces no
 /// attestation: generated code that has never been compiled or run is not evidence of anything.
 /// </summary>
@@ -22,6 +28,15 @@ public sealed class ApplicationCodeConversionAdapter(IArtifactReviewer? reviewer
     {
         ArgumentNullException.ThrowIfNull(context);
 
+        // The executor validates the request before planning, but an adapter is also reachable directly.
+        // A release nothing interpreted must not reach a generated artifact that cites it.
+        if (OracleVersionIntake.Validate(context.Request.OracleFormsVersion, context.Request.OracleDatabaseVersion)
+            is { Count: > 0 } versionErrors)
+        {
+            return PhaseExecutionResult.Failure(
+                $"The Oracle release fields on this run were not accepted, so nothing was generated. {string.Join(" ", versionErrors)}");
+        }
+
         string sourceRoot = WorkspacePath.Normalize(context.SourceRoot);
         string outputRoot = WorkspacePath.Normalize(context.OutputRoot);
 
@@ -30,56 +45,117 @@ public sealed class ApplicationCodeConversionAdapter(IArtifactReviewer? reviewer
             return PhaseExecutionResult.Failure($"The source root '{sourceRoot}' does not exist in the workspace. Nothing was generated.");
         }
 
+        bool formsApplies;
+        try
+        {
+            formsApplies = FormsSourcePresence.Applies(context.Request, context.Workspace, sourceRoot);
+        }
+        catch (WorkspaceLimitExceededException limit)
+        {
+            return PhaseExecutionResult.Failure(
+                $"Nothing was generated: {limit.Message} Whether this run has Forms source at all could not be established from a " +
+                "tree that was never fully walked, and generating from the schema while that is unknown would present CRUD over " +
+                "the converted tables as a migration of modules nothing opened.");
+        }
+
+        bool normalized = context.CompletedPhases.Any(outcome =>
+            outcome.Phase == MigrationPhase.SourceNormalization && outcome.State == PhaseExecutionState.Executed);
+
+        if (formsApplies && !normalized)
+        {
+            return PhaseExecutionResult.Failure(
+                "This run has Oracle Forms source, and source normalization did not complete successfully in it. Normalization is the phase " +
+                "that decides whether that source is readable at all, so generating here would produce screens from table structure and present " +
+                "them as a migration of modules nothing in this run opened. Run source normalization first and resolve what it reports.");
+        }
+
         List<OracleSchema> schemas = [];
         List<FormsModule> forms = [];
-        List<ConversionFinding> formsFindings = [];
-        int formsModules = 0;
+        List<string> unopenedModules = [];
 
-        foreach (WorkspaceFile file in context.Workspace.EnumerateFiles(sourceRoot, MaxFiles))
+        if (normalized)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            string extension = Path.GetExtension(file.RelativePath);
+            string irPath = $"{outputRoot}/intermediate/forms-ir.json";
 
-            if (extension.Equals(".fmb", StringComparison.OrdinalIgnoreCase))
+            if (!context.Workspace.FileExists(irPath))
             {
-                formsModules++;
-                continue;
+                if (formsApplies)
+                {
+                    return PhaseExecutionResult.Failure(
+                        $"Source normalization reported success but wrote no intermediate representation at '{irPath}', while this run does have " +
+                        "Oracle Forms source. Nothing was generated, because the Forms model this phase is required to read does not exist.");
+                }
+
+                // Normalization succeeded with no Forms source to normalize. The schema-only path stays open.
+                context.Info(
+                    "Source normalization produced no Forms intermediate representation, so this run has no readable Forms module. " +
+                    "The application tier below comes from database structure alone.");
             }
-
-            if (extension.Equals(".xml", StringComparison.OrdinalIgnoreCase))
+            else
             {
+                string intermediate;
                 try
                 {
-                    FormsModuleParse parsed = FormsModuleParser.Parse(context.Workspace.ReadText(file.RelativePath, MaxTextBytes));
-                    if (parsed.Modules.Count > 0)
-                    {
-                        forms.AddRange(parsed.Modules);
-                        formsFindings.AddRange(parsed.Findings);
-                        context.Info($"Read Forms module {string.Join(", ", parsed.Modules.Select(module => module.Name))} from {file.RelativePath}.");
-                    }
+                    intermediate = context.Workspace.ReadText(irPath, MaxTextBytes);
+                }
+                catch (WorkspaceLimitExceededException limit)
+                {
+                    return PhaseExecutionResult.Failure(
+                        $"The normalized Forms representation at '{irPath}' could not be read in full, so nothing was generated: {limit.Message}");
+                }
+
+                FormsIntermediateRead read = FormsIntermediateReader.Read(intermediate, sourceRoot);
+
+                if (read.Modules is not { } modules)
+                {
+                    return PhaseExecutionResult.Failure(
+                        $"The normalized Forms representation at '{irPath}' was refused, so the Forms model this phase is required to generate " +
+                        $"from is unavailable: {read.Error} Generating from the schema instead would present CRUD over the converted tables as a " +
+                        "migration of modules nothing read. Re-run source normalization.");
+                }
+
+                forms.AddRange(modules);
+                context.Info(
+                    $"Read {modules.Count.ToString(CultureInfo.InvariantCulture)} normalized Forms module(s) from {irPath}. " +
+                    "The original exports were not re-read.");
+            }
+        }
+
+        try
+        {
+            foreach (WorkspaceFile file in context.Workspace.EnumerateFiles(sourceRoot, MaxFiles))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (FormsSourcePresence.ModuleExtensions.Contains(Path.GetExtension(file.RelativePath), StringComparer.OrdinalIgnoreCase))
+                {
+                    unopenedModules.Add(file.RelativePath);
+                    continue;
+                }
+
+                if (!OracleSourceFile.IsSqlText(file.RelativePath))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    schemas.Add(OracleSchemaParser.Parse(context.Workspace.ReadText(file.RelativePath, MaxTextBytes)));
                 }
                 catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
                 {
                     context.Warn($"{file.RelativePath} could not be read and was skipped.");
                 }
-
-                continue;
-            }
-
-            if (!OracleSourceFile.IsSqlText(file.RelativePath))
-            {
-                continue;
-            }
-
-            try
-            {
-                schemas.Add(OracleSchemaParser.Parse(context.Workspace.ReadText(file.RelativePath, MaxTextBytes)));
-            }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-            {
-                context.Warn($"{file.RelativePath} could not be read and was skipped.");
             }
         }
+        catch (WorkspaceLimitExceededException limit)
+        {
+            return PhaseExecutionResult.Failure(
+                $"Nothing was generated: {limit.Message} An application tier emitted from the schema that fitted would omit tables, " +
+                "columns, and constraints nobody was told were missing.");
+        }
+
+        int formsModules = unopenedModules.Count;
 
         if (schemas.Count == 0)
         {
@@ -88,12 +164,11 @@ public sealed class ApplicationCodeConversionAdapter(IArtifactReviewer? reviewer
                 "so there was nothing to generate from.");
         }
 
+
         OracleSchema schema = OracleSchema.Merge(schemas);
         bool recognized = NorthstarBankingApplicationProfile.Matches(schema);
         ApplicationConversion conversion = ApplicationCodeEmitter.Convert(
             schema, context.Request.ApplicationName, context.Request.Target.Database, forms);
-
-        conversion = conversion with { Findings = [.. formsFindings, .. conversion.Findings] };
 
         if (conversion.Files.Count == 0)
         {

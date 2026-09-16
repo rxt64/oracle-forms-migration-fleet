@@ -1,6 +1,5 @@
 // Copyright (c) Microsoft. All rights reserved.
 
-using System.Xml;
 using System.Xml.Linq;
 
 namespace OracleFormsMigrationFleet.Fleet.Execution;
@@ -30,7 +29,22 @@ public sealed record FormsModule(
     IReadOnlyList<FormsBlock> Blocks,
     IReadOnlyList<FormsTrigger> Triggers,
     IReadOnlyList<string> ProgramUnits,
-    IReadOnlyList<string> Lovs);
+    IReadOnlyList<string> Lovs,
+    string? SourcePath = null)
+{
+    /// <summary>
+    /// The module's name qualified by the directory its export was supplied from, which is the identity
+    /// this fleet treats as unique. Two directories carrying <c>ORDERS</c> carry two different modules,
+    /// because which module a bare name resolves to is a FORMS_PATH question nothing here can answer.
+    ///
+    /// <see cref="Name"/> keeps meaning what the export declared and is what every operator-facing string
+    /// shows; this is for deciding identity, not for display in place of it.
+    /// </summary>
+    public string QualifiedName =>
+        SourcePath is { Length: > 0 } path && WorkspacePath.Folder(path) is { Length: > 0 } folder
+            ? $"{folder}/{Name}"
+            : Name;
+}
 
 public sealed record FormsModuleParse(
     IReadOnlyList<FormsModule> Modules,
@@ -44,58 +58,62 @@ public sealed record FormsModuleParse(
 /// their prompts, order, and required flags. It recovers no behaviour. Trigger bodies are PL/SQL that
 /// this converter does not translate, and a trigger is reported by name so the work stays visible rather
 /// than looking absent.
+///
+/// Which documents count as an export is decided by <see cref="FormsXmlDocument"/>, so this parser and
+/// <see cref="FormsXmlVersionReader"/> cannot reach different conclusions about the same file.
 /// </summary>
 public static class FormsModuleParser
 {
+    private static readonly XNamespace s_forms = FormsXmlDocument.Namespace;
+
     public static FormsModuleParse Parse(string? xml)
     {
         List<FormsModule> modules = [];
         List<ConversionFinding> findings = [];
 
-        if (string.IsNullOrWhiteSpace(xml) || !xml.Contains("<", StringComparison.Ordinal))
-        {
-            return new FormsModuleParse(modules, findings);
-        }
+        FormsXmlLoad load = FormsXmlDocument.Load(xml);
 
-        XDocument document;
-        try
-        {
-            // No DTD processing and no resolver: an export is untrusted input, and an external entity
-            // reference in one would otherwise read files from the host.
-            using StringReader text = new(xml);
-            using XmlReader reader = XmlReader.Create(text, new XmlReaderSettings
-            {
-                DtdProcessing = DtdProcessing.Prohibit,
-                XmlResolver = null,
-                IgnoreComments = true,
-                IgnoreWhitespace = true,
-            });
-
-            document = XDocument.Load(reader);
-        }
-        catch (XmlException exception)
+        if (load.ParseError is { } error)
         {
             findings.Add(new ConversionFinding(
                 ConversionSeverity.Unsupported,
                 "Forms module",
                 "Forms XML export",
-                $"The export could not be parsed as XML, so no module was read: {exception.Message}"));
+                $"The export could not be parsed as XML, so no module was read: {error}"));
 
             return new FormsModuleParse(modules, findings);
         }
 
-        foreach (XElement module in Elements(document.Root, "FormModule"))
+        if (load.Root is not { } root)
         {
-            modules.Add(ReadModule(module, findings));
+            return new FormsModuleParse(modules, findings);
         }
 
-        if (modules.Count == 0 && document.Root is not null)
+        if (load.ShapeRejection is { } rejection)
+        {
+            findings.Add(new ConversionFinding(
+                ConversionSeverity.Unsupported,
+                "Forms module",
+                root.Name.LocalName,
+                rejection));
+
+            return new FormsModuleParse(modules, findings);
+        }
+
+        if (!load.IsFormsExport)
         {
             findings.Add(new ConversionFinding(
                 ConversionSeverity.ManualReview,
                 "Forms module",
-                document.Root.Name.LocalName,
+                root.Name.LocalName,
                 "The file parsed as XML but contained no FormModule element, so it was not treated as a Forms export."));
+
+            return new FormsModuleParse(modules, findings);
+        }
+
+        foreach (XElement module in load.FormModules)
+        {
+            modules.Add(ReadModule(module, findings));
         }
 
         return new FormsModuleParse(modules, findings);
@@ -162,7 +180,7 @@ public static class FormsModuleParser
 
         // Triggers directly on the module, not inside a block.
         List<FormsTrigger> moduleTriggers =
-            [.. module.Elements().Where(child => child.Name.LocalName == "Trigger")
+            [.. module.Elements().Where(child => child.Name == s_forms + "Trigger")
                 .Select(trigger => new FormsTrigger(Attribute(trigger, "Name") ?? "UNNAMED", name))];
 
         List<string> programUnits =
@@ -238,35 +256,22 @@ public static class FormsModuleParser
         }
     }
 
-    private static IEnumerable<XElement> Elements(XElement? root, string localName)
-    {
-        if (root is null)
-        {
-            yield break;
-        }
-
-        // An export often has FormModule as its root, which Descendants alone would skip.
-        if (root.Name.LocalName == localName)
-        {
-            yield return root;
-        }
-
-        foreach (XElement element in root.Descendants().Where(element => element.Name.LocalName == localName))
-        {
-            yield return element;
-        }
-    }
-
     private static IEnumerable<XElement> Descendants(XElement? root, string localName) =>
-        root is null ? [] : root.Descendants().Where(element => element.Name.LocalName == localName);
+        root is null ? [] : root.Descendants().Where(element => element.Name == s_forms + localName);
 
     /// <summary>Prompts carry their punctuation; a column heading should not.</summary>
     private static string? Label(string? prompt) =>
         prompt?.TrimEnd(':', ' ') is { Length: > 0 } trimmed ? trimmed : null;
 
+    /// <summary>
+    /// A Forms attribute, matched by local name in no namespace. A qualified attribute is never read here,
+    /// so a document cannot supply two candidates for the same name and let position pick the winner;
+    /// <see cref="FormsXmlDocument"/> has already refused any document that carries one.
+    /// </summary>
     private static string? Attribute(XElement element, string name) =>
         element.Attributes().FirstOrDefault(attribute =>
-            string.Equals(attribute.Name.LocalName, name, StringComparison.OrdinalIgnoreCase))?.Value is { Length: > 0 } value
+            attribute.Name.Namespace == XNamespace.None
+            && string.Equals(attribute.Name.LocalName, name, StringComparison.OrdinalIgnoreCase))?.Value is { Length: > 0 } value
             ? value
             : null;
 

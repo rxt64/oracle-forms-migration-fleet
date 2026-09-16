@@ -1,6 +1,12 @@
 # Oracle Forms 6i research
 
-Status: research and implementation plan, not a compatibility claim.
+Status: the intake, version-canonicalization, and normalization-gate half is implemented; the Oracle
+source-recovery half is not. This is not a compatibility claim, and nothing here says a Forms 6i
+application has been converted.
+
+For the researched .NET Open API extraction option, see
+[NDAPI_DOTNET_FEASIBILITY.md](NDAPI_DOTNET_FEASIBILITY.md). NDAPI documents exact Forms
+`6.0.8.22.1` support on Windows x86, but does not replace the support gates in this document.
 
 Oracle's current documentation calls this release family **Oracle Forms 6i**. Intake must record the
 exact Forms build, patch set, platform, character set, database release, and deployment model rather
@@ -126,6 +132,37 @@ be discovered independently.
 
 ## Proposed fleet architecture
 
+## What the fleet implements today
+
+The intake half of this research is now code. It covers Forms 6i through 12c and Oracle Database 6
+through 12c, and it deliberately implements **evidence handling and refusal**, not runtime parity.
+
+| Capability | Where it lives | What it does |
+|---|---|---|
+| Release canonicalization | `Fleet/OracleLegacyVersionCatalog.cs` | Turns an operator-supplied string into a family, a readiness state (`Unknown`, `AssessmentOnly`, `NormalizedTextRequired`, `TextEvidenceReady`, `Rejected`), the normalization route, and its warnings. Offline and deterministic. It rejects a string it cannot interpret rather than guessing a release. |
+| Declared-version reading | `Fleet/Execution/FormsXmlVersionReader.cs` | Reads the `version` and `FormsVersion` attributes a supplied XML export declares, with DTD processing prohibited and no resolver. It reports a declaration; it never treats shape as provenance. |
+| Normalization gate | `Fleet/Execution/Adapters/SourceNormalizationAdapter.cs` | Inventories `.fmb`, `.mmb`, `.pll`, `.olb`, `.fmt`, `.mmt`, and `.xml` without decoding a single binary, then writes `source-version-report.md`, `forms-normalization-manifest.json`, and `forms-ir.json` under `<outputRoot>/intermediate`. |
+| Application gate | `Fleet/Execution/Adapters/ApplicationCodeConversionAdapter.cs` | Refuses to generate an application tier when Forms binaries exist and no readable `FormModule` XML accompanies them, at every release. Schema-only and database conversion are unaffected. |
+| Database disposition | `Fleet/Execution/Adapters/DatabaseConversionAdapter.cs` | Records the source release and its disposition in `conversion-report.md`, warns on `unknown`, and fails closed before writing anything when the release string is uninterpretable. |
+
+### How the normalization phase decides
+
+| Supplied source | Outcome |
+|---|---|
+| Binary Forms modules, no readable `FormModule` XML | **Fails closed.** The report and manifest are retained as diagnostics; no `forms-ir.json` is written, and no application conversion may claim those modules were migrated. |
+| `.fmt`/`.mmt` only | **Fails closed** with the two-step 6i route: 6i tooling produces 6i `.fmb`/`.mmb` first, then the newer toolchain opens, saves, compiles, and exports. |
+| Valid `FormModule` XML whose declared release matches the run, or a run that declared none | **Normalizes.** A 6i declaration additionally records Oracle's 10.1.2 bridge recommendation and `FRM-18130`. |
+| Valid XML whose declared release contradicts the run | **Fails closed.** One of the two is wrong, and generating anyway would make every downstream version claim unreliable. |
+| Valid XML declaring no version, run declared a release | **Normalizes**, recording the release as operator-supplied and stating that the export did not verify it. |
+| Valid XML declaring no version, run declared none | **Fails closed.** Neither side established a release. |
+| No Forms source of any kind | **Normalizes nothing and says so.** Schema-only runs stay open, and the finding states that any generated application came from database structure alone and reproduces no Forms screen, trigger, or navigation rule. |
+
+None of this runs an Oracle tool. The fleet holds no `ORACLE_HOME` and executes no `frmf2xml`,
+`frmcmp_batch`, or `frmplsqlconv`. Every normalization step below is performed by the operator on
+their own installation, under their own licence and support terms.
+
+## Still to build
+
 ### 1. Add a gated 6i source-recovery adapter
 
 Run Oracle tools in an operator-provided, isolated worker with an approved `ORACLE_HOME`. Confirm
@@ -133,12 +170,13 @@ tool use, hosting, and redistribution restrictions against the governing Oracle 
 Oracle licensing documentation. The worker should have read-only source input, a disposable output
 directory, no target credentials, bounded process execution, and captured stdout/stderr.
 
-### 2. Produce a normalization manifest
+### 2. Extend the normalization manifest
 
-For every module, record:
+The manifest written today records path, category, byte count, whether the file was read as text, the
+versions each file declares, and the modules recovered from it. A recovery adapter would add, for every
+module:
 
 - original path and SHA-256;
-- detected source version and module type;
 - each tool/version and command invoked;
 - whether the 10.1.2 bridge was required;
 - normalized binary and text output hashes;
@@ -151,7 +189,8 @@ For every module, record:
 The current parser accepts supplied XML documents containing `FormModule` elements. It recovers a
 limited subset of block/item attributes plus trigger, program-unit, and LOV names, but does not invoke
 Forms2XML, validate export provenance, parse menu/object-library exports, or recover trigger bodies and
-runtime semantics. A 6i-capable IR needs exact trigger/program-unit source, scope, event ordering,
+runtime semantics. `forms-ir.json` carries exactly that subset and says so in its own notes. A
+6i-capable IR needs exact trigger/program-unit source, scope, event ordering,
 navigation, validation, commit/rollback behavior, LOV/record-group queries, menus, visual properties,
 canvas/window geometry, object-library references, and external integrations.
 

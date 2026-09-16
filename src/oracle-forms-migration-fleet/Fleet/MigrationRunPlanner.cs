@@ -79,6 +79,10 @@ public static class MigrationRunPlanner
             blockers.Add("Request fields appear to contain credential material and were rejected.");
         }
 
+        // A release the catalog cannot interpret stops the request here, before a phase runs or an
+        // artifact is written, rather than in whichever adapter happens to read it first.
+        blockers.AddRange(OracleVersionIntake.Validate(request.OracleFormsVersion, request.OracleDatabaseVersion));
+
         if (ContainsPotentialSecret(request.PlanApproval) ||
             ContainsPotentialSecret(request.ExecutionApproval) ||
             ContainsPotentialSecret(request.ProductionApproval))
@@ -614,4 +618,28 @@ public static class WorkspacePath
     /// <summary>Converts to forward slashes and trims trailing separators. Does not touch the file system.</summary>
     public static string Normalize(string path) =>
         (path ?? string.Empty).Replace('\\', '/').TrimEnd('/');
+
+    /// <summary>
+    /// Whether a path is the root itself or sits beneath it, compared on whole segments so
+    /// <c>legacy/forms-b/X</c> is not read as inside <c>legacy/forms</c>.
+    /// </summary>
+    public static bool IsWithin(string root, string path)
+    {
+        string normalizedRoot = Normalize(root);
+        string normalizedPath = Normalize(path);
+
+        return string.Equals(normalizedRoot, normalizedPath, StringComparison.Ordinal)
+            || (normalizedPath.Length > normalizedRoot.Length + 1
+                && normalizedPath.StartsWith(normalizedRoot, StringComparison.Ordinal)
+                && normalizedPath[normalizedRoot.Length] == '/');
+    }
+
+    /// <summary>The containing directory of a path, as written, or the empty string when there is none.</summary>
+    public static string Folder(string path)
+    {
+        string normalized = Normalize(path);
+        int separator = normalized.LastIndexOf('/');
+
+        return separator < 0 ? string.Empty : normalized[..separator];
+    }
 }

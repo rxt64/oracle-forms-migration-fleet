@@ -2,6 +2,7 @@
 
 using OracleFormsMigrationFleet.Fleet;
 using OracleFormsMigrationFleet.Fleet.Execution;
+using OracleFormsMigrationFleet.Fleet.Execution.Adapters;
 
 namespace OracleFormsMigrationFleet.Tests;
 
@@ -116,6 +117,35 @@ public class ApplicationCodeEmitterTests
             finding => finding.Construct.Contains("APPROVE_BUTTON", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// Two directories carrying one module name are two modules. One screen file is emitted, so the one it
+    /// comes from is chosen by directory-qualified identity rather than by arrival order, and the other is
+    /// reported: neither may be dropped, and neither may overwrite the other's output path.
+    /// </summary>
+    [Fact]
+    public void Two_modules_of_one_name_from_separate_directories_neither_collide_nor_vanish()
+    {
+        OracleSchema schema = OracleSchemaParser.Parse(OracleSamples.Schema);
+        OracleTable table = schema.Tables[0];
+
+        FormsModule Module(string sourcePath) => new(
+            "ORDERS", "Orders",
+            [new FormsBlock("ORDER_BLOCK", table.Name, 10, [new FormsItem(table.Columns[0].Name, "Text Item", null, table.Columns[0].Name, "Account", true, true, null)], [])],
+            [], [], [], sourcePath);
+
+        // Supplied with forms-b first, so a pass cannot come from the order the modules arrived in.
+        ApplicationConversion conversion = ApplicationCodeEmitter.Convert(
+            schema, "ORDERS", DatabaseTarget.PostgreSql,
+            [Module("legacy/forms/forms-b/ORDERS.xml"), Module("legacy/forms/forms-a/ORDERS.xml")]);
+
+        GeneratedFile app = conversion.Files.Single(file => file.Path == "frontend/src/App.tsx");
+
+        Assert.Contains("in module legacy/forms/forms-a/ORDERS", app.Contents, StringComparison.Ordinal);
+        Assert.Contains(
+            conversion.Findings,
+            finding => finding.Construct == "legacy/forms/forms-b/ORDERS.ORDER_BLOCK");
+    }
+
     [Fact]
     public void Without_an_export_the_screen_still_falls_back_to_table_structure()
     {
@@ -173,7 +203,12 @@ public class ApplicationCodeConversionPhaseTests
 {
     private const string Operator = "migration-operator@contoso.com";
 
-    private static MigrationRunRequest Request() => new()
+    /// <summary>
+    /// <paramref name="formsEvidence"/> declares that the run supplies Forms source. Source normalization
+    /// is gated on it, so a run that carries Forms modules without it never reaches the phase that
+    /// adjudicates them and the conversion is blocked rather than refused on its own terms.
+    /// </summary>
+    private static MigrationRunRequest Request(bool formsEvidence = false) => new()
     {
         EngagementId = "ENG-APP",
         ApplicationName = "ORDERS",
@@ -187,21 +222,25 @@ public class ApplicationCodeConversionPhaseTests
             Requests.Evidence("EV-PLSQL", EvidenceKind.PlSqlProgramUnit),
             Requests.Evidence("EV-SCHEMA", EvidenceKind.DatabaseSchemaExport),
             Requests.Evidence("EV-TEST", EvidenceKind.TestBaseline),
+            .. formsEvidence
+                ? (EvidenceItem[])[Requests.Evidence("EV-SRC", EvidenceKind.FormsModuleSource)]
+                : [],
         ],
         PlanApproval = Requests.Approved("plan-owner@contoso.com"),
         ExecutionApproval = HumanApproval.Pending,
     };
 
+    /// <summary>Schema only: no Forms module of any kind, which is the path that generates CRUD screens.</summary>
     private static TemporaryWorkspace SeededWorkspace()
     {
         TemporaryWorkspace workspace = new();
         workspace.WriteFile("legacy/forms/db/001_schema.sql", OracleSamples.Schema);
-        workspace.WriteBytes("legacy/forms/ui/ACCOUNT_OPEN.fmb", [0x0A, 0x46, 0x4F, 0x52, 0x4D, 0x00, 0xFF, 0xFE]);
         return workspace;
     }
 
-    private static Task<MigrationExecutionResult> RunAsync(TemporaryWorkspace workspace) =>
-        new MigrationExecutor(workspace.Root, MigrationExecutor.DefaultAdapters()).ExecuteAsync(Request(), Operator);
+    private static Task<MigrationExecutionResult> RunAsync(TemporaryWorkspace workspace, bool formsEvidence = false) =>
+        new MigrationExecutor(workspace.Root, MigrationExecutor.DefaultAdapters())
+            .ExecuteAsync(Request(formsEvidence), Operator);
 
     [Fact]
     public async Task The_application_tier_is_generated_without_forms_evidence()
@@ -218,15 +257,106 @@ public class ApplicationCodeConversionPhaseTests
     }
 
     [Fact]
-    public async Task Unreadable_forms_modules_are_reported_in_the_notes()
+    public async Task A_binary_only_forms_estate_is_refused_rather_than_answered_with_crud_screens()
     {
         using TemporaryWorkspace workspace = SeededWorkspace();
+        workspace.WriteBytes("legacy/forms/ui/ACCOUNT_OPEN.fmb", [0x0A, 0x46, 0x4F, 0x52, 0x4D, 0x00, 0xFF, 0xFE]);
 
-        await RunAsync(workspace);
+        MigrationExecutionResult result = await RunAsync(workspace, formsEvidence: true);
+
+        PhaseOutcome normalization = result.Phases.Single(phase => phase.Phase == MigrationPhase.SourceNormalization);
+        Assert.Equal(PhaseExecutionState.Failed, normalization.State);
+        Assert.Contains("ACCOUNT_OPEN.fmb", workspace.Read("out/orders/intermediate/source-version-report.md"), StringComparison.Ordinal);
+        Assert.Contains("Forms Builder or the Forms JDAPI", normalization.Detail!, StringComparison.Ordinal);
+        Assert.Contains("frmf2xml", normalization.Detail!, StringComparison.Ordinal);
+
+        // Nothing was generated from a tree the adjudicating phase refused.
+        PhaseOutcome outcome = result.Phases.Single(phase => phase.Phase == MigrationPhase.ApplicationCodeConversion);
+        Assert.Equal(PhaseExecutionState.BlockedByDependency, outcome.State);
+        Assert.False(workspace.Exists("out/orders/application/backend/pom.xml"));
+
+        // The gate is application conversion only; the schema still converts from the supplied SQL.
+        Assert.Equal(
+            PhaseExecutionState.Executed,
+            result.Phases.Single(phase => phase.Phase == MigrationPhase.DatabaseConversion).State);
+    }
+
+    /// <summary>
+    /// A run that carries Forms modules but declares no Forms evidence never reaches normalization, so the
+    /// conversion has to stop on the missing prerequisite rather than reading the tree a second time itself.
+    /// </summary>
+    [Fact]
+    public async Task Forms_modules_without_the_evidence_that_reaches_normalization_block_the_conversion()
+    {
+        using TemporaryWorkspace workspace = SeededWorkspace();
+        workspace.WriteBytes("legacy/forms/ui/ACCOUNT_OPEN.fmb", [0x0A, 0x46, 0x4F, 0x52, 0x4D]);
+
+        MigrationExecutionResult result = await RunAsync(workspace);
+
+        Assert.Equal(
+            PhaseExecutionState.SkippedByPlanner,
+            result.Phases.Single(phase => phase.Phase == MigrationPhase.SourceNormalization).State);
+
+        PhaseOutcome outcome = result.Phases.Single(phase => phase.Phase == MigrationPhase.ApplicationCodeConversion);
+        Assert.Equal(PhaseExecutionState.BlockedByDependency, outcome.State);
+        Assert.Contains("SourceNormalization", outcome.Detail!, StringComparison.Ordinal);
+        Assert.False(workspace.Exists("out/orders/application/backend/pom.xml"));
+    }
+
+    /// <summary>
+    /// One export beside several unopened modules used to normalize cleanly and generate an application
+    /// that silently omitted every module nobody exported. An unrelated export is not coverage.
+    /// </summary>
+    [Theory]
+    [InlineData(".fmb")]
+    [InlineData(".mmb")]
+    [InlineData(".pll")]
+    [InlineData(".olb")]
+    [InlineData(".fmt")]
+    [InlineData(".mmt")]
+    public async Task A_module_with_no_export_of_its_own_name_is_refused_even_beside_a_readable_export(string extension)
+    {
+        using TemporaryWorkspace workspace = SeededWorkspace();
+        workspace.WriteFile("legacy/forms/ui/ACCOUNT_OPEN.xml", OracleSamples.FormsXml("12.2.1.4", "ACCOUNT_OPEN"));
+        workspace.WriteBytes($"legacy/forms/ui/ACCOUNT_HISTORY{extension}", [0x0A, 0x46, 0x4F, 0x52, 0x4D]);
+
+        MigrationExecutionResult result = await RunAsync(workspace, formsEvidence: true);
+
+        PhaseOutcome normalization = result.Phases.Single(phase => phase.Phase == MigrationPhase.SourceNormalization);
+        Assert.Equal(PhaseExecutionState.Failed, normalization.State);
+        Assert.Contains($"ACCOUNT_HISTORY{extension}", normalization.Detail!, StringComparison.Ordinal);
+
+        Assert.Equal(
+            PhaseExecutionState.BlockedByDependency,
+            result.Phases.Single(phase => phase.Phase == MigrationPhase.ApplicationCodeConversion).State);
+        Assert.False(workspace.Exists("out/orders/application/backend/pom.xml"));
+    }
+
+    [Fact]
+    public async Task Modules_whose_exports_all_carry_the_same_name_are_generated_from_the_export()
+    {
+        using TemporaryWorkspace workspace = SeededWorkspace();
+        workspace.WriteBytes("legacy/forms/ui/ACCOUNT_OPEN.fmb", [0x0A, 0x46, 0x4F, 0x52, 0x4D, 0x00, 0xFF, 0xFE]);
+        workspace.WriteFile(
+            "legacy/forms/ui/ACCOUNT_OPEN.xml",
+            """
+            <Module xmlns="http://xmlns.oracle.com/Forms" version="12.2.1.4" FormsVersion="12.2.1.4">
+              <FormModule Name="ACCOUNT_OPEN" Title="Account opening">
+                <Block Name="ACCOUNT_BLOCK" QueryDataSourceName="BANK_ACCOUNT" RecordsDisplayCount="5">
+                  <Item Name="ACCOUNT_ID" ItemType="Text Item" DataType="Number" ColumnName="ACCOUNT_ID" Prompt="Account"/>
+                </Block>
+              </FormModule>
+            </Module>
+            """);
+
+        MigrationExecutionResult result = await RunAsync(workspace, formsEvidence: true);
+
+        Assert.Equal(
+            PhaseExecutionState.Executed,
+            result.Phases.Single(phase => phase.Phase == MigrationPhase.ApplicationCodeConversion).State);
 
         string notes = workspace.Read("out/orders/application/CONVERSION_NOTES.md");
-        Assert.Contains("were not converted", notes, StringComparison.Ordinal);
-        Assert.Contains("proprietary binary", notes, StringComparison.Ordinal);
+        Assert.Contains("were read from an XML export", notes, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -243,12 +373,41 @@ public class ApplicationCodeConversionPhaseTests
     public async Task A_source_tree_without_sql_fails_rather_than_inventing_an_application()
     {
         using TemporaryWorkspace workspace = new();
-        workspace.WriteBytes("legacy/forms/ui/ACCOUNT_OPEN.fmb", [0x0A, 0x46, 0x4F, 0x52, 0x4D]);
+        workspace.WriteFile("legacy/forms/README.txt", "No schema was supplied with this estate.");
 
         MigrationExecutionResult result = await RunAsync(workspace);
 
         PhaseOutcome outcome = result.Phases.Single(phase => phase.Phase == MigrationPhase.ApplicationCodeConversion);
         Assert.Equal(PhaseExecutionState.Failed, outcome.State);
+        Assert.Contains("'.sql'", outcome.Detail!, StringComparison.Ordinal);
+        Assert.False(workspace.Exists("out/orders/application/backend/pom.xml"));
+    }
+
+    /// <summary>
+    /// The adapter is reachable directly, so the release fields have to be checked here too rather than
+    /// only at the planner boundary a caller can bypass.
+    /// </summary>
+    [Fact]
+    public async Task An_uninterpretable_release_stops_the_adapter_before_it_writes_anything()
+    {
+        using TemporaryWorkspace workspace = SeededWorkspace();
+
+        MigrationRunRequest request = Request();
+        PhasePlan plan = MigrationRunPlanner.Plan(request).Phases
+            .Single(phase => phase.Phase == MigrationPhase.ApplicationCodeConversion);
+
+        PhaseExecutionResult result = await new ApplicationCodeConversionAdapter().ExecuteAsync(
+            new PhaseExecutionContext(
+                workspace.Root,
+                request.SourceRoot,
+                request.OutputRoot,
+                plan,
+                request with { OracleFormsVersion = "banana" },
+                (_, _) => { }),
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("were not accepted", result.FailureReason!, StringComparison.Ordinal);
         Assert.False(workspace.Exists("out/orders/application/backend/pom.xml"));
     }
 }

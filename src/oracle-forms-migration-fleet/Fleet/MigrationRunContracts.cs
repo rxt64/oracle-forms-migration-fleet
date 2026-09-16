@@ -37,21 +37,33 @@ public enum ExecutionMode
     ProductionCutover,
 }
 
-/// <summary>End-to-end lifecycle phases, in execution order.</summary>
+/// <summary>
+/// End-to-end lifecycle phases.
+///
+/// The numbers are explicit and frozen, because a phase is persisted in run reports, manifests, and
+/// stored plans. <see cref="SourceNormalization"/> was added after the rest and took a new value at the
+/// end rather than being inserted in lifecycle position, which would have renumbered every phase after
+/// it and made an old report decode as a different phase.
+///
+/// Declaration order is therefore NOT execution order. <c>MigrationLifecycle.Order</c> is the single
+/// place execution order is stated; nothing may sort phases by their numeric value.
+/// </summary>
 public enum MigrationPhase
 {
-    SourceAcquisition,
-    SourceAnalysis,
-    DocumentationGeneration,
-    SourceNormalization,
-    ApplicationCodeConversion,
-    DatabaseConversion,
-    BuildAndStaticValidation,
-    DifferentialBehaviorTesting,
-    SandboxDataMigration,
-    DataReconciliation,
-    HumanAcceptance,
-    ProductionCutover,
+    SourceAcquisition = 0,
+    SourceAnalysis = 1,
+    DocumentationGeneration = 2,
+    ApplicationCodeConversion = 3,
+    DatabaseConversion = 4,
+    BuildAndStaticValidation = 5,
+    DifferentialBehaviorTesting = 6,
+    SandboxDataMigration = 7,
+    DataReconciliation = 8,
+    HumanAcceptance = 9,
+    ProductionCutover = 10,
+
+    /// <summary>Added after the values above were already in persisted output; runs before conversion.</summary>
+    SourceNormalization = 11,
 }
 
 /// <summary>What a phase is allowed to change. Drives which approval gate applies.</summary>
@@ -147,6 +159,12 @@ public sealed record MigrationRunRequest
 
     [Description("Destination stack: React front end, Java/Spring Boot back end, and the database target.")]
     public required TargetStack Target { get; init; }
+
+    [Description("Oracle Forms release of the source estate, or 'unknown' when it has not been established. Accepted values span 6i through 12c; newer releases are recorded for assessment only. The value never opens a gate: binary Forms source still requires an operator-produced textual export before an application tier can be generated.")]
+    public string OracleFormsVersion { get; init; } = "unknown";
+
+    [Description("Oracle Database release behind the supplied export, or 'unknown' when it has not been established. Conversion reads supplied SQL text at any recognized release; it proves the constructs in that export and nothing about an instance this fleet never contacted.")]
+    public string OracleDatabaseVersion { get; init; } = "unknown";
 
     [Description("Workspace-relative directory holding the authoritative Oracle Forms and database source.")]
     public required string SourceRoot { get; init; }

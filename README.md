@@ -24,6 +24,7 @@ reconciliation, human acceptance, and production cutover.
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | Deploying, rolling back, or debugging a deployment that misbehaved |
 | [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) | Understanding the exact version path demonstrated by the pilot and what is not yet claimed |
 | [docs/ORACLE_FORMS_6I_RESEARCH.md](docs/ORACLE_FORMS_6I_RESEARCH.md) | Researching 6i source recovery, Oracle normalization tooling, risk signatures, and support gates |
+| [docs/NDAPI_DOTNET_FEASIBILITY.md](docs/NDAPI_DOTNET_FEASIBILITY.md) | Evaluating NDAPI as an isolated .NET Forms extractor and ASP.NET Core/Blazor as a separate target |
 | [infra/legacy-estate/README.md](infra/legacy-estate/README.md) | Deploying the disposable synthetic Oracle database used by demonstrations |
 | [infra/forms-demo/README.md](infra/forms-demo/README.md) | Running the browser-executable banking workflow replica against that database |
 | [CHANGELOG.md](CHANGELOG.md) | Understanding why current behaviour differs from what you expected |
@@ -90,7 +91,7 @@ MigrationFleetOrchestrator   ← deterministic, offline, unit-tested
 MigrationRunPlanner          ← deterministic, offline, unit-tested
    │
    ├── SourceAcquisition          · Inventory Analyst          · None
-   ├── SourceAnalysis             · Dependency Mapper          · None
+   ├── SourceAnalysis             · Dependency Mapper          · WorkspaceArtifactWrite
    ├── DocumentationGeneration    · Documentation Author       · WorkspaceArtifactWrite
    ├── SourceNormalization        · Application Code Converter · WorkspaceArtifactWrite
    ├── ApplicationCodeConversion  · Application Code Converter · WorkspaceArtifactWrite  → React + Java/Spring Boot
@@ -153,7 +154,8 @@ The model calls `assess_oracle_forms_migration` with a `MigrationAssessmentReque
 |---|---|---|
 | `engagementId` | string | Required. Audit identifier. |
 | `applicationName` | string | Required. |
-| `oracleFormsVersion` | string | Assessment metadata supplied by the operator; defaults to `unknown`. It is not a compatibility assertion or converter selector. |
+| `oracleFormsVersion` | string | Operator-supplied release; defaults to `unknown`. Canonicalized by `OracleLegacyVersionCatalog` into a family (`6i`, `9i`, `10g`, `11g`, `12c`, plus `pre-6i` and `14c` for assessment) and reported as a finding. It is not a compatibility assertion and selects no converter: binary Forms source still needs an operator-produced textual export. An uninterpretable string is rejected rather than guessed. |
+| `oracleDatabaseVersion` | string | Operator-supplied release; defaults to `unknown`. Canonicalized into `6`, `7`, `8`, `8i`, `9i`, `10g`, `11g`, `12c`, `18c`, `19c`, `21c`, or `23ai` and reported as a finding. The fleet has no live Oracle extraction adapter, so it can never verify this value. |
 | `evidence[]` | `EvidenceItem` | `id`, `kind`, `source`, `summary`, `isVerified`, `signals[]`. |
 | `businessConstraints[]` | string | Regulatory/downtime constraints. |
 | `approval` | `HumanApproval` | `decision` (`Pending` \| `Approved` \| `Rejected`), `approverId`, `notes`. |
@@ -197,6 +199,16 @@ contain a credential, connection string, or URL.
   Gating every phase on the union looks stricter and is not: a schema conversion refused for want of Forms
   binaries it never opens teaches operators to tick the box falsely, and a false attestation in an auditable
   plan is the outcome these gates exist to prevent.
+
+  Evidence is not the whole gate for `ApplicationCodeConversion`. A run that supplies a schema and no Forms
+  source still generates an application tier, from database structure alone, and its report says so: that
+  output is CRUD over the converted tables and is never presented as a migration of a Forms UI. A run that
+  does supply Forms source of any kind — a module of any Forms type in the tree, an XML export, or declared
+  `FormsModuleSource`/`FormsXmlExport` evidence — additionally requires `SourceNormalization` to have
+  succeeded in the same run and to have written the intermediate representation this phase reads. That is
+  the phase that decides whether the source was readable at all, so without it the conversion is blocked
+  rather than falling back to generating screens from table structure and captioning them with the module
+  names it never opened.
 - **SandboxMigration** requires an `executionApproval` with `Approved` and an `approverId`.
   Assessment plan approval does **not** authorize execution.
 - **ProductionCutover** requires a `productionApproval` separate from the execution approval, plus
@@ -385,6 +397,7 @@ provenance; it does not establish support for every Forms 12c application.
   "engagementId": "ENG-4471",
   "applicationName": "ORDERS",
   "oracleFormsVersion": "12.2.1.4",
+  "oracleDatabaseVersion": "23ai",
   "evidence": [
     { "id": "EV-INV",     "kind": "FormsModuleInventory", "source": "forms-inventory.csv", "summary": "142 modules, 1,908 triggers.", "isVerified": true },
     { "id": "EV-PLSQL",   "kind": "PlSqlProgramUnit",     "source": "plsql-units.sql",     "summary": "312 packages and procedures.", "isVerified": true },
@@ -583,9 +596,13 @@ the required artifacts and attestations.
   validated against a live server, and the review model's findings are explicitly unverified.
 - **PL/SQL is not translated.** Packages, procedures, functions, triggers, `%ROWTYPE`, and `STANDARD_HASH`
   are reported as manual PL/pgSQL rewrites with reasons. No attempt is made to convert a body.
-- **Forms are not converted.** `.fmb` files are indexed by name and size only; their contents are a
-  proprietary binary format requiring Forms Builder or the JDAPI. No trigger, block, or program unit is
-  extracted, and no React or Java source is produced.
+- **Forms binaries are never opened.** `.fmb`, `.mmb`, `.pll`, and `.olb` files are indexed by name and size
+  only; their contents are a proprietary binary format requiring Forms Builder or the JDAPI, so no trigger,
+  block, or program unit is extracted from one. React and Java source *is* generated, from two inputs and no
+  others: the converted database schema, and the structure of any Forms **XML export** an operator supplies.
+  An estate that supplies only binaries is refused by `SourceNormalization` rather than generated from, and
+  an estate that supplies only a schema generates CRUD over the converted tables, which is not a Forms UI and
+  is never reported as one. Trigger and program-unit behaviour is not translated in either case.
 - **Evidence is taken as attested, not independently verified.** The service does not parse `.fmb`
   files. It ignores platform signals attached to unrelated artifact kinds; `isVerified` remains a
   human attestation; unverified artifacts do not satisfy evidence gates or drive recommendations.

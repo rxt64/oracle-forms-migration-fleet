@@ -76,6 +76,8 @@ const emptyFields: RunFields = {
   applicationName: "",
   sourceRoot: "",
   outputRoot: "",
+  oracleFormsVersion: "unknown",
+  oracleDatabaseVersion: "unknown",
   executionApprover: "",
   productionApprover: "",
 };
@@ -85,9 +87,37 @@ const exampleFields: RunFields = {
   applicationName: "ORDERS",
   sourceRoot: "legacy/forms",
   outputRoot: "out/orders",
+  oracleFormsVersion: "unknown",
+  oracleDatabaseVersion: "unknown",
   executionApprover: "",
   productionApprover: "",
 };
+
+// Values the server's version catalog canonicalises. "unknown" stays first: it is the correct answer
+// until the release has actually been established, and it never blocks planning.
+const FORMS_VERSIONS = [
+  { value: "unknown", label: "Not established yet" },
+  { value: "6i", label: "Forms 6i" },
+  { value: "9i", label: "Forms 9i" },
+  { value: "10g", label: "Forms 10g (10.1.2)" },
+  { value: "11g", label: "Forms 11g" },
+  { value: "12c", label: "Forms 12c (12.2.1)" },
+];
+
+const DATABASE_VERSIONS = [
+  { value: "unknown", label: "Not established yet" },
+  { value: "6", label: "Oracle 6" },
+  { value: "7", label: "Oracle 7" },
+  { value: "8i", label: "Oracle 8i" },
+  { value: "9i", label: "Oracle 9i" },
+  { value: "10g", label: "Oracle 10g" },
+  { value: "11g", label: "Oracle 11g" },
+  { value: "12c", label: "Oracle 12c" },
+  { value: "18c", label: "Oracle 18c" },
+  { value: "19c", label: "Oracle 19c" },
+  { value: "21c", label: "Oracle 21c" },
+  { value: "23", label: "Oracle 23ai / Free 23" },
+];
 
 // Server-supplied evidence names are enum-derived, so the plain-language wording lives here.
 const EVIDENCE_NAMES: Record<string, string> = {
@@ -134,7 +164,7 @@ const EVIDENCE_HELP: Record<string, string> = {
 function queryFields(): RunFields {
   const query = new URLSearchParams(window.location.search);
   return Object.fromEntries(
-    Object.keys(emptyFields).map((key) => [key, query.get(key) ?? ""]),
+    Object.entries(emptyFields).map(([key, fallback]) => [key, query.get(key) ?? fallback]),
   ) as unknown as RunFields;
 }
 
@@ -202,6 +232,36 @@ function Field({
         onChange={(event) => onChange(event.target.value)}
       />
       {error && <p id={`${id}-error`} className="mf-error" role="alert">{error}</p>}
+    </div>
+  );
+}
+
+function VersionSelect({
+  id,
+  label,
+  help,
+  options,
+  value,
+  onChange,
+}: {
+  id: keyof RunFields;
+  label: string;
+  help: string;
+  options: { value: string; label: string }[];
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <div className="mf-field">
+      <div className="mf-label-row">
+        <label htmlFor={id}>{label}</label>
+        <InfoTip label={label.toLowerCase()}>{help}</InfoTip>
+        <span className="mf-label-hint">Optional</span>
+      </div>
+      <p className="mf-sr-only" id={`${id}-help`}>{help}</p>
+      <select id={id} value={value} aria-describedby={`${id}-help`} onChange={(event) => onChange(event.target.value)}>
+        {options.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}
+      </select>
     </div>
   );
 }
@@ -379,6 +439,7 @@ const PHASE_STATE_LABELS: Record<string, string> = {
   SkippedByPlanner: "Skipped",
   AdapterNotImplemented: "No adapter",
   Failed: "Failed",
+  BlockedByDependency: "Blocked by a failed prerequisite",
 };
 
 function ExecutionReport({ result, onPreview, workspaceId }: { result: ExecutionResult; onPreview: (path: string) => void; workspaceId?: string }) {
@@ -396,8 +457,8 @@ function ExecutionReport({ result, onPreview, workspaceId }: { result: Execution
           <li key={phase.phase}>
             <div className="mf-run-phase-head">
               <strong>{humanize(phase.phase)}</strong>
-              <span className={phase.state === "Executed" ? "mf-pill success" : phase.state === "Failed" ? "mf-pill danger" : "mf-pill warn"}>
-                {phase.state === "Executed" ? <CheckCircle2 /> : phase.state === "Failed" ? <XCircle /> : <AlertTriangle />}
+              <span className={phase.state === "Executed" ? "mf-pill success" : phase.state === "Failed" || phase.state === "BlockedByDependency" ? "mf-pill danger" : "mf-pill warn"}>
+                {phase.state === "Executed" ? <CheckCircle2 /> : phase.state === "Failed" || phase.state === "BlockedByDependency" ? <XCircle /> : <AlertTriangle />}
                 {PHASE_STATE_LABELS[phase.state] ?? phase.state}
               </span>
             </div>
@@ -738,6 +799,8 @@ export default function WizardApp() {
       applicationName: fields.applicationName.trim(),
       requestedMode: mode,
       target: { frontEnd: "React", backEnd: "JavaSpringBoot", database },
+      oracleFormsVersion: fields.oracleFormsVersion.trim() || "unknown",
+      oracleDatabaseVersion: fields.oracleDatabaseVersion.trim() || "unknown",
       sourceRoot: sourceRoot.trim(),
       outputRoot: fields.outputRoot.trim(),
       evidence: evidence.map((kind, index) => ({ id: `EV-${index + 1}`, kind, source: "operator-console", summary: `${humanize(kind)} verified by the operator.`, isVerified: true, signals: [] })),
@@ -966,6 +1029,10 @@ export default function WizardApp() {
 
             <div className="mf-field-grid">
             <Field id="outputRoot" label="Where new code would go" hint="Folder path" help="The folder the generated Java, React and SQL would be written to when someone carries the plan out. Example: out/orders" placeholder="out/orders" value={fields.outputRoot} error={errors.outputRoot} onChange={(value) => updateField("outputRoot", value)} />
+          </div>
+            <div className="mf-field-grid">
+            <VersionSelect id="oracleFormsVersion" label="Oracle Forms release" options={FORMS_VERSIONS} value={fields.oracleFormsVersion} onChange={(value) => updateField("oracleFormsVersion", value)} help="The Forms release the application was built with, if you know it. Leave it as not established and the plan says so rather than guessing. Choosing a release never unlocks anything: .fmb, .mmb, .pll and .olb files are a proprietary binary, so a Forms XML export produced by your own Oracle tooling is still required before an application tier can be generated. Forms 6i additionally carries Oracle's recommendation to bridge through 10.1.2." />
+            <VersionSelect id="oracleDatabaseVersion" label="Oracle Database release" options={DATABASE_VERSIONS} value={fields.oracleDatabaseVersion} onChange={(value) => updateField("oracleDatabaseVersion", value)} help="The database release behind the SQL you supply. The workbench converts the SQL text either way; recording the release lets the conversion report state which release that text came from. It connects to no Oracle instance, so it can never confirm this for you." />
           </div></div>}
 
           {step === 1 && <div className="mf-step"><p className="mf-kicker">Destination</p><h1 ref={heading} tabIndex={-1}>Where should it land?</h1><p className="mf-lead">Every plan targets a React front end and a Java Spring Boot back end. Choose the Azure database, and how far ahead you want the plan to reach.</p>
@@ -1011,7 +1078,7 @@ export default function WizardApp() {
           </div>}
 
           {step === 4 && <form className="mf-step" onSubmit={generatePlan} noValidate><p className="mf-kicker">Review</p><h1 ref={heading} tabIndex={-1}>Check the migration setup</h1><p className="mf-lead">Read your answers back, then generate the plan. Generating a plan changes nothing; running it is a separate decision on the next screen.</p>
-            <section className="mf-review"><header><h2>Application</h2><button type="button" onClick={() => goToStep(0)}>Change</button></header><dl><ReviewRow label="Engagement" value={fields.engagementId} onEdit={() => goToStep(0)} /><ReviewRow label="Application" value={fields.applicationName} onEdit={() => goToStep(0)} /><ReviewRow label="Source" value={sourceLabel} onEdit={() => goToStep(0)} /><ReviewRow label="Output" value={fields.outputRoot} onEdit={() => goToStep(0)} /></dl></section>
+            <section className="mf-review"><header><h2>Application</h2><button type="button" onClick={() => goToStep(0)}>Change</button></header><dl><ReviewRow label="Engagement" value={fields.engagementId} onEdit={() => goToStep(0)} /><ReviewRow label="Application" value={fields.applicationName} onEdit={() => goToStep(0)} /><ReviewRow label="Source" value={sourceLabel} onEdit={() => goToStep(0)} /><ReviewRow label="Output" value={fields.outputRoot} onEdit={() => goToStep(0)} /><ReviewRow label="Oracle Forms release" value={FORMS_VERSIONS.find((item) => item.value === fields.oracleFormsVersion)?.label ?? fields.oracleFormsVersion} onEdit={() => goToStep(0)} /><ReviewRow label="Oracle Database release" value={DATABASE_VERSIONS.find((item) => item.value === fields.oracleDatabaseVersion)?.label ?? fields.oracleDatabaseVersion} onEdit={() => goToStep(0)} /></dl></section>
             <section className="mf-review"><header><h2>Destination</h2><button type="button" onClick={() => goToStep(1)}>Change</button></header><dl><ReviewRow label="Database" value={selectedDatabase?.name ?? database} onEdit={() => goToStep(1)} /><ReviewRow label="Planning depth" value={selectedMode?.name ?? mode} onEdit={() => goToStep(1)} /></dl></section>
             <section className="mf-review"><header><h2>Evidence and approvals</h2><button type="button" onClick={() => goToStep(2)}>Change</button></header><dl><ReviewRow label="Verified evidence" value={`${evidence.length} artifact types (${readyGroups}/${groups.length} requirements)`} onEdit={() => goToStep(2)} /><ReviewRow label="Sandbox approver" value={fields.executionApprover} onEdit={() => goToStep(3)} /><ReviewRow label="Production approver" value={fields.productionApprover} onEdit={() => goToStep(3)} /></dl></section>
             <div className="mf-boundary"><LockKeyhole /><p><strong>Generating the plan writes nothing.</strong>Afterwards you can run the phases the planner authorizes; those write files into your private session workspace only. Sandbox database migration and production cutover are not available here.</p></div>

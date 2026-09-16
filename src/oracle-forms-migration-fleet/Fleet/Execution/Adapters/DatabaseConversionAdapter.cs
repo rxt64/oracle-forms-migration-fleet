@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft. All rights reserved.
 
 using System.Globalization;
+using System.Text;
 using OracleFormsMigrationFleet.Fleet.Agents;
 
 namespace OracleFormsMigrationFleet.Fleet.Execution.Adapters;
@@ -40,6 +41,23 @@ public sealed class DatabaseConversionAdapter(
         string sourceRoot = WorkspacePath.Normalize(context.SourceRoot);
         string outputRoot = WorkspacePath.Normalize(context.OutputRoot);
 
+        OracleVersionAssessment source = OracleLegacyVersionCatalog.Database(context.Request.OracleDatabaseVersion);
+        if (source.Readiness == OracleConversionReadiness.Rejected)
+        {
+            // Converting anyway would attach a release label to the output that means nothing.
+            return PhaseExecutionResult.Failure(
+                $"The run declares Oracle Database version '{context.Request.OracleDatabaseVersion}'. {source.Disposition} " +
+                "Nothing was converted and nothing was written. Supply a recognized release, or 'unknown' if it has not been established.",
+                source.Warnings);
+        }
+
+        if (source.IsUnknown)
+        {
+            context.Warn(
+                "No Oracle Database release was supplied. Conversion runs from the supplied SQL text, and the report records that " +
+                "the release that produced that text was never established.");
+        }
+
         if (!context.Workspace.DirectoryExists(sourceRoot))
         {
             return PhaseExecutionResult.Failure(
@@ -48,47 +66,60 @@ public sealed class DatabaseConversionAdapter(
 
         List<string> sources = [];
         List<OracleSchema> schemas = [];
+        List<(string Path, OracleSchema Schema)> parsedScripts = [];
         List<BehaviourScenario> scenarios = [];
 
-        foreach (WorkspaceFile file in context.Workspace.EnumerateFiles(sourceRoot, MaxFiles))
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            string extension = Path.GetExtension(file.RelativePath);
-            if (extension.Equals(".yaml", StringComparison.OrdinalIgnoreCase)
-                || extension.Equals(".yml", StringComparison.OrdinalIgnoreCase))
+            foreach (WorkspaceFile file in context.Workspace.EnumerateFiles(sourceRoot, MaxFiles))
             {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                string extension = Path.GetExtension(file.RelativePath);
+                if (extension.Equals(".yaml", StringComparison.OrdinalIgnoreCase)
+                    || extension.Equals(".yml", StringComparison.OrdinalIgnoreCase))
+                {
+                    try
+                    {
+                        if (ScenarioReader.Read(context.Workspace.ReadText(file.RelativePath, MaxTextBytes)) is { } scenario)
+                        {
+                            scenarios.Add(scenario);
+                        }
+                    }
+                    catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                    {
+                        context.Warn($"{file.RelativePath} could not be read and was skipped.");
+                    }
+
+                    continue;
+                }
+
+                if (!OracleSourceFile.IsSqlText(file.RelativePath))
+                {
+                    continue;
+                }
+
                 try
                 {
-                    if (ScenarioReader.Read(context.Workspace.ReadText(file.RelativePath, MaxTextBytes)) is { } scenario)
-                    {
-                        scenarios.Add(scenario);
-                    }
+                    string text = context.Workspace.ReadText(file.RelativePath, MaxTextBytes);
+                    sources.Add(text);
+
+                    OracleSchema parsed = OracleSchemaParser.Parse(text);
+                    schemas.Add(parsed);
+                    parsedScripts.Add((file.RelativePath, parsed));
+                    context.Info($"Parsed {file.RelativePath}.");
                 }
                 catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
                 {
                     context.Warn($"{file.RelativePath} could not be read and was skipped.");
                 }
-
-                continue;
             }
-
-            if (!OracleSourceFile.IsSqlText(file.RelativePath))
-            {
-                continue;
-            }
-
-            try
-            {
-                string text = context.Workspace.ReadText(file.RelativePath, MaxTextBytes);
-                sources.Add(text);
-                schemas.Add(OracleSchemaParser.Parse(text));
-                context.Info($"Parsed {file.RelativePath}.");
-            }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-            {
-                context.Warn($"{file.RelativePath} could not be read and was skipped.");
-            }
+        }
+        catch (WorkspaceLimitExceededException limit)
+        {
+            // DDL emitted from the part that fitted would be a schema missing tables nobody was told about.
+            return PhaseExecutionResult.Failure(
+                $"Nothing was converted and nothing was written: {limit.Message}");
         }
 
         if (schemas.Count == 0)
@@ -106,11 +137,29 @@ public sealed class DatabaseConversionAdapter(
 
         PostgreSqlConversion conversion = PostgreSqlEmitter.Convert(schema, string.Join('\n', sources));
 
+        IReadOnlyList<ScriptAccounting> accounting =
+            [.. parsedScripts.Select(script => new ScriptAccounting(script.Path, OracleStatementAccounting.Account(script.Schema)))];
+
+        // A statement nothing could classify is the same loss as one that was classified and not emitted:
+        // in both cases the export declared something the target does not have, and neither may pass as a
+        // finding on an otherwise clean report.
+        IReadOnlyList<(string Path, OracleStatementAccount Account)> omitted =
+        [
+            .. accounting.SelectMany(script => script.Accounts
+                .Where(account => account.Disposition
+                    is OracleStatementDisposition.OmittedSchemaBearing or OracleStatementDisposition.Unclassified)
+                .Select(account => (script.Path, Account: account))),
+        ];
+
         string ddlPath = $"{outputRoot}/database/postgresql/schema/schema.sql";
         string reportPath = $"{outputRoot}/database/postgresql/conversion-report.md";
 
         context.Workspace.WriteText(ddlPath, conversion.Ddl);
-        context.Workspace.WriteText(reportPath, PostgreSqlEmitter.RenderReport(conversion.Report, context.Request.ApplicationName));
+        context.Workspace.WriteText(
+            reportPath,
+            PostgreSqlEmitter.RenderReport(conversion.Report, context.Request.ApplicationName)
+            + RenderSourceRelease(source, sources.Count)
+            + RenderStatementAccounting(accounting));
 
         int unsupported = conversion.Report.Findings.Count(finding => finding.Severity == ConversionSeverity.Unsupported);
         int review = conversion.Report.Findings.Count(finding => finding.Severity == ConversionSeverity.ManualReview);
@@ -134,6 +183,41 @@ public sealed class DatabaseConversionAdapter(
             Declared(context, ddlPath, ArtifactKind.DatabaseSchema, "Converted PostgreSql schema and programmable objects."),
             Declared(context, reportPath, ArtifactKind.ValidationReport, "Type mappings, unsupported constructs, and manual remediation list."),
         ];
+
+        List<string> accountingFindings =
+        [
+            .. accounting.SelectMany(script => script.Accounts
+                .Where(account => account.Disposition
+                    is not (OracleStatementDisposition.ClassifiedProgramUnit or OracleStatementDisposition.Comment))
+                .Select(account =>
+                    $"{(account.Disposition == OracleStatementDisposition.OmittedSchemaBearing || account.Disposition == OracleStatementDisposition.Unclassified ? ConversionSeverity.Unsupported : ConversionSeverity.ManualReview)}: " +
+                    $"Unparsed statement ({account.Disposition}) — {script.Path}: {account.Kind}: {account.Snippet}")),
+        ];
+
+        if (omitted.Count > 0)
+        {
+            // The DDL and the report stay on disk: they are the evidence for the refusal. What must not
+            // happen is the run reporting a clean conversion while an object the export declared is absent
+            // from the target and absent from the report.
+            string detail =
+                $"{omitted.Count.ToString(CultureInfo.InvariantCulture)} statement(s) in the supplied SQL either create or alter a schema object that " +
+                "this conversion does not emit, or could not be classified at all, so the converted schema is incomplete and nothing may treat it as a " +
+                "faithful copy: " +
+                string.Join("; ", omitted.Take(10).Select(entry => $"{entry.Path}: {entry.Account.Disposition}: {entry.Account.Kind}")) +
+                (omitted.Count > 10 ? "; ..." : string.Empty) + ". " +
+                "The emitted DDL and the conversion report were kept as the evidence for this refusal. Remove the objects from the export, " +
+                "or extend the converter to emit them, and re-run.";
+
+            context.Warn(detail);
+            return new PhaseExecutionResult(
+                false,
+                artifacts,
+                [
+                    .. conversion.Report.Findings.Select(finding => $"{finding.Severity}: {finding.Category} — {finding.Construct}: {finding.Reason}"),
+                    .. accountingFindings,
+                ],
+                detail);
+        }
 
         if (scenarios.Count > 0)
         {
@@ -161,7 +245,7 @@ public sealed class DatabaseConversionAdapter(
         }
 
         List<string> findings =
-            [.. conversion.Report.Findings.Select(finding => $"{finding.Severity}: {finding.Category} — {finding.Construct}: {finding.Reason}")];
+            [.. conversion.Report.Findings.Select(finding => $"{finding.Severity}: {finding.Category} — {finding.Construct}: {finding.Reason}"), .. accountingFindings];
 
         if (reviewer is not null)
         {
@@ -211,6 +295,117 @@ public sealed class DatabaseConversionAdapter(
         }
 
         return PhaseExecutionResult.Success(artifacts, findings);
+    }
+
+    private sealed record ScriptAccounting(string Path, IReadOnlyList<OracleStatementAccount> Accounts);
+
+    /// <summary>
+    /// Accounts for every statement the structural parser did not recognise, per source file.
+    ///
+    /// The section exists because the old report could only describe constructs the converter had a
+    /// signature for. Anything outside that list produced no DDL and no finding, so the report read clean
+    /// while the target was missing an object. Counts and snippets here make that impossible to miss.
+    /// </summary>
+    private static string RenderStatementAccounting(IReadOnlyList<ScriptAccounting> accounting)
+    {
+        StringBuilder section = new();
+        section.Append('\n').AppendLine("## Unparsed statement accounting").AppendLine();
+
+        int total = accounting.Sum(script => script.Accounts.Count);
+        if (total == 0)
+        {
+            section.AppendLine("Every statement in the supplied SQL was recognised by the structural parser.").AppendLine();
+            return section.ToString();
+        }
+
+        section.AppendLine("| Source file | Statements not structurally parsed | Classified program units | Client directives | Comments | Data statements | Administrative | Omitted schema-bearing | Unclassified |");
+        section.AppendLine("| --- | --- | --- | --- | --- | --- | --- | --- | --- |");
+
+        foreach (ScriptAccounting script in accounting)
+        {
+            int Count(OracleStatementDisposition disposition) =>
+                script.Accounts.Count(account => account.Disposition == disposition);
+
+            section
+                .Append("| `").Append(script.Path).Append("` | ")
+                .Append(script.Accounts.Count.ToString(CultureInfo.InvariantCulture)).Append(" | ")
+                .Append(Count(OracleStatementDisposition.ClassifiedProgramUnit).ToString(CultureInfo.InvariantCulture)).Append(" | ")
+                .Append(Count(OracleStatementDisposition.ClientDirective).ToString(CultureInfo.InvariantCulture)).Append(" | ")
+                .Append(Count(OracleStatementDisposition.Comment).ToString(CultureInfo.InvariantCulture)).Append(" | ")
+                .Append(Count(OracleStatementDisposition.DataStatement).ToString(CultureInfo.InvariantCulture)).Append(" | ")
+                .Append(Count(OracleStatementDisposition.Administrative).ToString(CultureInfo.InvariantCulture)).Append(" | ")
+                .Append(Count(OracleStatementDisposition.OmittedSchemaBearing).ToString(CultureInfo.InvariantCulture)).Append(" | ")
+                .Append(Count(OracleStatementDisposition.Unclassified).ToString(CultureInfo.InvariantCulture)).AppendLine(" |");
+        }
+
+        section.AppendLine();
+
+        (string Path, OracleStatementAccount Account)[] omitted =
+        [
+            .. accounting.SelectMany(script => script.Accounts
+                .Where(account => account.Disposition is OracleStatementDisposition.OmittedSchemaBearing or OracleStatementDisposition.Unclassified)
+                .Select(account => (script.Path, Account: account))),
+        ];
+
+        if (omitted.Length == 0)
+        {
+            section.AppendLine("No statement creates or alters a schema object that this conversion left out.").AppendLine();
+            return section.ToString();
+        }
+
+        section.AppendLine("### Statements this conversion did not emit").AppendLine();
+        section.AppendLine("| Source file | Disposition | Statement |");
+        section.AppendLine("| --- | --- | --- |");
+
+        foreach ((string path, OracleStatementAccount account) in omitted)
+        {
+            section
+                .Append("| `").Append(path).Append("` | ").Append(account.Disposition).Append(" | `")
+                .Append(account.Snippet.Replace("|", "\\|", StringComparison.Ordinal)).AppendLine("` |");
+        }
+
+        section.AppendLine();
+        section.AppendLine("A statement listed as `OmittedSchemaBearing` creates or alters a persistent object that is not in the emitted DDL.");
+        section.AppendLine("A statement listed as `Unclassified` matched nothing this fleet recognises, so what it declares is unknown and cannot be assumed harmless.");
+        section.AppendLine("The conversion is refused while any of them remain, because a schema missing an object the export declared is not a copy of it.");
+        section.AppendLine();
+
+        return section.ToString();
+    }
+
+    /// <summary>
+    /// States which Oracle release the converted text is claimed to come from, and what that claim rests on.
+    /// The parser reads SQL, so a clean conversion proves the constructs present in the supplied export and
+    /// says nothing about a release this fleet never connected to.
+    /// </summary>
+    private static string RenderSourceRelease(OracleVersionAssessment source, int scripts)
+    {
+        StringBuilder section = new();
+        section.Append('\n').AppendLine("## Source Oracle Database release").AppendLine();
+        section.AppendLine("| Question | Answer |");
+        section.AppendLine("| --- | --- |");
+        section.Append("| Declared at intake | ")
+               .Append(source.Supplied.Length > 0 ? source.Supplied.Replace("|", "\\|", StringComparison.Ordinal) : "unknown")
+               .AppendLine(" |");
+        section.Append("| Interpreted as | ").Append(source.Label).AppendLine(" |");
+        section.Append("| Recognized release | ").Append(source.IsRecognized ? "yes" : "no").AppendLine(" |");
+        section.Append("| Conversion readiness | ").Append(source.Readiness).AppendLine(" |");
+        section.Append("| SQL scripts read | ").Append(scripts.ToString(CultureInfo.InvariantCulture)).AppendLine(" |");
+        section.AppendLine();
+        section.AppendLine(source.Disposition).AppendLine();
+
+        section.AppendLine("This conversion is evidence about **the supplied text**, not about an Oracle instance. Everything above was");
+        section.AppendLine("read from SQL files an operator placed in the workspace. This fleet has no live Oracle extraction adapter: it");
+        section.AppendLine("opened no database, ran no query, and confirmed no release. A clean conversion therefore proves that the");
+        section.AppendLine("constructs appearing in that export were translated, and does not establish support for every construct the");
+        section.Append("release ").Append(source.Label).AppendLine(" can produce.").AppendLine();
+
+        foreach (string warning in source.Warnings)
+        {
+            section.Append("- ").AppendLine(warning);
+        }
+
+        return section.ToString();
     }
 
     /// <summary>

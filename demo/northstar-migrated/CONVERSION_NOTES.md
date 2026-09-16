@@ -72,11 +72,6 @@ JSON 404.
 - **No behaviour came from a Forms module.** The workflows above were recognised from the
   schema and generated from this fleet's own template. Any screen or rule outside the listed
   modules and routes still has to be rebuilt against the real application.
-- **BANK_ACCOUNT_REQUEST_FORM.BANK_ACCOUNT_REQUEST_FORM.WHEN-NEW-FORM-INSTANCE** — Forms trigger logic is PL/SQL bound to a client-side event model with no PostgreSQL or React equivalent. It was not translated; the generated screen has the field but not this behaviour.
-- **BANK_ACCOUNT_REQUEST_FORM.REQUEST_BLOCK.WHEN-BUTTON-PRESSED** — Forms trigger logic is PL/SQL bound to a client-side event model with no PostgreSQL or React equivalent. It was not translated; the generated screen has the field but not this behaviour.
-- **BANK_ACCOUNT_REQUEST_FORM.REQUEST_BLOCK.WHEN-VALIDATE-RECORD** — Forms trigger logic is PL/SQL bound to a client-side event model with no PostgreSQL or React equivalent. It was not translated; the generated screen has the field but not this behaviour.
-- **BANK_ACCOUNT_REQUEST_FORM.REQUEST_BLOCK.POST-QUERY** — Forms trigger logic is PL/SQL bound to a client-side event model with no PostgreSQL or React equivalent. It was not translated; the generated screen has the field but not this behaviour.
-- **BANK_ACCOUNT_REQUEST_FORM.REFRESH_SUMMARY** — A program unit inside the module was not translated. It has to be reimplemented in the back end.
 
 ## Before this replaces anything
 

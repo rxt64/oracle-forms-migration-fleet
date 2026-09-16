@@ -164,7 +164,9 @@ public static class MigrationWorkbenchCatalog
             "Document the as-is behavior and normalize the estate into a stable intermediate representation the converters can consume.",
             [MigrationPhase.DocumentationGeneration, MigrationPhase.SourceNormalization],
             RequiresExecutionAdapter: true,
-            // No adapter parses Forms modules, so neither phase in this step can run.
+            // SourceNormalization has an adapter, but it normalizes supplied Forms text and refuses a
+            // binary-only estate rather than parsing modules. DocumentationGeneration still has none, so
+            // the step as a whole is not connected.
             AdapterConnected: false,
             ["foundry-hosted-agent", "blob-storage"]),
 

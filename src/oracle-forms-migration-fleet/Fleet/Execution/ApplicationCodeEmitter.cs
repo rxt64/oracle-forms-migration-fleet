@@ -99,11 +99,32 @@ public static class ApplicationCodeEmitter
             files.Add(BuildReactMain());
             files.Add(BuildViteTypes());
 
-            IReadOnlyList<FormsBlock> screens =
-                [.. (forms ?? []).SelectMany(module => module.Blocks).Where(block => block.BaseTable is not null)];
+            IReadOnlyList<FormsScreen> screens =
+            [
+                .. (forms ?? [])
+                    .SelectMany(module => module.Blocks
+                        .Where(block => block.BaseTable is not null)
+                        .Select(block => new FormsScreen(module, block)))
+                    .OrderBy(screen => screen.Identity, StringComparer.Ordinal),
+            ];
+
+            // One App.tsx is emitted, so the block it comes from is chosen by directory-qualified identity
+            // rather than by the order the modules happened to arrive in. Every other readable screen is
+            // reported below: two directories carrying one module name are two modules, and dropping
+            // either without a word would understate what the estate holds.
+            foreach (FormsScreen unrendered in screens.Skip(1))
+            {
+                findings.Add(new ConversionFinding(
+                    ConversionSeverity.ManualReview,
+                    "Forms module",
+                    unrendered.Identity,
+                    "This block was read from the normalized representation but is not the one the single generated screen " +
+                    "was built from. It was not dropped: build it as its own screen against the generated endpoints before " +
+                    "this tier replaces the Forms client."));
+            }
 
             files.Add(screens.Count > 0
-                ? BuildReactAppFromForms(screens, tables, findings)
+                ? BuildReactAppFromForms(screens[0], tables, findings)
                 : BuildReactApp(tables));
         }
 
@@ -484,12 +505,21 @@ public static class ApplicationCodeEmitter
     }
 
     /// <summary>
+    /// A block that can back a screen, carried with the module it came from so it stays attributable to a
+    /// directory-qualified module rather than to a bare block name two modules could share.
+    /// </summary>
+    private sealed record FormsScreen(FormsModule Module, FormsBlock Block)
+    {
+        public string Identity => $"{Module.QualifiedName}.{Block.Name}";
+    }
+
+    /// <summary>
     /// Builds the screen from the Forms block: its item order, prompts, and required flags, not the table's.
     /// </summary>
     private static GeneratedFile BuildReactAppFromForms(
-        IReadOnlyList<FormsBlock> screens, IReadOnlyList<OracleTable> tables, List<ConversionFinding> findings)
+        FormsScreen screen, IReadOnlyList<OracleTable> tables, List<ConversionFinding> findings)
     {
-        FormsBlock block = screens[0];
+        FormsBlock block = screen.Block;
         OracleTable? table = tables.FirstOrDefault(candidate =>
             string.Equals(candidate.Name, block.BaseTable, StringComparison.OrdinalIgnoreCase));
 
@@ -498,7 +528,7 @@ public static class ApplicationCodeEmitter
             findings.Add(new ConversionFinding(
                 ConversionSeverity.Unsupported,
                 "Forms module",
-                $"{block.Name} over {block.BaseTable}",
+                $"{screen.Identity} over {block.BaseTable}",
                 "The block's base table was not found in the supplied schema, so the screen fell back to table structure."));
 
             return BuildReactApp(tables);
@@ -519,7 +549,7 @@ public static class ApplicationCodeEmitter
                 findings.Add(new ConversionFinding(
                     ConversionSeverity.ManualReview,
                     "Forms module",
-                    $"{block.Name}.{item.Name}",
+                    $"{screen.Identity}.{item.Name}",
                     "The item is not backed by a column in the supplied schema, so it was left off the screen. It was " +
                     "populated by Forms logic that has not been translated."));
             }
@@ -536,7 +566,7 @@ public static class ApplicationCodeEmitter
         builder.AppendLine("import { useEffect, useState } from \"react\";");
         builder.AppendLine($"import {{ list{className} }} from \"./api\";");
         builder.AppendLine($"import type {{ {className} }} from \"./types\";").AppendLine();
-        builder.AppendLine($"// Generated from Forms block {block.Name} over {block.BaseTable}.");
+        builder.AppendLine($"// Generated from Forms block {block.Name} over {block.BaseTable}, in module {screen.Module.QualifiedName}.");
         builder.AppendLine("// Column order and labels follow the form; trigger behaviour does not.");
         builder.AppendLine("export default function App() {");
         builder.AppendLine($"  const [rows, setRows] = useState<{className}[]>([]);");
@@ -583,7 +613,7 @@ public static class ApplicationCodeEmitter
         return new GeneratedFile(
             "frontend/src/App.tsx",
             builder.ToString(),
-            $"React screen generated from Forms block {block.Name}.");
+            $"React screen generated from Forms block {screen.Identity}.");
     }
 
     /// <summary>Escapes for JSX text, where a brace opens an expression.</summary>

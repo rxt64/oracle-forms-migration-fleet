@@ -116,6 +116,72 @@ public class RequestValidationTests
         Assert.False(FleetGuardrails.ContainsPotentialSecret(
             "The ORDERS form uses a password field bound to a database column."));
 
+    /// <summary>
+    /// Both request contracts share one intake check. An assessment used to accept any string as a release
+    /// and a run request checked neither field for credential material, so the two boundaries disagreed
+    /// about the same two fields.
+    /// </summary>
+    [Theory]
+    [InlineData("banana", "19c")]
+    [InlineData("12c", "banana")]
+    [InlineData("12c 19c", "19c")]
+    [InlineData("12c", "latest")]
+    [InlineData("6", "19c")]
+    public void A_release_the_catalog_cannot_interpret_is_rejected_at_intake(string forms, string database)
+    {
+        RequestValidationResult assessment = RequestValidator.Validate(
+            Requests.Build(Requests.CompleteEvidence(), Requests.Approved(), oracleFormsVersion: forms, oracleDatabaseVersion: database));
+
+        Assert.False(assessment.IsValid);
+        Assert.Contains(assessment.Errors, error =>
+            error.Contains("OracleFormsVersion", StringComparison.Ordinal) || error.Contains("OracleDatabaseVersion", StringComparison.Ordinal));
+
+        MigrationRunPlan plan = MigrationRunPlanner.Plan(new MigrationRunRequest
+        {
+            EngagementId = "ENG-001",
+            ApplicationName = "ORDERS",
+            Target = new TargetStack { Database = DatabaseTarget.PostgreSql },
+            OracleFormsVersion = forms,
+            OracleDatabaseVersion = database,
+            SourceRoot = "legacy/forms",
+            OutputRoot = "out/orders",
+        });
+
+        // Blocked before any phase resolves, so no adapter can be reached and no artifact written.
+        Assert.Empty(plan.Phases);
+        Assert.Contains(plan.Blockers, blocker =>
+            blocker.Contains("OracleFormsVersion", StringComparison.Ordinal) || blocker.Contains("OracleDatabaseVersion", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("Server=db;User Id=sa;Password=hunter2")]
+    [InlineData("api_key: abc123")]
+    public void Credential_material_in_a_release_field_is_rejected_by_both_contracts(string value)
+    {
+        Assert.Contains(
+            OracleVersionIntake.Validate(value, "19c"),
+            error => error.Contains("credential material", StringComparison.OrdinalIgnoreCase));
+
+        Assert.Contains(
+            MigrationRunPlanner.Plan(new MigrationRunRequest
+            {
+                EngagementId = "ENG-001",
+                ApplicationName = "ORDERS",
+                Target = new TargetStack { Database = DatabaseTarget.PostgreSql },
+                OracleDatabaseVersion = value,
+                SourceRoot = "legacy/forms",
+                OutputRoot = "out/orders",
+            }).Blockers,
+            blocker => blocker.Contains("credential material", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void An_unrecorded_release_is_still_allowed_at_intake()
+    {
+        Assert.Empty(OracleVersionIntake.Validate("unknown", "unknown"));
+        Assert.Empty(OracleVersionIntake.Validate(null, null));
+    }
+
     [Fact]
     public void Valid_request_passes()
     {

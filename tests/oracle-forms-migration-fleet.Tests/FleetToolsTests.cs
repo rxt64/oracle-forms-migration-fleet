@@ -47,6 +47,7 @@ public class FleetToolsTests
 
     [Theory]
     [InlineData("aoreshkov/oracle-forms-mcp", ToolAuthority.OpenSourceImplementation)]
+    [InlineData("felipebz/ndapi", ToolAuthority.OpenSourceImplementation)]
     [InlineData("Ora2Pg", ToolAuthority.OpenSourceImplementation)]
     [InlineData("franklingjr/oracle-forms-migration", ToolAuthority.OpenSourceImplementation)]
     [InlineData("Cognition workshop", ToolAuthority.WorkshopReference)]
@@ -121,6 +122,71 @@ public class FleetToolsTests
         Assert.Contains("XML/PLD", tool.Limitations, StringComparison.Ordinal);
         Assert.Contains("does not generate React or Java", tool.Limitations, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("does not migrate databases", tool.Limitations, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Ndapi_entry_records_native_process_and_target_generation_boundaries()
+    {
+        MigrationToolDefinition tool = Assert.Single(
+            FleetTools.DescribeMigrationLandscape().Tools,
+            candidate => candidate.Name.Contains("ndapi", StringComparison.OrdinalIgnoreCase));
+
+        Assert.Equal(ToolAuthority.OpenSourceImplementation, tool.Authority);
+        Assert.Contains("6.0.8.22.1", tool.Limitations, StringComparison.Ordinal);
+        Assert.Contains("Windows x86", tool.Limitations, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Oracle native libraries", tool.Limitations, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("read-only allowlisted worker", tool.Limitations, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("does not generate ASP.NET", tool.Limitations, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("does not cover 9i-11g directly", tool.Limitations, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// "Selected 12.2.1.x releases" read as a whole patch line, so a reader could assume any 12c build was
+    /// covered. Only three stable builds are documented, and nothing upstream proves even those run.
+    /// </summary>
+    [Theory]
+    [InlineData("12.2.1.3")]
+    [InlineData("12.2.1.4")]
+    [InlineData("12.2.1.19")]
+    public void Ndapi_entry_names_the_exact_stable_12c_builds_rather_than_a_patch_line(string build)
+    {
+        MigrationToolDefinition tool = Assert.Single(
+            FleetTools.DescribeMigrationLandscape().Tools,
+            candidate => candidate.Name.Contains("ndapi", StringComparison.OrdinalIgnoreCase));
+
+        Assert.Contains(build, tool.Limitations, StringComparison.Ordinal);
+        Assert.DoesNotContain("selected 12.2.1.x", tool.Limitations, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Ndapi_entry_records_that_nothing_upstream_proves_native_forms_execution()
+    {
+        MigrationToolDefinition tool = Assert.Single(
+            FleetTools.DescribeMigrationLandscape().Tools,
+            candidate => candidate.Name.Contains("ndapi", StringComparison.OrdinalIgnoreCase));
+
+        Assert.Contains("no test project", tool.Limitations, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("CI", tool.Limitations, StringComparison.Ordinal);
+        Assert.Contains("proves native Forms execution", tool.Limitations, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("14.1.2.0", tool.Limitations, StringComparison.Ordinal);
+        Assert.Contains("pre-release source only", tool.Limitations, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("mutating, save, compile, conversion, and database-connect", tool.Limitations, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// ASP.NET Core and Blazor are on the upstream roadmap. Neither ndapi nor this fleet emits either one,
+    /// so the entry has to say so rather than leaving a reader to infer a .NET target path exists today.
+    /// </summary>
+    [Fact]
+    public void Ndapi_entry_marks_aspnet_core_and_blazor_output_as_roadmap_only()
+    {
+        MigrationToolDefinition tool = Assert.Single(
+            FleetTools.DescribeMigrationLandscape().Tools,
+            candidate => candidate.Name.Contains("ndapi", StringComparison.OrdinalIgnoreCase));
+
+        Assert.Contains("ASP.NET Core and Blazor output is roadmap intent only", tool.Limitations, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("this fleet generates none from it", tool.Limitations, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("not end-to-end conversion proof", tool.Limitations, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

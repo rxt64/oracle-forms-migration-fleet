@@ -79,16 +79,32 @@ public sealed class SourceAnalysisAdapter : IPhaseAdapter
                 $"The source root '{sourceRoot}' does not exist in the workspace. Nothing was analysed and no artifact was written."));
         }
 
-        IReadOnlyList<WorkspaceFile> files = context.Workspace.EnumerateFiles(sourceRoot, MaxFiles);
-        if (files.Count == 0)
+        IReadOnlyList<WorkspaceFile> files;
+        Analysis analysis;
+
+        // A refused limit means part of the estate was never looked at. Every artifact below is a count or
+        // an inventory of the whole tree, so producing them from what fitted would be a false clean result.
+        try
+        {
+            files = context.Workspace.EnumerateFiles(sourceRoot, MaxFiles);
+
+            if (files.Count == 0)
+            {
+                return Task.FromResult(PhaseExecutionResult.Failure(
+                    $"The source root '{sourceRoot}' contains no files. Nothing was analysed and no artifact was written."));
+            }
+
+            context.Info($"Indexed {files.Count.ToString(CultureInfo.InvariantCulture)} files under {sourceRoot}.");
+
+            analysis = Analyse(context, files, cancellationToken);
+        }
+        catch (WorkspaceLimitExceededException limit)
         {
             return Task.FromResult(PhaseExecutionResult.Failure(
-                $"The source root '{sourceRoot}' contains no files. Nothing was analysed and no artifact was written."));
+                $"Source analysis was stopped before anything was written: {limit.Message} An inventory, dependency graph, and " +
+                "technical debt report built from the part that fitted would have described a fraction of the estate as though " +
+                "it were all of it."));
         }
-
-        context.Info($"Indexed {files.Count.ToString(CultureInfo.InvariantCulture)} files under {sourceRoot}.");
-
-        Analysis analysis = Analyse(context, files, cancellationToken);
 
         context.Info(
             $"Parsed {analysis.Schema.Tables.Count.ToString(CultureInfo.InvariantCulture)} tables, " +
@@ -130,18 +146,22 @@ public sealed class SourceAnalysisAdapter : IPhaseAdapter
 
     private sealed record ParsedScript(string Path, OracleSchema Schema);
 
+    private sealed record DeclaredForms(string Path, string Version, string Family);
+
     private sealed record Analysis(
         IReadOnlyList<WorkspaceFile> Files,
         IReadOnlyList<WorkspaceFile> Binaries,
         IReadOnlyList<ParsedScript> Scripts,
         OracleSchema Schema,
         IReadOnlyDictionary<string, string> TableSources,
-        IReadOnlyList<DebtFinding> Debt);
+        IReadOnlyList<DebtFinding> Debt,
+        IReadOnlyList<DeclaredForms> DeclaredFormsVersions);
 
     private static Analysis Analyse(PhaseExecutionContext context, IReadOnlyList<WorkspaceFile> files, CancellationToken cancellationToken)
     {
         List<WorkspaceFile> binaries = [];
         List<ParsedScript> scripts = [];
+        List<DeclaredForms> declared = [];
 
         foreach (WorkspaceFile file in files)
         {
@@ -151,6 +171,24 @@ public sealed class SourceAnalysisAdapter : IPhaseAdapter
             if (s_opaqueBinary.Contains(extension))
             {
                 binaries.Add(file);
+                continue;
+            }
+
+            if (extension.Equals(".xml", StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    FormsXmlDeclaration declaration = FormsXmlVersionReader.Read(context.Workspace.ReadText(file.RelativePath, MaxTextBytes));
+                    if (declaration.HasFormModule && declaration.AnyDeclaredVersion is { } version)
+                    {
+                        declared.Add(new DeclaredForms(file.RelativePath, version, OracleLegacyVersionCatalog.Forms(version).Label));
+                    }
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                {
+                    context.Warn($"{file.RelativePath} could not be read and was skipped.");
+                }
+
                 continue;
             }
 
@@ -180,7 +218,7 @@ public sealed class SourceAnalysisAdapter : IPhaseAdapter
             }
         }
 
-        return new Analysis(files, binaries, scripts, schema, tableSources, FindDebt(schema, binaries, scripts));
+        return new Analysis(files, binaries, scripts, schema, tableSources, FindDebt(schema, binaries, scripts), declared);
     }
 
     /// <summary>Only facts visible in the parsed model become findings. Nothing here is inferred.</summary>
@@ -322,6 +360,7 @@ public sealed class SourceAnalysisAdapter : IPhaseAdapter
         Line();
         Line($"Files indexed: {analysis.Files.Count.ToString(CultureInfo.InvariantCulture)}");
         Line();
+        RenderReleases(context, analysis, Line);
         Line("## Artifacts by category");
         Line();
         Line("| Category | Files | Bytes |");
@@ -380,9 +419,52 @@ public sealed class SourceAnalysisAdapter : IPhaseAdapter
         return markdown.ToString();
     }
 
-    private static string RenderDataDictionary(PhaseExecutionContext context, Analysis analysis)
+    /// <summary>
+    /// Records the releases this run is working from, separating what the operator typed from what a supplied
+    /// export declares. Neither is provenance, and the table says so rather than implying a verified version.
+    /// </summary>
+    private static void RenderReleases(PhaseExecutionContext context, Analysis analysis, Action<string> line)
     {
-        StringBuilder markdown = new();
+        OracleVersionAssessment forms = OracleLegacyVersionCatalog.Forms(context.Request.OracleFormsVersion);
+        OracleVersionAssessment database = OracleLegacyVersionCatalog.Database(context.Request.OracleDatabaseVersion);
+
+        string detected = analysis.DeclaredFormsVersions.Count == 0
+            ? "not declared by any supplied export"
+            : string.Join(", ", analysis.DeclaredFormsVersions
+                .Select(entry => $"{entry.Family} (`{entry.Path}` declares `{entry.Version}`)")
+                .Distinct(StringComparer.Ordinal));
+
+        line("## Releases this run is working from");
+        line(string.Empty);
+        line("| Layer | Declared at intake | Interpreted as | Detected in source | Readiness |");
+        line("| --- | --- | --- | --- | --- |");
+        line($"| Oracle Forms | {Cell(forms.Supplied)} | {forms.Label} | {detected} | {forms.Readiness} |");
+        line($"| Oracle Database | {Cell(database.Supplied)} | {database.Label} | not detected: this fleet reads supplied SQL text and connects to no instance | {database.Readiness} |");
+        line(string.Empty);
+        line(forms.Disposition);
+        line(string.Empty);
+        line(database.Disposition);
+        line(string.Empty);
+
+        foreach (string warning in forms.Warnings.Concat(database.Warnings))
+        {
+            line($"- {warning}");
+        }
+
+        if (analysis.Binaries.Count > 0)
+        {
+            line($"- {analysis.Binaries.Count.ToString(CultureInfo.InvariantCulture)} binary module(s) were counted by name and size only. " +
+                 "Whatever release they were built with cannot be read from them here, so the Forms release above rests on the intake value or on a supplied XML export, not on the binaries.");
+        }
+
+        line(string.Empty);
+
+        static string Cell(string supplied) =>
+            (supplied.Length > 0 ? supplied : "unknown").Replace("|", "\\|", StringComparison.Ordinal);
+    }
+
+    private static string RenderDataDictionary(PhaseExecutionContext context, Analysis analysis)
+    {        StringBuilder markdown = new();
         void Line(string text = "") => markdown.Append(text).Append('\n');
 
         Line("# Data dictionary");

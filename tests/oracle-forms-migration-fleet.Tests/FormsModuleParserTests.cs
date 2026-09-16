@@ -30,10 +30,10 @@ public class FormsModuleParserTests
         </Module>
         """;
 
-    /// <summary>The shape a real frmf2xml export has: FormModule at the root and Yes/No booleans.</summary>
+    /// <summary>The other documented frmf2xml root: FormModule itself, with Yes/No booleans.</summary>
     private const string RealExport = """
         <?xml version="1.0" encoding="UTF-8"?>
-        <FormModule Name="HRMS_EMPLOYEE" ConsoleWindow="CONSOLE" Title="HRMS - Employee Maintenance">
+        <FormModule xmlns="http://xmlns.oracle.com/Forms" Name="HRMS_EMPLOYEE" ConsoleWindow="CONSOLE" Title="HRMS - Employee Maintenance">
           <AttachedLibrary Name="HRMS_COMMON_LIB" LibrarySource="File"/>
           <Trigger Name="WHEN-NEW-FORM-INSTANCE" TriggerStyle="PL/SQL">
             <TriggerText>BEGIN NULL; END;</TriggerText>
@@ -144,11 +144,170 @@ public class FormsModuleParserTests
         FormsModuleParse parsed = FormsModuleParser.Parse("""
             <?xml version="1.0"?>
             <!DOCTYPE Module [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>
-            <Module><FormModule Name="X"/></Module>
+            <Module xmlns="http://xmlns.oracle.com/Forms"><FormModule Name="X"/></Module>
             """);
 
         Assert.Empty(parsed.Modules);
         Assert.Contains(parsed.Findings, finding => finding.Severity == ConversionSeverity.Unsupported);
+    }
+
+    /// <summary>
+    /// Only the two documented Oracle roots are read, and both have to be in the Forms namespace. A
+    /// namespace-less or foreign document whose elements happen to be named FormModule carries attribute
+    /// meanings this fleet has not established, so reading it would invent a module out of arbitrary XML.
+    /// </summary>
+    [Theory]
+    [InlineData("<Module><FormModule Name=\"X\"><Block Name=\"B\"/></FormModule></Module>")]
+    [InlineData("<FormModule Name=\"X\"><Block Name=\"B\"/></FormModule>")]
+    [InlineData("<Module xmlns=\"urn:example:forms\"><FormModule Name=\"X\"/></Module>")]
+    [InlineData("<config xmlns=\"http://xmlns.oracle.com/Forms\"><FormModule Name=\"X\"/></config>")]
+    public void A_root_shape_outside_the_oracle_forms_namespace_is_refused(string xml)
+    {
+        FormsModuleParse parsed = FormsModuleParser.Parse(xml);
+
+        Assert.Empty(parsed.Modules);
+        Assert.Contains(
+            parsed.Findings,
+            finding => finding.Severity == ConversionSeverity.Unsupported
+                       && finding.Reason.Contains("http://xmlns.oracle.com/Forms", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_mixed_namespace_export_is_refused_rather_than_partly_read()
+    {
+        FormsModuleParse parsed = FormsModuleParser.Parse("""
+            <Module xmlns="http://xmlns.oracle.com/Forms">
+              <FormModule Name="READ_ME"><Block Name="B"/></FormModule>
+              <other:FormModule xmlns:other="urn:example:forms" Name="HIDDEN"/>
+            </Module>
+            """);
+
+        Assert.Empty(parsed.Modules);
+        Assert.Contains(parsed.Findings, finding => finding.Reason.Contains("mixes namespaces", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// A valid root is not a licence for everything under it. Forms structure is matched by element name,
+    /// so an element in a foreign namespace carrying a Forms name would be read as the block, item,
+    /// trigger, program unit, LOV, library, or relation it is not, and a document nobody could change at
+    /// the root could still inject structure into the module model.
+    /// </summary>
+    [Theory]
+    [InlineData("<evil:Block xmlns:evil=\"urn:example:evil\" Name=\"INJECTED\" QueryDataSourceName=\"SECRETS\"/>")]
+    [InlineData("<evil:Item xmlns:evil=\"urn:example:evil\" Name=\"INJECTED\" ColumnName=\"PASSWORD_HASH\"/>")]
+    [InlineData("<evil:Trigger xmlns:evil=\"urn:example:evil\" Name=\"WHEN-INJECTED\"/>")]
+    [InlineData("<evil:ProgramUnit xmlns:evil=\"urn:example:evil\" Name=\"INJECTED\"/>")]
+    [InlineData("<evil:LOV xmlns:evil=\"urn:example:evil\" Name=\"INJECTED\"/>")]
+    [InlineData("<evil:AttachedLibrary xmlns:evil=\"urn:example:evil\" Name=\"INJECTED\"/>")]
+    [InlineData("<evil:Relation xmlns:evil=\"urn:example:evil\" Name=\"INJECTED\" DetailBlock=\"B\"/>")]
+    [InlineData("<Block xmlns=\"\" Name=\"INJECTED\" QueryDataSourceName=\"SECRETS\"/>")]
+    [InlineData("<Item xmlns=\"\" Name=\"INJECTED\" ColumnName=\"PASSWORD_HASH\"/>")]
+    public void A_foreign_namespace_element_nested_under_a_valid_root_is_refused(string injected)
+    {
+        FormsModuleParse parsed = FormsModuleParser.Parse($"""
+            <Module xmlns="http://xmlns.oracle.com/Forms" version="12.2.1.4">
+              <FormModule Name="ORDER_ENTRY">
+                <Block Name="ORDER_BLOCK" QueryDataSourceName="ORDERS">
+                  {injected}
+                </Block>
+              </FormModule>
+            </Module>
+            """);
+
+        Assert.Empty(parsed.Modules);
+        Assert.Contains(parsed.Findings, finding =>
+            finding.Severity == ConversionSeverity.Unsupported
+            && finding.Reason.Contains("mixes namespaces", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_foreign_namespace_element_under_a_bare_formmodule_root_is_refused()
+    {
+        // The single-module root shape used to skip the mixed-namespace check entirely.
+        FormsModuleParse parsed = FormsModuleParser.Parse("""
+            <FormModule xmlns="http://xmlns.oracle.com/Forms" Name="HRMS_EMPLOYEE">
+              <evil:Block xmlns:evil="urn:example:evil" Name="INJECTED" QueryDataSourceName="SECRETS"/>
+            </FormModule>
+            """);
+
+        Assert.Empty(parsed.Modules);
+        Assert.Contains(parsed.Findings, finding => finding.Reason.Contains("mixes namespaces", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Attributes are read by local name, so a qualified attribute would compete with the real one for the
+    /// same meaning and document order would settle it. The document is refused instead.
+    /// </summary>
+    [Theory]
+    [InlineData("<Block evil:Name=\"INJECTED\" xmlns:evil=\"urn:example:evil\" Name=\"ORDER_BLOCK\" QueryDataSourceName=\"ORDERS\"/>")]
+    [InlineData("<Block Name=\"ORDER_BLOCK\" evil:QueryDataSourceName=\"SECRETS\" xmlns:evil=\"urn:example:evil\"/>")]
+    public void A_namespace_qualified_attribute_on_a_forms_element_is_refused(string block)
+    {
+        FormsModuleParse parsed = FormsModuleParser.Parse($"""
+            <Module xmlns="http://xmlns.oracle.com/Forms" version="12.2.1.4">
+              <FormModule Name="ORDER_ENTRY">
+                {block}
+              </FormModule>
+            </Module>
+            """);
+
+        Assert.Empty(parsed.Modules);
+        Assert.Contains(parsed.Findings, finding =>
+            finding.Reason.Contains("namespace-qualified attribute", StringComparison.Ordinal));
+    }
+
+    /// <summary>The two namespaces a real export routinely carries and that name nothing this fleet reads.</summary>
+    [Fact]
+    public void Schema_instance_and_xml_attributes_are_still_accepted()
+    {
+        FormsModuleParse parsed = FormsModuleParser.Parse("""
+            <Module xmlns="http://xmlns.oracle.com/Forms"
+                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                    xsi:schemaLocation="http://xmlns.oracle.com/Forms forms.xsd"
+                    version="12.2.1.4">
+              <FormModule Name="ORDER_ENTRY" xml:lang="en">
+                <Block Name="ORDER_BLOCK" QueryDataSourceName="ORDERS"/>
+              </FormModule>
+            </Module>
+            """);
+
+        FormsModule module = Assert.Single(parsed.Modules);
+        Assert.Equal("ORDER_ENTRY", module.Name);
+        Assert.Equal("ORDERS", module.Blocks[0].BaseTable);
+    }
+
+    /// <summary>
+    /// The rejection has to be the same answer on both sides. The version reader and the parser share one
+    /// loader precisely so a document cannot be refused structure by one and read for a release by the other.
+    /// </summary>
+    [Fact]
+    public void The_version_reader_refuses_the_same_nested_foreign_namespace_document()
+    {
+        const string Injected = """
+            <Module xmlns="http://xmlns.oracle.com/Forms" version="12.2.1.4">
+              <FormModule Name="ORDER_ENTRY" FormsVersion="12.2.1.4">
+                <evil:Trigger xmlns:evil="urn:example:evil" Name="WHEN-INJECTED"/>
+              </FormModule>
+            </Module>
+            """;
+
+        FormsXmlDeclaration declaration = FormsXmlVersionReader.Read(Injected);
+
+        Assert.False(declaration.HasFormModule);
+        Assert.Null(declaration.AnyDeclaredVersion);
+        Assert.NotNull(declaration.ShapeRejection);
+        Assert.Empty(FormsModuleParser.Parse(Injected).Modules);
+    }
+
+    [Fact]
+    public void The_version_reader_and_the_parser_agree_on_what_counts_as_an_export()
+    {
+        // They used to decide independently, so a document could declare a version to one and no module
+        // to the other.
+        foreach (string xml in (string[])[Export, RealExport, "<FormModule Name=\"X\"/>", "<project/>"])
+        {
+            Assert.Equal(FormsXmlVersionReader.Read(xml).HasFormModule, FormsModuleParser.Parse(xml).Modules.Count > 0);
+        }
     }
 
     [Fact]
