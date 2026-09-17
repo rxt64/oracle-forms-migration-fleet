@@ -176,8 +176,8 @@ Some limits are real. Respect these, and be specific about them rather than vagu
 ## Verified environment facts
 
 - `.slnx`, not `.sln`: `oracle-forms-migration-fleet.slnx`. Scripts globbing `*.sln` find nothing.
-- `dotnet` is at `C:\Users\rosobra\.dotnet\dotnet.exe` and is **not** on `PATH`.
-- Test: `& 'C:\Users\rosobra\.dotnet\dotnet.exe' test '.\oracle-forms-migration-fleet.slnx' --nologo`
+- `dotnet` is at `$env:USERPROFILE\.dotnet\dotnet.exe` and is **not** on `PATH`.
+- Test: `& "$env:USERPROFILE\.dotnet\dotnet.exe" test '.\oracle-forms-migration-fleet.slnx' --nologo`
 - Kill a running workbench before building; it locks `bin/Debug/net10.0/*.dll`.
 - Client bundle: `npm run build` in `src/oracle-forms-migration-fleet/ClientApp`.
 - Azure Container Instances SNAT **outbound** through a different address than the public inbound IP.

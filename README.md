@@ -55,6 +55,8 @@ Simplified editable concept: [docs/architecture-pipeline.excalidraw](docs/archit
 
 Simplified editable concept: [docs/architecture-target.excalidraw](docs/architecture-target.excalidraw)
 
+Azure service artwork in these diagrams comes from the official Microsoft Azure Public Service Icons V22 package. Microsoft owns the service icons and trademarks; the icons are reproduced unmodified.
+
 ## How it works
 
 | Stage | Azure and fleet components | What it does |
