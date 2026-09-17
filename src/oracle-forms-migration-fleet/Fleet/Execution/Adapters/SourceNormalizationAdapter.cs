@@ -54,10 +54,6 @@ public sealed class SourceNormalizationAdapter : IPhaseAdapter
     /// <summary>The only module types a FormModule XML export can be coverage for.</summary>
     private static readonly string[] s_formModuleExtensions = [".fmb", ".fmt"];
 
-    /// <summary>A load-order number in front of an export file name, as estates routinely carry.</summary>
-    private static readonly Regex s_loadOrderPrefix = new(
-        @"^\d+[-_. ]+", RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(250));
-
     public MigrationPhase Phase => MigrationPhase.SourceNormalization;
 
     public Task<PhaseExecutionResult> ExecuteAsync(PhaseExecutionContext context, CancellationToken cancellationToken)
@@ -123,11 +119,25 @@ public sealed class SourceNormalizationAdapter : IPhaseAdapter
         }
 
         string irPath = $"{outputRoot}/intermediate/forms-ir.json";
-        context.Workspace.WriteText(irPath, RenderIntermediate(sourceRoot, inventory, verdict));
+        string intermediate = RenderIntermediate(sourceRoot, inventory, verdict);
+        int intermediateBytes = Encoding.UTF8.GetByteCount(intermediate);
+
+        if (intermediateBytes > FormsIntermediateReader.MaxDocumentBytes)
+        {
+            const int MiB = 1024 * 1024;
+            string reason =
+                $"The normalized Forms representation would contain {intermediateBytes / MiB} MiB, while this build reads at most " +
+                $"{FormsIntermediateReader.MaxDocumentBytes / MiB} MiB. Nothing was normalized, because writing an IR that the next " +
+                "phase cannot read would turn a source-size limit into a late and misleading conversion failure.";
+            context.Warn(reason);
+            return Task.FromResult(new PhaseExecutionResult(false, artifacts, verdict.Findings, reason));
+        }
+
+        context.Workspace.WriteText(irPath, intermediate);
         artifacts.Add(new ArtifactReference(
             irPath,
             ArtifactKind.NormalizedSource,
-            "Normalized intermediate representation of the Forms modules that were readable as text. Structure only; no trigger or program-unit behaviour is in it."));
+            "Normalized intermediate representation of the Forms modules that were readable as text. Trigger bodies are retained as untrusted source text, not translated behaviour."));
 
         context.Info(verdict.Reason);
 
@@ -289,6 +299,14 @@ public sealed class SourceNormalizationAdapter : IPhaseAdapter
                 $"{inventory.Unreadable.Count.ToString(CultureInfo.InvariantCulture)} supplied file(s) under the source root could not be read " +
                 $"({string.Join(", ", inventory.Unreadable)}), so the estate was not fully inspected and nothing was normalized.");
         }
+
+            if (inventory.Modules.Count > FormsIntermediateReader.MaxModules)
+            {
+                return Refuse(
+                $"The supplied exports declare {inventory.Modules.Count.ToString(CultureInfo.InvariantCulture)} Forms modules across the estate, " +
+                $"while this build retains at most {FormsIntermediateReader.MaxModules.ToString(CultureInfo.InvariantCulture)}. Nothing was " +
+                "normalized, because writing an IR that the next phase refuses would move a known source-size blocker into a late conversion failure.");
+            }
 
         // Well-formed XML that names a Forms element in a shape this fleet does not read is a refusal, not
         // an unrelated file. Passing over it would drop a module from the estate without saying so.
@@ -585,25 +603,7 @@ public sealed class SourceNormalizationAdapter : IPhaseAdapter
     /// FormModule <c>BANK_ACCOUNT_REQUEST_FORM</c>). Nothing else is removed: two different modules must
     /// not normalize to the same identity.
     /// </summary>
-    private static string Identity(string name)
-    {
-        string trimmed = s_loadOrderPrefix.Replace(name.Trim(), string.Empty);
-        StringBuilder identity = new(trimmed.Length);
-
-        foreach (char character in trimmed.ToUpperInvariant())
-        {
-            char mapped = character is '-' or ' ' or '.' ? '_' : character;
-
-            if (mapped == '_' && (identity.Length == 0 || identity[^1] == '_'))
-            {
-                continue;
-            }
-
-            identity.Append(mapped);
-        }
-
-        return identity.ToString().TrimEnd('_');
-    }
+    private static string Identity(string name) => FormsModuleIdentity.Normalize(name);
 
     /// <summary>
     /// Reduces every release the supplied exports declare to one, or reports the contradiction.
@@ -810,7 +810,14 @@ public sealed class SourceNormalizationAdapter : IPhaseAdapter
 
     private sealed record IntermediateItem(string Name, string ItemType, string? DataType, string? ColumnName, string? Prompt, bool Required, bool Visible, int? MaxLength);
 
-    private sealed record IntermediateBlock(string Name, string? BaseTable, int RecordsDisplayed, IReadOnlyList<IntermediateItem> Items, IReadOnlyList<string> Triggers);
+    private sealed record IntermediateTrigger(string Name, string Scope, string? Body, string? BodyEncoding);
+
+    private sealed record IntermediateBlock(
+        string Name,
+        string? BaseTable,
+        int RecordsDisplayed,
+        IReadOnlyList<IntermediateItem> Items,
+        IReadOnlyList<IntermediateTrigger> Triggers);
 
     private sealed record IntermediateModule(
         string Name,
@@ -819,7 +826,7 @@ public sealed class SourceNormalizationAdapter : IPhaseAdapter
         string? DeclaredVersion,
         string DeclaredFamily,
         IReadOnlyList<IntermediateBlock> Blocks,
-        IReadOnlyList<string> Triggers,
+        IReadOnlyList<IntermediateTrigger> Triggers,
         IReadOnlyList<string> ProgramUnits,
         IReadOnlyList<string> Lovs);
 
@@ -858,8 +865,10 @@ public sealed class SourceNormalizationAdapter : IPhaseAdapter
                         block.RecordsDisplayed,
                         [.. block.Items.Select(item => new IntermediateItem(
                             item.Name, item.ItemType, item.DataType, item.ColumnName, item.Prompt, item.Required, item.Visible, item.MaxLength))],
-                        [.. block.Triggers.Select(trigger => trigger.Name)]))],
-                    [.. module.Triggers.Select(trigger => trigger.Name)],
+                        [.. block.Triggers.Select(trigger => new IntermediateTrigger(
+                            trigger.Name, trigger.Scope, trigger.Body, trigger.BodyEncoding?.ToString()))]))],
+                    [.. module.Triggers.Select(trigger => new IntermediateTrigger(
+                        trigger.Name, trigger.Scope, trigger.Body, trigger.BodyEncoding?.ToString()))],
                     module.ProgramUnits,
                     module.Lovs));
             }
@@ -874,8 +883,9 @@ public sealed class SourceNormalizationAdapter : IPhaseAdapter
             verdict.VersionAuthority,
             [.. modules.OrderBy(module => module.Name, StringComparer.Ordinal)],
             [
-                "This representation carries structure only: blocks, base tables, items, and the names of triggers, program units, and LOVs.",
-                "No trigger body, program-unit body, or LOV query is in it. Those are PL/SQL bound to a client-side event model and this fleet does not translate them.",
+                "This representation carries blocks, base tables, items, trigger identities, and XML-normalized trigger body text, plus the names of program units and LOVs.",
+                "Trigger bodies are retained as untrusted PL/SQL source text so changed behaviour remains distinguishable. BodyEncoding records whether Oracle supplied text as an XML attribute or child element; attribute text is subject to XML attribute whitespace normalization. Bodies are not translated or executed.",
+                "Program-unit bodies and LOV queries are not retained.",
                 "Modules that exist only as a binary are absent entirely. Their absence here is not evidence that they carry no behaviour.",
             ]);
 
@@ -988,7 +998,8 @@ public sealed class SourceNormalizationAdapter : IPhaseAdapter
         Line("- It does not prove the estate runs the release it names. Every release here was either typed at intake or read from");
         Line("  an attribute inside a supplied file, and a file declaring a version is not provenance.");
         Line("- It does not claim runtime parity for any release. A defined intake route is not a tested conversion.");
-        Line("- It does not read behaviour. Trigger bodies, program units, menus, libraries, and object libraries are named at most.");
+        Line("- It retains XML-normalized trigger body text as untrusted source in `forms-ir.json`, but does not translate or execute it.");
+        Line("  Program-unit bodies, LOV queries, menu logic, library bodies, and object-library contents are not retained.");
 
         return markdown.ToString();
     }

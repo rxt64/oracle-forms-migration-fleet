@@ -24,8 +24,8 @@ public sealed record FormsIntermediateRead(IReadOnlyList<FormsModule>? Modules, 
 /// skipped, and anything past the element cap was dropped without a word. A document that is not exactly
 /// what this fleet wrote is now refused with a reason, and the caller generates nothing.
 ///
-/// It reads structure only, because that is all the IR carries. No trigger, program unit, or LOV body is
-/// in it, so nothing here can recover behaviour that normalization did not.
+/// It retains trigger bodies as untrusted source text so changed source behaviour remains distinguishable.
+/// It does not translate or execute them, and no program-unit body or LOV query is present to recover.
 ///
 /// The document is also bound to the run reading it: the caller supplies the source root it is executing
 /// against, and a representation that records a different root, or a module read from outside that root,
@@ -37,10 +37,11 @@ public static class FormsIntermediateReader
     public const string Generator = "oracle-forms-migration-fleet/source-normalization";
 
     /// <summary>The only IR schema version this build understands.</summary>
-    public const string SchemaVersion = "1";
+    public const string SchemaVersion = "2";
 
-    private const int MaxModules = 5_000;
-    private const int MaxChildren = 20_000;
+    public const int MaxModules = 5_000;
+    public const int MaxChildren = 20_000;
+    public const long MaxDocumentBytes = 64L * 1024 * 1024;
 
     private static readonly string[] s_requiredRootFields =
         ["generator", "schemaVersion", "normalized", "sourceRoot", "formsFamily", "versionAuthority", "modules"];
@@ -174,7 +175,8 @@ public static class FormsIntermediateReader
                     return Refuse(blockError!);
                 }
 
-                (IReadOnlyList<string>? triggers, string? triggerError) = Strings(module, "triggers", $"module '{name}'");
+                (IReadOnlyList<FormsTrigger>? triggers, string? triggerError) =
+                    ReadTriggers(module, $"module '{name}'", new HashSet<string>(StringComparer.Ordinal) { name });
                 (IReadOnlyList<string>? units, string? unitError) = Strings(module, "programUnits", $"module '{name}'");
                 (IReadOnlyList<string>? lovs, string? lovError) = Strings(module, "lovs", $"module '{name}'");
 
@@ -187,7 +189,7 @@ public static class FormsIntermediateReader
                     name,
                     title,
                     blocks,
-                    [.. triggers.Select(trigger => new FormsTrigger(trigger, name))],
+                    triggers,
                     units,
                     lovs,
                     sourcePath));
@@ -233,7 +235,7 @@ public static class FormsIntermediateReader
     /// estates arrive on treat both the directory and the module name that way.
     /// </summary>
     private static string QualifiedIdentity(string sourcePath, string name) =>
-        $"{WorkspacePath.Folder(sourcePath).ToUpperInvariant()}|{name.ToUpperInvariant()}";
+        FormsModuleIdentity.Qualified(sourcePath, name);
 
     private static (IReadOnlyList<FormsBlock>? Blocks, string? Error) ReadBlocks(JsonElement module, string moduleName)
     {
@@ -277,7 +279,14 @@ public static class FormsIntermediateReader
                 return (null, itemError!);
             }
 
-            (IReadOnlyList<string>? triggers, string? triggerError) = Strings(block, "triggers", $"block '{scope}'");
+            HashSet<string> triggerScopes = new(StringComparer.Ordinal)
+            {
+                name,
+            };
+            triggerScopes.UnionWith(items.Select(item => $"{name}.{item.Name}"));
+
+            (IReadOnlyList<FormsTrigger>? triggers, string? triggerError) =
+                ReadTriggers(block, $"block '{scope}'", triggerScopes);
             if (triggers is null)
             {
                 return (null, triggerError!);
@@ -294,7 +303,7 @@ public static class FormsIntermediateReader
                 baseTable,
                 records.Value,
                 items,
-                [.. triggers.Select(trigger => new FormsTrigger(trigger, name))]));
+                triggers));
         }
 
         return (blocks, null);
@@ -400,6 +409,14 @@ public static class FormsIntermediateReader
                 $"source root '{sourceRoot}' the same representation declares. A module read from outside the root this run normalized cannot be " +
                 "attributed to this estate, so nothing was read from the document.");
         }
+
+            if (!FormsModuleIdentity.MatchesFile(normalizedPath, name))
+            {
+                return (null,
+                $"Module '{name}' in the normalized Forms representation records source path '{normalizedPath}', whose file name does not " +
+                "identify that module under the normalization rule. A representation this fleet wrote requires the export file and embedded " +
+                "module identity to agree, so nothing was read from the document.");
+            }
 
         if (Trimmed(module, "declaredFamily") is not { } declaredFamily)
         {
@@ -588,6 +605,89 @@ public static class FormsIntermediateReader
             }
 
             read.Add(text);
+        }
+
+        return (read, null);
+    }
+
+    private static (IReadOnlyList<FormsTrigger>? Value, string? Error) ReadTriggers(
+        JsonElement element,
+        string scope,
+        IReadOnlySet<string> allowedScopes)
+    {
+        (JsonElement declared, string? error) = ArrayField(element, "triggers", scope, MaxChildren);
+        if (error is not null)
+        {
+            return (null, error);
+        }
+
+        List<FormsTrigger> read = [];
+        HashSet<string> identities = new(StringComparer.OrdinalIgnoreCase);
+        foreach (JsonElement entry in declared.EnumerateArray())
+        {
+            if (entry.ValueKind != JsonValueKind.Object || Identity(entry) is not { } name)
+            {
+                return (null, $"The 'triggers' field of {scope} contains an entry that is not an object with a non-empty 'name'.");
+            }
+
+            (string? body, string? bodyError) = OptionalText(entry, "body", $"trigger '{name}' in {scope}");
+            if (bodyError is not null)
+            {
+                return (null, bodyError);
+            }
+
+            if (body is not null && string.IsNullOrWhiteSpace(body))
+            {
+                return (null, $"The 'body' field of trigger '{name}' in {scope} is blank. A trigger without retained text is recorded as null.");
+            }
+
+            if (body?.Length > FormsXmlDocument.MaxTriggerBodyCharacters)
+            {
+                return (null,
+                    $"The 'body' field of trigger '{name}' in {scope} contains {body.Length.ToString(CultureInfo.InvariantCulture)} characters " +
+                    $"and this build reads at most {FormsXmlDocument.MaxTriggerBodyCharacters.ToString(CultureInfo.InvariantCulture)}. It was refused rather than truncated.");
+            }
+
+            if (Trimmed(entry, "scope") is not { } scopeValue)
+            {
+                return (null, $"Trigger '{name}' in {scope} has no non-empty 'scope'.");
+            }
+
+            if (!allowedScopes.Contains(scopeValue))
+            {
+                return (null, $"Trigger '{name}' in {scope} declares scope '{scopeValue}', which is outside the containing module or block.");
+            }
+
+            (string? encodingText, string? encodingError) = OptionalText(entry, "bodyEncoding", $"trigger '{scopeValue}.{name}'");
+            if (encodingError is not null)
+            {
+                return (null, encodingError);
+            }
+
+            FormsTriggerBodyEncoding? encoding = null;
+            if (body is null && encodingText is not null)
+            {
+                return (null, $"Trigger '{scopeValue}.{name}' records a body encoding but no body.");
+            }
+
+            if (body is not null)
+            {
+                if (encodingText is null
+                    || !Enum.TryParse(encodingText, ignoreCase: false, out FormsTriggerBodyEncoding parsedEncoding))
+                {
+                    return (null, $"Trigger '{scopeValue}.{name}' has a body but no recognized 'bodyEncoding'.");
+                }
+
+                encoding = parsedEncoding;
+            }
+
+            string identity = $"{scopeValue}\0{name}";
+            if (!identities.Add(identity))
+            {
+                return (null, Duplicate($"trigger in {scope}", $"{scopeValue}.{name}"));
+            }
+
+            read.Add(new FormsTrigger(name, scopeValue, body, encoding));
         }
 
         return (read, null);

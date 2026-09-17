@@ -57,7 +57,9 @@ public static class WorkbenchExecution
     };
 
     public static bool IsPreviewable(string? path) =>
-        !string.IsNullOrEmpty(path) && s_previewable.Contains(System.IO.Path.GetExtension(path));
+        !string.IsNullOrEmpty(path)
+        && !path.EndsWith("/forms-ir.json", StringComparison.OrdinalIgnoreCase)
+        && s_previewable.Contains(System.IO.Path.GetExtension(path));
 
     /// <summary>
     /// Resolves an owned workspace and rewrites the request so generated artifacts land under

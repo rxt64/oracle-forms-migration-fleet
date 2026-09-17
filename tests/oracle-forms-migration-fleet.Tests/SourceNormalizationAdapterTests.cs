@@ -41,12 +41,15 @@ public class SourceNormalizationAdapterTests
     };
 
     /// <summary>A Forms export in the shape frmf2xml produces, declaring whichever release the test needs.</summary>
-    private static string FormsXml(string? version, string moduleName = "ORDER_ENTRY") =>
+    private static string FormsXml(
+        string? version,
+        string moduleName = "ORDER_ENTRY",
+        string triggerBody = "BEGIN NULL; END;") =>
         $"""
          <?xml version="1.0" encoding="UTF-8"?>
          <Module xmlns="http://xmlns.oracle.com/Forms"{(version is null ? string.Empty : $" version=\"{version}\" FormsVersion=\"{version}\"")}>
            <FormModule Name="{moduleName}" Title="Order entry">
-             <Trigger Name="WHEN-NEW-FORM-INSTANCE" TriggerText="BEGIN NULL; END;"/>
+             <Trigger Name="WHEN-NEW-FORM-INSTANCE" TriggerText="{triggerBody}"/>
              <Block Name="ORDER_BLOCK" QueryDataSourceName="BANK_ACCOUNT" RecordsDisplayCount="10">
                <Item Name="ACCOUNT_ID" ItemType="Text Item" DataType="Number" ColumnName="ACCOUNT_ID" Prompt="Account" Required="true"/>
              </Block>
@@ -178,7 +181,7 @@ public class SourceNormalizationAdapterTests
 
         using JsonDocument ir = JsonDocument.Parse(workspace.Read(IrPath));
         Assert.Equal("oracle-forms-migration-fleet/source-normalization", ir.RootElement.GetProperty("generator").GetString());
-        Assert.Equal("1", ir.RootElement.GetProperty("schemaVersion").GetString());
+        Assert.Equal("2", ir.RootElement.GetProperty("schemaVersion").GetString());
         Assert.True(ir.RootElement.GetProperty("normalized").GetBoolean());
         Assert.Equal("declared by the export and matching the run", ir.RootElement.GetProperty("versionAuthority").GetString());
         Assert.Equal(expectedFamily, ir.RootElement.GetProperty("formsFamily").GetString());
@@ -196,6 +199,85 @@ public class SourceNormalizationAdapterTests
     }
 
     [Fact]
+    public async Task Changed_trigger_body_changes_the_versioned_intermediate_representation()
+    {
+        using TemporaryWorkspace original = Workspace(space =>
+            space.WriteFile("legacy/forms/ui/ORDER_ENTRY.xml", FormsXml("12.2.1.4")));
+        using TemporaryWorkspace changed = Workspace(space =>
+            space.WriteFile(
+                "legacy/forms/ui/ORDER_ENTRY.xml",
+                FormsXml("12.2.1.4", triggerBody: "BEGIN EXECUTE_QUERY; END;")));
+
+        Assert.Equal(PhaseExecutionState.Executed, (await NormalizeAsync(original, Request("12c"))).State);
+        Assert.Equal(PhaseExecutionState.Executed, (await NormalizeAsync(changed, Request("12c"))).State);
+
+        string originalIr = original.Read(IrPath);
+        string changedIr = changed.Read(IrPath);
+
+        Assert.NotEqual(originalIr, changedIr);
+
+        using JsonDocument document = JsonDocument.Parse(changedIr);
+        JsonElement trigger = document.RootElement.GetProperty("modules")[0].GetProperty("triggers")[0];
+        Assert.Equal("WHEN-NEW-FORM-INSTANCE", trigger.GetProperty("name").GetString());
+        Assert.Equal("ORDER_ENTRY", trigger.GetProperty("scope").GetString());
+        Assert.Equal("BEGIN EXECUTE_QUERY; END;", trigger.GetProperty("body").GetString());
+        Assert.Equal("Attribute", trigger.GetProperty("bodyEncoding").GetString());
+    }
+
+    [Fact]
+    public async Task Oversized_source_trigger_body_fails_during_normalization_and_writes_no_ir()
+    {
+        using TemporaryWorkspace workspace = Workspace(space =>
+            space.WriteFile(
+                "legacy/forms/ui/ORDER_ENTRY.xml",
+                FormsXml("12.2.1.4", triggerBody: new string('X', FormsXmlDocument.MaxTriggerBodyCharacters + 1))));
+
+        PhaseOutcome outcome = await NormalizeAsync(workspace, Request("12c"));
+
+        Assert.Equal(PhaseExecutionState.Failed, outcome.State);
+        Assert.Contains("refused rather than writing an IR", outcome.Detail!, StringComparison.Ordinal);
+        Assert.False(workspace.Exists(IrPath));
+    }
+
+    [Fact]
+    public async Task Duplicate_source_trigger_identity_fails_during_normalization_and_writes_no_ir()
+    {
+        using TemporaryWorkspace workspace = Workspace(space =>
+            space.WriteFile("legacy/forms/ui/ORDER_ENTRY.xml", """
+                <FormModule xmlns="http://xmlns.oracle.com/Forms" Name="ORDER_ENTRY" FormsVersion="12.2.1.4">
+                  <Trigger Name="WHEN-NEW-FORM-INSTANCE" TriggerText="BEGIN FIRST; END;"/>
+                  <Trigger Name="WHEN-NEW-FORM-INSTANCE" TriggerText="BEGIN SECOND; END;"/>
+                </FormModule>
+                """));
+
+        PhaseOutcome outcome = await NormalizeAsync(workspace, Request("12c"));
+
+        Assert.Equal(PhaseExecutionState.Failed, outcome.State);
+        Assert.Contains("more than one trigger", outcome.Detail!, StringComparison.Ordinal);
+        Assert.False(workspace.Exists(IrPath));
+    }
+
+        [Fact]
+        public async Task Duplicate_source_item_identity_fails_during_normalization_and_writes_no_ir()
+        {
+                using TemporaryWorkspace workspace = Workspace(space =>
+                        space.WriteFile("legacy/forms/ui/ORDER_ENTRY.xml", """
+                                <FormModule xmlns="http://xmlns.oracle.com/Forms" Name="ORDER_ENTRY" FormsVersion="12.2.1.4">
+                                    <Block Name="ORDER_BLOCK">
+                                        <Item Name="DUPLICATE"/>
+                                        <Item Name="DUPLICATE"/>
+                                    </Block>
+                                </FormModule>
+                                """));
+
+                PhaseOutcome outcome = await NormalizeAsync(workspace, Request("12c"));
+
+                Assert.Equal(PhaseExecutionState.Failed, outcome.State);
+                Assert.Contains("more than one item", outcome.Detail!, StringComparison.Ordinal);
+                Assert.False(workspace.Exists(IrPath));
+        }
+
+    [Fact]
     public async Task A_declared_release_that_contradicts_the_run_fails_closed()
     {
         using TemporaryWorkspace workspace = Workspace(space =>
@@ -206,6 +288,26 @@ public class SourceNormalizationAdapterTests
         Assert.Equal(PhaseExecutionState.Failed, outcome.State);
         Assert.Contains("6i", outcome.Detail!, StringComparison.Ordinal);
         Assert.Contains("12c", outcome.Detail!, StringComparison.Ordinal);
+        Assert.False(workspace.Exists(IrPath));
+    }
+
+    [Fact]
+    public async Task Module_count_across_multiple_exports_beyond_the_reader_limit_writes_no_ir()
+    {
+        using TemporaryWorkspace workspace = Workspace(space =>
+        {
+            for (int index = 0; index <= FormsIntermediateReader.MaxModules; index++)
+            {
+                space.WriteFile(
+                    $"legacy/forms/ui/M{index}.xml",
+                    FormsXml("12.2.1.4", moduleName: $"M{index}"));
+            }
+        });
+
+        PhaseOutcome outcome = await NormalizeAsync(workspace, Request("12c"));
+
+        Assert.Equal(PhaseExecutionState.Failed, outcome.State);
+        Assert.Contains("5001 Forms modules across the estate", outcome.Detail!, StringComparison.Ordinal);
         Assert.False(workspace.Exists(IrPath));
     }
 

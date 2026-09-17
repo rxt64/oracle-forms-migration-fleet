@@ -51,6 +51,9 @@ public static class FormsXmlDocument
     /// <summary>The namespace Oracle's Forms XML schema declares.</summary>
     public const string Namespace = "http://xmlns.oracle.com/Forms";
 
+    /// <summary>Maximum XML-normalized source characters retained for one trigger body.</summary>
+    public const int MaxTriggerBodyCharacters = 200_000;
+
     private static readonly XNamespace s_forms = Namespace;
 
     private static readonly XNamespace s_schemaInstance = "http://www.w3.org/2001/XMLSchema-instance";
@@ -63,7 +66,7 @@ public static class FormsXmlDocument
     /// </summary>
     private static readonly HashSet<string> s_structural = new(StringComparer.OrdinalIgnoreCase)
     {
-        "Module", "FormModule", "Block", "Item", "Trigger", "ProgramUnit", "LOV", "AttachedLibrary", "Relation",
+        "Module", "FormModule", "Block", "Item", "Trigger", "TriggerText", "ProgramUnit", "LOV", "AttachedLibrary", "Relation",
     };
 
     public static FormsXmlLoad Load(string? xml)
@@ -160,6 +163,67 @@ public static class FormsXmlDocument
             if (element.Name.Namespace != s_forms)
             {
                 continue;
+            }
+
+            if (element.Name == s_forms + "TriggerText" && element.HasElements)
+            {
+                return
+                    "A TriggerText element contains nested elements. Retaining only its direct text would silently remove part of the " +
+                    "PL/SQL body, so the document was refused and no module was read from it.";
+            }
+
+            if (element.Name == s_forms + "Trigger")
+            {
+                List<XAttribute> bodyAttributes =
+                [
+                    .. element.Attributes().Where(attribute =>
+                        attribute.Name.Namespace == XNamespace.None
+                        && string.Equals(attribute.Name.LocalName, "TriggerText", StringComparison.Ordinal)),
+                ];
+                List<XElement> bodyElements = [.. element.Elements(s_forms + "TriggerText")];
+
+                if (element.Attributes().Any(attribute =>
+                    attribute.Name.Namespace == XNamespace.None
+                    && string.Equals(attribute.Name.LocalName, "TriggerText", StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(attribute.Name.LocalName, "TriggerText", StringComparison.Ordinal)))
+                {
+                    return
+                        "A TriggerText attribute uses casing outside the Oracle Forms schema. Treating it as absent or as the canonical " +
+                        "attribute would make malformed source indistinguishable from an Oracle export, so the document was refused.";
+                }
+
+                if (bodyAttributes.Count > 1 || bodyElements.Count > 1 || (bodyAttributes.Count == 1 && bodyElements.Count == 1))
+                {
+                    return
+                        "A Trigger declares more than one TriggerText representation. Attribute and child-element encodings cannot compete " +
+                        "or be concatenated without changing the PL/SQL body, so the document was refused and no module was read from it.";
+                }
+
+                string? body = bodyAttributes.FirstOrDefault()?.Value
+                    ?? bodyElements.FirstOrDefault()?.Value;
+
+                if ((bodyAttributes.Count == 1 || bodyElements.Count == 1) && string.IsNullOrWhiteSpace(body))
+                {
+                    return
+                        "A Trigger declares an empty or whitespace-only TriggerText representation. A trigger with no body omits " +
+                        "TriggerText entirely, so the document was refused rather than silently discarding declared source text.";
+                }
+
+                if (body?.Length > MaxTriggerBodyCharacters)
+                {
+                    return
+                        $"A TriggerText body contains {body.Length} characters and this build retains at most " +
+                        $"{MaxTriggerBodyCharacters}. The document was refused rather than writing an IR its reader would later reject.";
+                }
+
+                if (element.Elements().Any(child =>
+                    string.Equals(child.Name.LocalName, "TriggerText", StringComparison.OrdinalIgnoreCase)
+                    && child.Name != s_forms + "TriggerText"))
+                {
+                    return
+                        "A TriggerText child uses casing or a namespace outside the Oracle Forms schema. Treating it as absent would " +
+                        "silently discard declared trigger source, so the document was refused and no module was read from it.";
+                }
             }
 
             foreach (XAttribute attribute in element.Attributes())

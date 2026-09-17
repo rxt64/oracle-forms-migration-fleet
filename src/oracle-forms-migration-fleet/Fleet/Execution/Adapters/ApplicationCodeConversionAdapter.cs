@@ -96,7 +96,7 @@ public sealed class ApplicationCodeConversionAdapter(IArtifactReviewer? reviewer
                 string intermediate;
                 try
                 {
-                    intermediate = context.Workspace.ReadText(irPath, MaxTextBytes);
+                    intermediate = context.Workspace.ReadText(irPath, FormsIntermediateReader.MaxDocumentBytes);
                 }
                 catch (WorkspaceLimitExceededException limit)
                 {

@@ -1,0 +1,11 @@
+.agent_configs/
+.checkpoints/
+.env
+.env.*
+eval.yaml
+bin/
+obj/
+ClientApp/node_modules/
+wwwroot/
+*.user
+*.suo

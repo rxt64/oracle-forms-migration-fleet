@@ -187,9 +187,10 @@ module:
 ### 3. Expand the Forms intermediate representation
 
 The current parser accepts supplied XML documents containing `FormModule` elements. It recovers a
-limited subset of block/item attributes plus trigger, program-unit, and LOV names, but does not invoke
-Forms2XML, validate export provenance, parse menu/object-library exports, or recover trigger bodies and
-runtime semantics. `forms-ir.json` carries exactly that subset and says so in its own notes. A
+limited subset of block/item attributes plus trigger identities and XML-normalized trigger bodies, and
+program-unit and LOV names. It does not invoke Forms2XML, validate export provenance, parse menu/object-library
+exports, translate trigger bodies, or recover runtime semantics. `forms-ir.json` carries exactly that subset
+and says so in its own notes. A
 6i-capable IR needs exact trigger/program-unit source, scope, event ordering,
 navigation, validation, commit/rollback behavior, LOV/record-group queries, menus, visual properties,
 canvas/window geometry, object-library references, and external integrations.

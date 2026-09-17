@@ -21,7 +21,7 @@ public class FormsIntermediateReaderTests
     private const string ValidIr = """
         {
           "generator": "oracle-forms-migration-fleet/source-normalization",
-          "schemaVersion": "1",
+          "schemaVersion": "2",
           "normalized": true,
           "sourceRoot": "legacy/forms",
           "formsFamily": "12c",
@@ -50,10 +50,10 @@ public class FormsIntermediateReaderTests
                       "visible": true
                     }
                   ],
-                  "triggers": ["WHEN-VALIDATE-ITEM"]
+                  "triggers": [{"name": "WHEN-VALIDATE-ITEM","scope": "ORDER_BLOCK.ACCOUNT_ID","body": "BEGIN VALIDATE_ITEM; END;","bodyEncoding": "Element"}]
                 }
               ],
-              "triggers": ["WHEN-NEW-FORM-INSTANCE"],
+              "triggers": [{"name": "WHEN-NEW-FORM-INSTANCE","scope": "ORDER_ENTRY","body": "BEGIN EXECUTE_QUERY; END;","bodyEncoding": "Attribute"}],
               "programUnits": [],
               "lovs": []
             }
@@ -74,7 +74,7 @@ public class FormsIntermediateReaderTests
     private const string TwoDirectories = """
         {
           "generator": "oracle-forms-migration-fleet/source-normalization",
-          "schemaVersion": "1",
+          "schemaVersion": "2",
           "normalized": true,
           "sourceRoot": "legacy/forms",
           "formsFamily": "12c",
@@ -163,6 +163,12 @@ public class FormsIntermediateReaderTests
         Assert.Equal("Number", item.DataType);
         Assert.Equal("Account", item.Prompt);
         Assert.Equal(12, item.MaxLength);
+        Assert.Equal("BEGIN EXECUTE_QUERY; END;", Assert.Single(module.Triggers).Body);
+        Assert.Equal("BEGIN VALIDATE_ITEM; END;", Assert.Single(block.Triggers).Body);
+        Assert.Equal("ORDER_ENTRY", Assert.Single(module.Triggers).Scope);
+        Assert.Equal("ORDER_BLOCK.ACCOUNT_ID", Assert.Single(block.Triggers).Scope);
+        Assert.Equal(FormsTriggerBodyEncoding.Attribute, Assert.Single(module.Triggers).BodyEncoding);
+        Assert.Equal(FormsTriggerBodyEncoding.Element, Assert.Single(block.Triggers).BodyEncoding);
     }
 
     /// <summary>
@@ -328,11 +334,15 @@ public class FormsIntermediateReaderTests
     }
 
     [Theory]
-    [InlineData("\"triggers\": [\"WHEN-NEW-FORM-INSTANCE\"]", "\"triggers\": \"WHEN-NEW-FORM-INSTANCE\"", "is not an array")]
-    [InlineData("\"triggers\": [\"WHEN-NEW-FORM-INSTANCE\"]", "\"triggers\": [7]", "not a non-empty string")]
-    [InlineData("\"triggers\": [\"WHEN-NEW-FORM-INSTANCE\"]", "\"triggers\": [\"\"]", "not a non-empty string")]
-    [InlineData("\"triggers\": [\"WHEN-NEW-FORM-INSTANCE\"]", "\"triggers\": [\"A\", null]", "not a non-empty string")]
-    [InlineData("\"triggers\": [\"WHEN-VALIDATE-ITEM\"]", "\"triggers\": [[\"WHEN-VALIDATE-ITEM\"]]", "not a non-empty string")]
+    [InlineData("\"triggers\": [{\"name\": \"WHEN-NEW-FORM-INSTANCE\",\"scope\": \"ORDER_ENTRY\",\"body\": \"BEGIN EXECUTE_QUERY; END;\",\"bodyEncoding\": \"Attribute\"}]", "\"triggers\": \"WHEN-NEW-FORM-INSTANCE\"", "is not an array")]
+    [InlineData("\"triggers\": [{\"name\": \"WHEN-NEW-FORM-INSTANCE\",\"scope\": \"ORDER_ENTRY\",\"body\": \"BEGIN EXECUTE_QUERY; END;\",\"bodyEncoding\": \"Attribute\"}]", "\"triggers\": [7]", "not an object with a non-empty 'name'")]
+    [InlineData("\"triggers\": [{\"name\": \"WHEN-NEW-FORM-INSTANCE\",\"scope\": \"ORDER_ENTRY\",\"body\": \"BEGIN EXECUTE_QUERY; END;\",\"bodyEncoding\": \"Attribute\"}]", "\"triggers\": [{\"name\": \"\",\"scope\": \"ORDER_ENTRY\",\"body\": null}]", "not an object with a non-empty 'name'")]
+    [InlineData("\"triggers\": [{\"name\": \"WHEN-VALIDATE-ITEM\",\"scope\": \"ORDER_BLOCK.ACCOUNT_ID\",\"body\": \"BEGIN VALIDATE_ITEM; END;\",\"bodyEncoding\": \"Element\"}]", "\"triggers\": [[\"WHEN-VALIDATE-ITEM\"]]", "not an object with a non-empty 'name'")]
+    [InlineData("\"body\": \"BEGIN EXECUTE_QUERY; END;\"", "\"body\": 7", "is present and is not a string")]
+    [InlineData("\"body\": \"BEGIN EXECUTE_QUERY; END;\"", "\"body\": \"   \"", "is blank")]
+    [InlineData("\"scope\": \"ORDER_ENTRY\"", "\"scope\": \"OTHER_MODULE\"", "outside the containing module or block")]
+    [InlineData("\"scope\": \"ORDER_BLOCK.ACCOUNT_ID\"", "\"scope\": \"ORDER_BLOCK.NOT_AN_ITEM\"", "outside the containing module or block")]
+    [InlineData("\"bodyEncoding\": \"Attribute\"", "\"bodyEncoding\": \"Unknown\"", "no recognized 'bodyEncoding'")]
     [InlineData("\"programUnits\": []", "\"programUnits\": {}", "is not an array")]
     [InlineData("\"lovs\": []", "\"lovs\": [{ \"name\": \"LOV\" }]", "not a non-empty string")]
     public void A_malformed_string_array_is_refused_rather_than_partly_read(string find, string replace, string expected)
@@ -341,6 +351,33 @@ public class FormsIntermediateReaderTests
 
         Assert.Null(read.Modules);
         Assert.Contains(expected, read.Error!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void An_oversized_trigger_body_is_refused_rather_than_truncated()
+    {
+        string oversized = new('X', 200_001);
+        FormsIntermediateRead read = Read(Mutate(
+            "\"body\": \"BEGIN EXECUTE_QUERY; END;\"",
+            $"\"body\": \"{oversized}\""));
+
+        Assert.Null(read.Modules);
+        Assert.Contains("200001 characters", read.Error!, StringComparison.Ordinal);
+        Assert.Contains("reads at most 200000", read.Error!, StringComparison.Ordinal);
+        Assert.Contains("refused rather than truncated", read.Error!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Duplicate_trigger_identity_in_one_scope_is_refused()
+    {
+        const string Trigger = "{\"name\": \"WHEN-NEW-FORM-INSTANCE\",\"scope\": \"ORDER_ENTRY\",\"body\": \"BEGIN EXECUTE_QUERY; END;\",\"bodyEncoding\": \"Attribute\"}";
+        FormsIntermediateRead read = Read(Mutate(
+            $"\"triggers\": [{Trigger}]",
+            $"\"triggers\": [{Trigger},{Trigger}]"));
+
+        Assert.Null(read.Modules);
+        Assert.Contains("more than one trigger", read.Error!, StringComparison.Ordinal);
+        Assert.Contains("ORDER_ENTRY.WHEN-NEW-FORM-INSTANCE", read.Error!, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -408,6 +445,28 @@ public class FormsIntermediateReaderTests
         Assert.Contains("is not under the source root 'legacy/forms'", read.Error!, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("\"sourcePath\": \"legacy/forms/ui/ORDER_ENTRY.xml\"", "\"sourcePath\": \"legacy/forms/ui/OTHER.xml\"")]
+    [InlineData("\"name\": \"ORDER_ENTRY\"", "\"name\": \"OTHER\"")]
+    public void A_module_whose_file_and_embedded_identity_disagree_is_refused(string find, string replace)
+    {
+        FormsIntermediateRead read = Read(Mutate(find, replace));
+
+        Assert.Null(read.Modules);
+        Assert.Contains("file name does not identify that module", read.Error!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_load_order_prefix_uses_the_same_normalized_identity_as_the_producer()
+    {
+        FormsIntermediateRead read = Read(Mutate(
+            "\"sourcePath\": \"legacy/forms/ui/ORDER_ENTRY.xml\"",
+            "\"sourcePath\": \"legacy/forms/ui/005-order.entry.xml\""));
+
+        Assert.Null(read.Error);
+        Assert.Single(read.Modules!);
+    }
+
     /// <summary>The root itself, and any path beneath it, are the paths a module may be attributed to.</summary>
     [Theory]
     [InlineData("\"sourcePath\": \"legacy/forms/ui/ORDER_ENTRY.xml\"", "\"sourcePath\": \"legacy/forms/ORDER_ENTRY.xml\"")]
@@ -462,7 +521,7 @@ public class FormsIntermediateReaderTests
     [InlineData("\"declaredFamily\": \"12c\"", "\"declaredFamily\": \"6i\"")]
     [InlineData("\"maxLength\": 12", "\"maxLength\": \"12\"")]
     [InlineData("\"prompt\": \"Account\"", "\"prompt\": 7")]
-    [InlineData("\"triggers\": [\"WHEN-NEW-FORM-INSTANCE\"]", "\"triggers\": [7]")]
+    [InlineData("\"triggers\": [{\"name\": \"WHEN-NEW-FORM-INSTANCE\",\"scope\": \"ORDER_ENTRY\",\"body\": \"BEGIN EXECUTE_QUERY; END;\",\"bodyEncoding\": \"Attribute\"}]", "\"triggers\": [7]")]
     [InlineData("\"sourceRoot\": \"legacy/forms\"", "\"sourceRoot\": \"legacy/other\"")]
     [InlineData("\"sourceRoot\": \"legacy/forms\"", "\"sourceRoot\": \"legacy\"")]
     [InlineData("\"sourceRoot\": \"legacy/forms\"", "\"sourceRoot\": \"/legacy/forms\"")]

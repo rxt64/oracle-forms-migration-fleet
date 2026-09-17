@@ -6,6 +6,13 @@ Notable changes to behaviour, with the reasoning that is not visible in a diff.
 
 ### Added
 
+- Oracle Forms trigger bodies now survive XML parsing and source normalization as inert, untrusted text in
+  Forms IR schema version 2. The IR records module, block, or item scope and whether Oracle supplied the body
+  as an XML attribute or child element. Ambiguous encodings, nested body markup, duplicate trigger identities,
+  per-trigger size overflow, and aggregate IR overflow fail closed. Retained bodies are never translated or
+  executed, are not browser-previewable, and remain explicitly unsupported until independent behavior tests
+  establish an equivalent implementation.
+
 - Azure-native innovation documentation and architecture package. The root README now follows a demo-first
   overview, architecture, stage, quick-start, deployment, security, cost, cleanup, and troubleshooting
   flow. Two self-contained Azure SVG diagrams and editable Excalidraw sources show the migration pipeline
