@@ -322,6 +322,11 @@ public static partial class OracleMigrationGroundingCatalog
         }
 
         OracleVersionAssessment assessment = OracleLegacyVersionCatalog.Assess(product, supplied);
+        if (assessment.IsUnknown)
+        {
+            return null;
+        }
+
         if (!assessment.IsRecognized)
         {
             warnings.Add($"The supplied {product} release '{supplied}' is not recognized. {assessment.Disposition}");

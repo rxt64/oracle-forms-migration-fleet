@@ -67,6 +67,24 @@ public class OracleMigrationGroundingCatalogTests
         Assert.Contains(response.Matches, match => match.Citation == "[GRD-FORMS-6I-UPGRADE-001]");
     }
 
+    [Theory]
+    [InlineData("unknown")]
+    [InlineData("unspecified")]
+    [InlineData("n/a")]
+    public void An_unknown_optional_database_release_does_not_suppress_forms_grounding(string databaseVersion)
+    {
+        OracleGroundingResponse response = OracleMigrationGroundingCatalog.Search(
+            new OracleGroundingQuery(
+                "FMB PLL OLB FORMS_PATH 10.1.2",
+                OracleFormsVersion: "6i",
+                OracleDatabaseVersion: databaseVersion,
+                Target: DatabaseTarget.PostgreSql));
+
+        Assert.Empty(response.Warnings);
+        Assert.Null(response.OracleDatabaseFamily);
+        Assert.Contains(response.Matches, match => match.Citation == "[GRD-FORMS-6I-UPGRADE-001]");
+    }
+
     [Fact]
     public void A_12c_question_does_not_retrieve_6i_only_guidance()
     {
