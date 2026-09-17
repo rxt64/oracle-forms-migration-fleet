@@ -12,7 +12,7 @@ public class FleetToolsTests
     {
         var tools = FleetTools.Create();
 
-        Assert.Equal(5, tools.Count);
+        Assert.Equal(6, tools.Count);
     }
 
     [Fact]

@@ -243,11 +243,19 @@ public sealed class ApplicationCodeConversionAdapter(IArtifactReviewer? reviewer
                         context.Request.ApplicationName,
                         context.Request.Target.Database,
                         string.Join("\n\n", conversion.Files.Take(6).Select(file => $"-- {file.Path}\n{file.Contents}")),
-                        findings),
+                        findings)
+                    {
+                        Kind = ArtifactReviewKind.ApplicationCode,
+                        OracleFormsVersion = context.Request.OracleFormsVersion,
+                        OracleDatabaseVersion = context.Request.OracleDatabaseVersion,
+                    },
                     cancellationToken).ConfigureAwait(false);
 
                 context.Workspace.WriteText(reviewPath, ArtifactReviewReport.Render(
-                    context.Request.ApplicationName, context.Request.Target.Database, advisories));
+                    context.Request.ApplicationName,
+                    context.Request.Target.Database,
+                    ArtifactReviewKind.ApplicationCode,
+                    advisories));
 
                 findings.AddRange(advisories.Select(advisory => $"Advisory ({advisory.Severity}): {advisory.Construct} — {advisory.Reason}"));
             }
@@ -255,7 +263,10 @@ public sealed class ApplicationCodeConversionAdapter(IArtifactReviewer? reviewer
             {
                 context.Warn($"The model review did not complete ({FailureText.Describe(exception)}). The generated code is unaffected.");
                 context.Workspace.WriteText(reviewPath, ArtifactReviewReport.RenderFailure(
-                    context.Request.ApplicationName, context.Request.Target.Database, exception.Message));
+                    context.Request.ApplicationName,
+                    context.Request.Target.Database,
+                    ArtifactReviewKind.ApplicationCode,
+                    exception.Message));
             }
 
             artifacts.Add(new ArtifactReference(reviewPath, ArtifactKind.ValidationReport, "Unverified model review of the generated application. Advisory only."));

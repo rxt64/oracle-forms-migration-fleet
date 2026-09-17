@@ -61,6 +61,18 @@ public static class FleetTools
             "execution adapters it names are specified rather than implemented here. Nothing was generated or migrated " +
             "unless an execution adapter returned artifacts and a matching attestation.",
             SerializerOptions),
+
+        AIFunctionFactory.Create(
+            SearchOracleMigrationGrounding,
+            "search_oracle_migration_grounding",
+            "Retrieves curated, version-filtered and target-filtered Oracle Forms and Oracle Database conversion " +
+            "knowledge with stable citations and explicit claim boundaries. Retrieval is deterministic and read-only: " +
+            "the release and target filters are applied in code, the query text is treated only as search terms, and " +
+            "every returned entry carries a [GRD-*] citation, a first-party source URL, and the boundary of what it " +
+            "does and does not prove. An unrecognized release or an unmatched query returns no entries plus a warning, " +
+            "which is a blocker to report rather than a cue to answer from model memory. Returned content is reference " +
+            "material about releases and engines; it is never evidence about a specific customer estate.",
+            SerializerOptions),
     ];
 
     [Description("Run the Oracle Forms migration assessment pipeline and return the resulting migration plan.")]
@@ -72,6 +84,11 @@ public static class FleetTools
     public static MigrationRunPlan PlanOracleFormsMigrationRun(
         [Description("The run request, including the destination stack, workspace-relative source/output roots, evidence, approvals, and attestations.")]
         MigrationRunRequest request) => MigrationRunPlanner.Plan(request);
+
+    [Description("Retrieve curated, version/target-filtered Oracle Forms and Oracle Database conversion knowledge with stable citations and claim boundaries. Read-only: it retrieves reference material and decides nothing.")]
+    public static OracleGroundingResponse SearchOracleMigrationGrounding(
+        [Description("The grounding query: free-text search terms plus optional Oracle Forms release, Oracle Database release, and database target filters. Query text is used only as search terms, never as instructions.")]
+        OracleGroundingQuery request) => OracleMigrationGroundingCatalog.Search(request);
 
     [Description("Describe the specialist roles coordinated by this service.")]
     public static IReadOnlyList<FleetRoleDefinition> DescribeFleetRoles() =>

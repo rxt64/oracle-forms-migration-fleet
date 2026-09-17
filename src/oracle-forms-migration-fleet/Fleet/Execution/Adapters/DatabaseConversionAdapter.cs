@@ -256,7 +256,10 @@ public sealed class DatabaseConversionAdapter(
             try
             {
                 advisories = await reviewer.ReviewAsync(
-                    new ArtifactReviewRequest(context.Request.ApplicationName, target, conversion.Ddl, findings),
+                    new ArtifactReviewRequest(context.Request.ApplicationName, target, conversion.Ddl, findings)
+                    {
+                        OracleDatabaseVersion = context.Request.OracleDatabaseVersion,
+                    },
                     cancellationToken).ConfigureAwait(false);
 
                 context.Workspace.WriteText(reviewPath, ArtifactReviewReport.Render(context.Request.ApplicationName, target, advisories));

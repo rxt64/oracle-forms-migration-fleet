@@ -27,6 +27,8 @@
     <Content Include="..\..\src\oracle-forms-migration-fleet\.foundry\datasets\*.jsonl"
              Link="EvalDatasets\%(Filename)%(Extension)"
              CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="TestData\*.jsonl"
+             CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

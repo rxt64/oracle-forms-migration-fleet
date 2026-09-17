@@ -254,6 +254,19 @@ Research for an isolated NDAPI worker and an optional ASP.NET Core/Blazor target
 [docs/NDAPI_DOTNET_FEASIBILITY.md](docs/NDAPI_DOTNET_FEASIBILITY.md). Forms 6i normalization and upgrade
 constraints are documented in [docs/ORACLE_FORMS_6I_RESEARCH.md](docs/ORACLE_FORMS_6I_RESEARCH.md).
 
+## Grounding
+
+Oracle Forms and Oracle Database conversion knowledge is retrieved, not recalled. A curated catalog
+compiled into the service filters entries by Oracle release and database target in code, and returns each
+one with a stable `[GRD-*]` citation, an authoritative source URL, and the boundary of what it does not
+prove. The outer agent must search it before making a conversion claim and cite what comes back; the
+schema reviewer and the SQL repairer receive the same entries as delimited, untrusted reference data that
+authorizes nothing. An unrecognized release or an unmatched query returns nothing plus a warning, which is
+reported as a blocker rather than answered from model memory, and an uncited high-severity review finding
+is downgraded to a note. Estate-specific facts still cite run evidence identifiers and attestations, never
+`[GRD-*]`. See [docs/AGENT_GROUNDING.md](docs/AGENT_GROUNDING.md) for the design, the update process, and
+the production path to Azure AI Search, which this implementation neither provisions nor requires.
+
 ## Innovation highlights
 
 This project combines migration automation with evidence controls that prevent generated output from
@@ -283,6 +296,7 @@ being mistaken for a completed migration:
 | Document | Purpose |
 |---|---|
 | [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) | Demonstrated versions, textual matrix, and claim boundaries. |
+| [docs/AGENT_GROUNDING.md](docs/AGENT_GROUNDING.md) | Curated grounding catalog, citation format, fail-closed rules, and the production retrieval path. |
 | [docs/SECURITY.md](docs/SECURITY.md) | Threat model, identity, source handling, and non-negotiable guardrails. |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | Deployment, verification, rollback, and failure modes. |
 | [docs/ORACLE_FORMS_6I_RESEARCH.md](docs/ORACLE_FORMS_6I_RESEARCH.md) | Forms 6i source recovery and upgrade path. |
