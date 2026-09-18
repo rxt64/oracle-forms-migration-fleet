@@ -344,6 +344,7 @@ jobs:
             --resource-group "$RESOURCE_GROUP" \
             --location eastus2 \
             --image mcr.microsoft.com/azure-cli:2.75.0 \
+            --os-type Linux \
             --assign-identity "$SMOKE_PRIMARY_IDENTITY_ID" "$SMOKE_UNAUTHORIZED_IDENTITY_ID" \
             --restart-policy Never \
             --cpu 1 \
