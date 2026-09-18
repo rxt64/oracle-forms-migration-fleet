@@ -28,10 +28,15 @@ prints only sanitized resource type/name changes.
 ## Deploy application revisions
 
 ```powershell
-gh workflow run deploy.yml --repo rxt64/oracle-forms-migration-fleet -f migrate-data=true
+$sha = (git rev-parse origin/main).Trim()
+gh workflow run deploy.yml --repo rxt64/oracle-forms-migration-fleet --ref main -f commit_sha=$sha
 ```
 
-The GitHub runner builds a commit-addressed image, authenticates to Azure with OIDC, configures the host-owned sandbox target and model deployments, and updates the Container App. Pushes to `main` run the same path with sandbox configuration enabled. Deployable images are never built from a workstation.
+The selected SHA must be reachable from `main` and have a completed successful push CI run containing
+all required jobs. The GitHub runner builds a commit-addressed image, resolves its ACR digest,
+authenticates to Azure with OIDC, configures the host-owned sandbox target and model deployments, and
+updates the Container App. Pushes to `main` invoke the same workflow only after all required CI jobs pass.
+Deployable images are never built from a workstation.
 
 The existing PostgreSQL server must contain two distinct databases before an application revision is deployed:
 
@@ -42,8 +47,14 @@ The deployment script refuses to use the same host/database pair for both purpos
 
 `Deploy-Workbench.ps1` is retained only for privileged first-time infrastructure and Entra bootstrap in an empty environment. It is not the application release path; routine releases must use the GitHub workflow. Bootstrap requires permission to create resource-group deployments and role assignments and to create an Entra application. It never logs in on the user's behalf.
 
-For a new environment, create the foundation, let GitHub build the image, and then consume that exact
-commit tag during the privileged auth bootstrap:
+For the existing development environment, routine releases use the validated workflow above.
+`Deploy-Workbench.ps1 -FoundationOnly` can still create first-time foundational resources, but the
+current repository workflow deliberately targets the existing named development Container App and is
+not a generic empty-environment image publisher. A new environment therefore needs its own reviewed
+exact-SHA image-publication workflow before the privileged script can consume a commit tag; do not
+reintroduce a workstation build or bypass CI to bridge that bootstrap boundary.
+
+The privileged deployment consumes an image that already exists in ACR:
 
 ```powershell
 $commit = (git rev-parse origin/main).Trim()
@@ -54,19 +65,27 @@ $tag = $commit.Substring(0, 12)
   -FoundryAgentEndpoint '<canonical-hosted-agent-endpoint>' `
   -FoundationOnly
 
-gh workflow run deploy.yml --repo rxt64/oracle-forms-migration-fleet --ref main `
-  -f deploy-app=false -f migrate-data=false
-# Wait for the build-only workflow to succeed before continuing.
-
 ./infra/workbench/Deploy-Workbench.ps1 `
   -ResourceGroupName '<resource-group>' `
   -FoundryAgentEndpoint '<canonical-hosted-agent-endpoint>' `
   -ImageTag $tag
-
-gh workflow run deploy.yml --repo rxt64/oracle-forms-migration-fleet --ref main `
-  -f deploy-app=true -f migrate-data=true
 ```
 
 The script refuses a missing or non-commit-shaped image tag and never invokes an image build.
+
+## Deployment verification and rollback
+
+The workbench release workflow deploys only an exact commit whose required CI jobs passed, resolves the
+published image to an ACR digest, and waits for that digest to become the healthy latest-ready revision.
+It then starts a short-lived Azure Container Instance with the dedicated `id-ofmfleet-pgverify` managed
+identity. That runner obtains a real token for the workbench, verifies authenticated bootstrap and
+project access, persists and revokes a `ValidationOnly` approval in the `Deployment validation` project,
+and confirms a second non-allowlisted identity is rejected. It never calls the execution endpoint and
+cannot project a migration mutation grant.
+
+The ACI runner is deleted after every attempt. If verification fails after the image switch, the
+workflow restores the previous image. Image rollback does not reverse PostgreSQL schema migrations or
+other external writes; platform migrations must remain additive and backward-compatible, and any
+unknown external-write outcome requires reconciliation rather than an automatic retry.
 
 The separate `infra/supporting` stack remains the preview-only destination foundation for Blob Storage, Key Vault, and Azure SQL. Those services are deliberately not granted to the web identity. PostgreSQL sandbox execution is configured independently.

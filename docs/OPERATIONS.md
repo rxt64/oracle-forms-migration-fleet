@@ -29,8 +29,13 @@ Deployable images are built by the GitHub runner and tagged from the commit. Dis
 that runs automatically after a reviewed change reaches `main`:
 
 ```powershell
-gh workflow run deploy.yml --repo rxt64/oracle-forms-migration-fleet -f migrate-data=true
+$sha = (git rev-parse origin/main).Trim()
+gh workflow run deploy.yml --repo rxt64/oracle-forms-migration-fleet --ref main -f commit_sha=$sha
 ```
+
+Manual deployment accepts only a full commit SHA reachable from `main` with a completed successful
+`CI` push run for that exact SHA. Routine releases run automatically as a dependent CI job after the
+required build/test, container, and guided-browser jobs pass.
 
 The runner authenticates with OIDC, builds and pushes the commit-addressed image, configures the
 host-owned PostgreSQL sandbox and model deployments, and updates the Container App. Do not run
@@ -59,9 +64,9 @@ az containerapp revision list -n ca-ofmfleet-dev-ykbpnrpd -g rg-oracle-forms-mig
   --query "[].{name:name,healthState:properties.healthState,runningState:properties.runningState,traffic:properties.trafficWeight,image:properties.template.containers[0].image}" -o json
 ```
 
-Expect the newest revision `Healthy`, `RunningAtMaxScale`, `traffic: 100`, and the image tag you built.
-Then load the workbench in a browser and exercise one real acquisition — a green revision only proves the
-process started.
+Expect the newest revision `Healthy`, `RunningAtMaxScale`, `traffic: 100`, and an ACR `sha256` image
+digest. The workflow then performs authenticated bootstrap, project, platform-state, unauthorized-access,
+and non-writing approval persistence checks through a short-lived managed-identity runner.
 
 For a sandbox migration containing translated program units, inspect these exported artifacts:
 
