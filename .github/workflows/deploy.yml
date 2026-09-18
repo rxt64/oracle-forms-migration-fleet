@@ -351,7 +351,7 @@ jobs:
             --memory 1 \
             --environment-variables \
               "APP_URL=https://$APP_FQDN" \
-              "APP_RESOURCE=api://$WORKBENCH_AUTH_CLIENT_ID" \
+              "APP_RESOURCE=$WORKBENCH_AUTH_CLIENT_ID" \
               "PRIMARY_CLIENT_ID=$SMOKE_PRIMARY_CLIENT_ID" \
               "UNAUTHORIZED_CLIENT_ID=$SMOKE_UNAUTHORIZED_CLIENT_ID" \
               "DEPLOYMENT_SHA=$DEPLOY_SHA" \
