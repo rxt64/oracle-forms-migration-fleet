@@ -4,18 +4,30 @@ name: Deploy workbench
 # back to a commit. Authentication is OIDC: no registry password and no client secret is stored here.
 
 on:
+  workflow_call:
+    inputs:
+      commit_sha:
+        description: 'Full commit SHA whose required CI jobs passed'
+        required: true
+        type: string
+      ci_run_id:
+        description: 'Trusted CI workflow run that validated the SHA'
+        required: true
+        type: string
+      verification_mode:
+        description: 'Verification rules for automatic or manual deployment'
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
-      deploy-app:
-        description: 'Update the existing Container App after building the image'
-        type: boolean
-        default: true
-      migrate-data:
-        description: 'Configure the sandbox database target on the workbench'
-        type: boolean
-        default: true
-  push:
-    branches: [main]
+      commit_sha:
+        description: 'Full main-branch commit SHA to deploy after successful CI'
+        type: string
+        required: true
+
+concurrency:
+  group: oracle-forms-migration-fleet-workbench-deploy
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -40,10 +52,82 @@ env:
   AZURE_AI_REVIEW_MODEL_DEPLOYMENT_NAME: gpt-5.6-sol
 
 jobs:
-  deploy:
+  verify:
+    name: Verify exact commit and CI
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      deploy_sha: ${{ steps.evidence.outputs.deploy_sha }}
+      ci_run_id: ${{ steps.evidence.outputs.ci_run_id }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Resolve trusted CI evidence
+        id: evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_SHA: ${{ inputs.commit_sha }}
+          CALLER_RUN_ID: ${{ inputs.ci_run_id }}
+          VERIFICATION_MODE: ${{ inputs.verification_mode || 'manual' }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "Manual deployments must run from the trusted main workflow." >&2
+            exit 1
+          fi
+
+          if [[ ! "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "commit_sha must be a full lowercase 40-character SHA." >&2
+            exit 1
+          fi
+
+          git fetch --no-tags origin main "$REQUESTED_SHA"
+          git cat-file -e "$REQUESTED_SHA^{commit}"
+          if ! git merge-base --is-ancestor "$REQUESTED_SHA" origin/main; then
+            echo "Commit $REQUESTED_SHA is not reachable from origin/main." >&2
+            exit 1
+          fi
+
+          ci_run_id="$CALLER_RUN_ID"
+          if [[ "$VERIFICATION_MODE" == "manual" ]]; then
+            ci_run_id=$(gh api \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$REQUESTED_SHA&event=push&status=completed&per_page=100" \
+              --jq '.workflow_runs | map(select(.head_sha == "'"$REQUESTED_SHA"'" and .conclusion == "success")) | sort_by(.created_at) | last | .id // empty')
+          fi
+
+          if [[ -z "$ci_run_id" || ! "$ci_run_id" =~ ^[0-9]+$ ]]; then
+            echo "No successful trusted CI run was found for $REQUESTED_SHA." >&2
+            exit 1
+          fi
+
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run_id" > "$RUNNER_TEMP/ci-run.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run_id/jobs?filter=latest&per_page=100" > "$RUNNER_TEMP/ci-jobs.json"
+          python3 .github/scripts/verify_required_ci.py \
+            "$GITHUB_REPOSITORY" \
+            "$REQUESTED_SHA" \
+            "$VERIFICATION_MODE" \
+            "$RUNNER_TEMP/ci-run.json" \
+            "$RUNNER_TEMP/ci-jobs.json"
+
+          echo "deploy_sha=$REQUESTED_SHA" >> "$GITHUB_OUTPUT"
+          echo "ci_run_id=$ci_run_id" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.deploy_sha }}
 
       - uses: actions/setup-node@v4
         with:
@@ -71,17 +155,43 @@ jobs:
       # which does not exist relative to the repository root.
       - name: Build and push the image
         working-directory: src/oracle-forms-migration-fleet
+        env:
+          DEPLOY_SHA: ${{ needs.verify.outputs.deploy_sha }}
         run: |
-          TAG="${GITHUB_SHA::12}"
+          set -euo pipefail
+          TAG="${DEPLOY_SHA::12}"
           docker build -f Dockerfile \
-            -t "$REGISTRY.azurecr.io/$IMAGE:$TAG" \
-            -t "$REGISTRY.azurecr.io/$IMAGE:latest" .
+            --label "org.opencontainers.image.revision=$DEPLOY_SHA" \
+            -t "$REGISTRY.azurecr.io/$IMAGE:$TAG" .
           docker push "$REGISTRY.azurecr.io/$IMAGE:$TAG"
-          docker push "$REGISTRY.azurecr.io/$IMAGE:latest"
+          DIGEST=$(az acr manifest show-metadata \
+            --registry "$REGISTRY" \
+            --name "$IMAGE:$TAG" \
+            --query digest \
+            --output tsv)
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "ACR returned an invalid digest for $IMAGE:$TAG." >&2
+            exit 1
+          fi
           echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "IMAGE_DIGEST=$DIGEST" >> "$GITHUB_ENV"
+
+      - name: Refuse stale automatic deployment before Azure mutation
+        env:
+          DEPLOY_SHA: ${{ needs.verify.outputs.deploy_sha }}
+          VERIFICATION_MODE: ${{ inputs.verification_mode || 'manual' }}
+        run: |
+          set -euo pipefail
+          if [[ "$VERIFICATION_MODE" == "automatic" ]]; then
+            git fetch --no-tags origin main
+            CURRENT_MAIN=$(git rev-parse origin/main)
+            if [[ "$DEPLOY_SHA" != "$CURRENT_MAIN" ]]; then
+              echo "A newer main commit $CURRENT_MAIN superseded automatic deployment $DEPLOY_SHA." >&2
+              exit 1
+            fi
+          fi
 
       - name: Configure the sandbox database target
-        if: ${{ github.event_name == 'push' || inputs.deploy-app }}
         run: |
           if [[ -z "$PLATFORM_PGHOST" || -z "$PLATFORM_PGDATABASE" || -z "$PLATFORM_PGUSER" || \
                 -z "$SANDBOX_PGHOST" || -z "$SANDBOX_PGDATABASE" || -z "$SANDBOX_PGUSER" ]]; then
@@ -117,7 +227,6 @@ jobs:
             --output none
 
       - name: Configure the review and repair agents
-        if: ${{ github.event_name == 'push' || inputs.deploy-app }}
         run: |
           az containerapp update \
             --name "$CONTAINER_APP" \
@@ -129,16 +238,26 @@ jobs:
             --output none
 
       - name: Deploy the image
-        if: ${{ github.event_name == 'push' || inputs.deploy-app }}
+        env:
+          DEPLOY_SHA: ${{ needs.verify.outputs.deploy_sha }}
+          VERIFICATION_MODE: ${{ inputs.verification_mode || 'manual' }}
         run: |
+          set -euo pipefail
+          if [[ "$VERIFICATION_MODE" == "automatic" ]]; then
+            git fetch --no-tags origin main
+            CURRENT_MAIN=$(git rev-parse origin/main)
+            if [[ "$DEPLOY_SHA" != "$CURRENT_MAIN" ]]; then
+              echo "A newer main commit $CURRENT_MAIN superseded automatic deployment $DEPLOY_SHA before image switch." >&2
+              exit 1
+            fi
+          fi
           az containerapp update \
             --name "$CONTAINER_APP" \
             --resource-group "$RESOURCE_GROUP" \
-            --image "$REGISTRY.azurecr.io/$IMAGE:$TAG" \
+            --image "$REGISTRY.azurecr.io/$IMAGE@$IMAGE_DIGEST" \
             --output none
 
       - name: Report what is running
-        if: ${{ github.event_name == 'push' || inputs.deploy-app }}
         run: |
           az containerapp show \
             --name "$CONTAINER_APP" \

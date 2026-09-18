@@ -32,6 +32,9 @@ jobs:
         working-directory: src/oracle-forms-migration-fleet/ClientApp
         run: npm ci
 
+      - name: Test exact-SHA deployment verifier
+        run: python3 .github/scripts/test_verify_required_ci.py
+
       - name: Type-check and build client
         working-directory: src/oracle-forms-migration-fleet/ClientApp
         run: npm run build
@@ -116,3 +119,17 @@ jobs:
           path: |
             src/oracle-forms-migration-fleet/ClientApp/playwright-report/
             src/oracle-forms-migration-fleet/ClientApp/test-results/
+
+  deploy:
+    name: Deploy verified workbench
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [build-and-test, container, guided-ui]
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/deploy.yml
+    with:
+      commit_sha: ${{ github.sha }}
+      ci_run_id: ${{ github.run_id }}
+      verification_mode: automatic
