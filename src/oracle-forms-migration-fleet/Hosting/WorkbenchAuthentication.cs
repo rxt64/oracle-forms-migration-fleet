@@ -337,7 +337,7 @@ public sealed class ContainerAppsIdentityProvider(WorkbenchAuthenticationOptions
                     return WorkbenchIdentityResult.Deny("The platform principal carried a malformed authentication type.");
                 }
 
-                if (!string.IsNullOrEmpty(declaredAuthType) && !IsAad(declaredAuthType))
+                if (!string.IsNullOrEmpty(declaredAuthType) && !IsBearer(declaredAuthType))
                 {
                     return WorkbenchIdentityResult.Deny(
                         $"The platform principal declared unsupported authentication type '{SafeProtocolLabel(declaredAuthType)}'.");
@@ -350,7 +350,7 @@ public sealed class ContainerAppsIdentityProvider(WorkbenchAuthenticationOptions
                 return WorkbenchIdentityResult.Deny("The request named an identity provider this host does not accept.");
             }
 
-            if (!IsAad(declaredAuthType) && !IsAad(providerHeader))
+            if (!IsAad(providerHeader))
             {
                 return WorkbenchIdentityResult.Deny("The platform principal did not declare Microsoft Entra authentication.");
             }
@@ -421,6 +421,9 @@ public sealed class ContainerAppsIdentityProvider(WorkbenchAuthenticationOptions
     private static bool IsAad(string? value) =>
         string.Equals(value, "aad", StringComparison.OrdinalIgnoreCase) ||
         string.Equals(value, "azureactivedirectory", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsBearer(string? value) =>
+        string.Equals(value, "Bearer", StringComparison.OrdinalIgnoreCase);
 
     private static string SafeProtocolLabel(string value)
     {
