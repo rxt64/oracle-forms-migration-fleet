@@ -402,7 +402,8 @@ public sealed class ContainerAppsIdentityProvider(WorkbenchAuthenticationOptions
     }
 
     private static bool IsAad(string? value) =>
-        string.Equals(value, "aad", StringComparison.OrdinalIgnoreCase);
+        string.Equals(value, "aad", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(value, "azureactivedirectory", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Reads the claim array whole, refusing any entry that is not a string type and a string value.
