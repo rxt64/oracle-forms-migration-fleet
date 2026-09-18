@@ -27,6 +27,7 @@ def response(status: int, value: object | bytes = b""):
 class FakeWorkbench:
     def __init__(self) -> None:
         self.project_created = False
+        self.project_name = ""
         self.approval_state = ""
         self.calls: list[tuple[str, str, str | None]] = []
 
@@ -40,7 +41,7 @@ class FakeWorkbench:
         if path == "/api/workbench/context":
             projects = []
             if self.project_created:
-                projects = [{"projectId": "prj-validation", "name": "Deployment validation"}]
+                projects = [{"projectId": "prj-validation", "name": self.project_name}]
             return response(
                 200,
                 {
@@ -51,11 +52,12 @@ class FakeWorkbench:
             )
         if method == "POST" and path == "/api/workbench/projects":
             self.project_created = True
+            self.project_name = json.loads(body)["name"]
             return response(
                 201,
                 {
                     "projectId": "prj-validation",
-                    "name": "Deployment validation",
+                    "name": self.project_name,
                     "targetProfile": {"targetProfileId": "sandbox"},
                 },
             )
@@ -147,6 +149,7 @@ class PostDeploySmokeTests(unittest.TestCase):
             SMOKE.run()
 
         self.assertEqual("Revoked", fake.approval_state)
+        self.assertEqual("Deployment validation 0123456789ab", fake.project_name)
         self.assertFalse(any("/execute" in path for _, path, _ in fake.calls))
         self.assertIn(("GET", "/api/workbench/bootstrap", None), fake.calls)
         self.assertIn(("GET", "/api/workbench/bootstrap", "secondary-token"), fake.calls)

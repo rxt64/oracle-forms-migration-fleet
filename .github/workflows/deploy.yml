@@ -361,7 +361,6 @@ jobs:
               "PRIMARY_CLIENT_ID=$SMOKE_PRIMARY_CLIENT_ID" \
               "UNAUTHORIZED_CLIENT_ID=$SMOKE_UNAUTHORIZED_CLIENT_ID" \
               "DEPLOYMENT_SHA=$DEPLOY_SHA" \
-              "VALIDATION_PROJECT_NAME=Deployment validation" \
               "SCRIPT_B64=$SCRIPT_B64" \
             --command-line "/bin/sh -c 'echo \"\$SCRIPT_B64\" | base64 -d > /tmp/post_deploy_smoke.py && python3 /tmp/post_deploy_smoke.py'" \
             --output none
