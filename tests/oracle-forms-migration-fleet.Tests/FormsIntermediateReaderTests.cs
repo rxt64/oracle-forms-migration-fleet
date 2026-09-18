@@ -343,6 +343,12 @@ public class FormsIntermediateReaderTests
     [InlineData("\"scope\": \"ORDER_ENTRY\"", "\"scope\": \"OTHER_MODULE\"", "outside the containing module or block")]
     [InlineData("\"scope\": \"ORDER_BLOCK.ACCOUNT_ID\"", "\"scope\": \"ORDER_BLOCK.NOT_AN_ITEM\"", "outside the containing module or block")]
     [InlineData("\"bodyEncoding\": \"Attribute\"", "\"bodyEncoding\": \"Unknown\"", "no recognized 'bodyEncoding'")]
+    [InlineData("\"bodyEncoding\": \"Attribute\"", "\"bodyEncoding\": \"0\"", "no recognized 'bodyEncoding'")]
+    [InlineData("\"bodyEncoding\": \"Attribute\"", "\"bodyEncoding\": \"1\"", "no recognized 'bodyEncoding'")]
+    [InlineData("\"bodyEncoding\": \"Attribute\"", "\"bodyEncoding\": \"999\"", "no recognized 'bodyEncoding'")]
+    [InlineData("\"bodyEncoding\": \"Attribute\"", "\"bodyEncoding\": \"-1\"", "no recognized 'bodyEncoding'")]
+    [InlineData("\"bodyEncoding\": \"Attribute\"", "\"bodyEncoding\": \"attribute\"", "no recognized 'bodyEncoding'")]
+    [InlineData("\"bodyEncoding\": \"Attribute\"", "\"bodyEncoding\": \"ELEMENT\"", "no recognized 'bodyEncoding'")]
     [InlineData("\"programUnits\": []", "\"programUnits\": {}", "is not an array")]
     [InlineData("\"lovs\": []", "\"lovs\": [{ \"name\": \"LOV\" }]", "not a non-empty string")]
     public void A_malformed_string_array_is_refused_rather_than_partly_read(string find, string replace, string expected)
@@ -365,6 +371,16 @@ public class FormsIntermediateReaderTests
         Assert.Contains("200001 characters", read.Error!, StringComparison.Ordinal);
         Assert.Contains("reads at most 200000", read.Error!, StringComparison.Ordinal);
         Assert.Contains("refused rather than truncated", read.Error!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Schema_version_one_is_refused_with_reimport_guidance()
+    {
+        FormsIntermediateRead read = Read(Mutate("\"schemaVersion\": \"2\"", "\"schemaVersion\": \"1\""));
+
+        Assert.Null(read.Modules);
+        Assert.Contains("schema version '1'", read.Error!, StringComparison.Ordinal);
+        Assert.Contains("Re-import source to regenerate this format.", read.Error!, StringComparison.Ordinal);
     }
 
     [Fact]

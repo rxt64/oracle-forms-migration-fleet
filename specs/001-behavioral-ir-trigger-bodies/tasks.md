@@ -10,3 +10,5 @@
 - [x] Run focused behavioral IR tests.
 - [x] Run the complete solution test suite.
 - [x] Complete independent specialist and QA review.
+- [x] Reject numeric and case-variant trigger body encodings.
+- [x] Tell operators to re-import source when stale IR is rejected.

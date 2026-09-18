@@ -6,6 +6,14 @@ Notable changes to behaviour, with the reasoning that is not visible in a diff.
 
 ### Added
 
+- Guided operator workbench UI. The current five-step setup now uses an Azure-inspired dark shell,
+  business-language guidance, an auditable contextual-help registry, truthful capability states, and a
+  real-event activity pane without terminal decoration. Typed contacts remain pending planning notes and
+  manually selected source items remain unverified declarations, so this GUI cannot manufacture approval or
+  verification records. Desktop/mobile Playwright checks cover focus, overflow, reduced motion, forced colors,
+  and WCAG 2.2 automated rules; durable projects, authenticated approvals, and resumable jobs remain explicit
+  follow-up capabilities.
+
 - Oracle Forms trigger bodies now survive XML parsing and source normalization as inert, untrusted text in
   Forms IR schema version 2. The IR records module, block, or item scope and whether Oracle supplied the body
   as an XML attribute or child element. Ambiguous encodings, nested body markup, duplicate trigger identities,

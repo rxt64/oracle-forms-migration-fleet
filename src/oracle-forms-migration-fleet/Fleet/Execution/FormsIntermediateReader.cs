@@ -91,7 +91,7 @@ public static class FormsIntermediateReader
             {
                 return Refuse(
                     $"The normalized Forms representation declares schema version '{Text(root, "schemaVersion") ?? "(not a string)"}', " +
-                    $"and this build reads version '{SchemaVersion}' only.");
+                    $"and this build reads version '{SchemaVersion}' only. Re-import source to regenerate this format.");
             }
 
             if (root.GetProperty("normalized").ValueKind != JsonValueKind.True)
@@ -672,13 +672,17 @@ public static class FormsIntermediateReader
 
             if (body is not null)
             {
-                if (encodingText is null
-                    || !Enum.TryParse(encodingText, ignoreCase: false, out FormsTriggerBodyEncoding parsedEncoding))
+                encoding = encodingText switch
+                {
+                    nameof(FormsTriggerBodyEncoding.Attribute) => FormsTriggerBodyEncoding.Attribute,
+                    nameof(FormsTriggerBodyEncoding.Element) => FormsTriggerBodyEncoding.Element,
+                    _ => null,
+                };
+
+                if (encoding is null)
                 {
                     return (null, $"Trigger '{scopeValue}.{name}' has a body but no recognized 'bodyEncoding'.");
                 }
-
-                encoding = parsedEncoding;
             }
 
             string identity = $"{scopeValue}\0{name}";
