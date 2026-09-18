@@ -339,7 +339,8 @@ public sealed class ContainerAppsIdentityProvider(WorkbenchAuthenticationOptions
 
                 if (!string.IsNullOrEmpty(declaredAuthType) && !IsAad(declaredAuthType))
                 {
-                    return WorkbenchIdentityResult.Deny("The platform principal declared an identity provider this host does not accept.");
+                    return WorkbenchIdentityResult.Deny(
+                        $"The platform principal declared unsupported authentication type '{SafeProtocolLabel(declaredAuthType)}'.");
                 }
             }
 
@@ -420,6 +421,12 @@ public sealed class ContainerAppsIdentityProvider(WorkbenchAuthenticationOptions
     private static bool IsAad(string? value) =>
         string.Equals(value, "aad", StringComparison.OrdinalIgnoreCase) ||
         string.Equals(value, "azureactivedirectory", StringComparison.OrdinalIgnoreCase);
+
+    private static string SafeProtocolLabel(string value)
+    {
+        string sanitized = new([.. value.Take(64).Where(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_' or '.')]);
+        return sanitized.Length == 0 ? "unreadable" : sanitized;
+    }
 
     /// <summary>
     /// Reads the claim array whole, refusing any entry that is not a string type and a string value.
