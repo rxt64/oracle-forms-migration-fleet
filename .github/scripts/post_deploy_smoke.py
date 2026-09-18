@@ -148,7 +148,9 @@ def run() -> None:
     primary_client_id = os.environ["PRIMARY_CLIENT_ID"]
     unauthorized_client_id = os.environ["UNAUTHORIZED_CLIENT_ID"]
     deployment_sha = os.environ["DEPLOYMENT_SHA"]
-    project_name = os.environ.get("VALIDATION_PROJECT_NAME", "Deployment validation")
+    project_name = os.environ.get(
+        "VALIDATION_PROJECT_NAME", f"Deployment validation {deployment_sha[:12]}"
+    )
 
     primary_token = managed_identity_token(primary_client_id, app_resource)
     unauthorized_token = managed_identity_token(unauthorized_client_id, app_resource)
