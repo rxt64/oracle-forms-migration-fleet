@@ -81,6 +81,7 @@ test.describe("activity pane", () => {
     await expect(measured).toHaveCount(3);
     await expect(measured.filter({ hasText: "Forms module source" })).toContainText("12");
     await expect(measured.filter({ hasText: "PL/SQL program units" })).toContainText("30");
+    await expect(page.getByRole("heading", { name: "Completed counts" })).toBeVisible();
 
     // The message counters stay message counters and say so in their labels.
     const counters = page.locator(".mf-activity-counts li");
@@ -99,6 +100,8 @@ test.describe("activity pane", () => {
     await expect(state(page)).toHaveText("Interrupted or unknown");
     await expect(page.getByText(/stopped without the server reporting an outcome/)).toBeVisible();
     await expect(page.getByText(/These are partial findings/)).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Partial findings" })).toBeVisible();
+    await expect(page.locator(".mf-activity-summary").getByText(/Inspect retained results and the actual destination/)).toBeVisible();
 
     // Partial findings survive: the twelve modules the server did count are still shown.
     await expect(page.locator(".mf-activity-measured li").filter({ hasText: "Forms module source" })).toContainText("12");
@@ -131,6 +134,27 @@ test.describe("activity pane", () => {
     const heartbeat: Frame = { ...runWaitingFrame(), operation: "source.acquire" };
     await stub.push(CLONE_PATH, heartbeat);
     await expect(state(page)).toHaveText("Waiting for updates");
+  });
+
+  test("active measured counts are reported so far, not described as stopped", async ({ page }) => {
+    const stub = await installStreamStub(page);
+    await page.goto("/");
+    await beginClone(page);
+    await stub.waitForOpen(CLONE_PATH);
+
+    const counted = cloneFrames().find((item) => item.artifactCount === 12)!;
+    await stub.push(CLONE_PATH, counted);
+
+    await expect(state(page)).toHaveText("Running");
+    await expect(page.getByRole("heading", { name: "Reported so far" })).toBeVisible();
+    await expect(page.getByText(/may change while the operation remains open/)).toBeVisible();
+    await expect(page.getByText(/before it stopped/)).toHaveCount(0);
+
+    const heartbeat: Frame = { ...runWaitingFrame(), operation: "source.acquire" };
+    await stub.push(CLONE_PATH, heartbeat);
+    await expect(state(page)).toHaveText("Waiting for updates");
+    await expect(page.getByRole("heading", { name: "Reported so far" })).toBeVisible();
+    await stub.close(CLONE_PATH);
   });
 
   test("the screen reader is given a concise status, and the log does not announce each line", async ({ page }) => {
@@ -219,10 +243,11 @@ test.describe("activity pane", () => {
     await stub.waitForOpen(CLONE_PATH);
 
     const footer = page.locator(".mf-activity footer");
-    await expect(footer).toContainText("Closing this pane does not stop the work.");
-    await expect(footer).toContainText("cancellation here is cooperative and bound to this browser request");
-    await expect(footer).toContainText("work already done is not undone");
-    await expect(footer).toContainText("no durable job resumes it");
+    await expect(footer).toContainText("Closing this pane only hides activity.");
+    await expect(footer).toContainText("may not know whether external work stopped");
+    await expect(footer).toContainText("changes already applied may remain");
+    await expect(footer).toContainText("Inspect retained results and the actual destination before deciding whether retry is safe");
+    await expect(footer).toContainText("no durable resume yet");
 
     await stub.close(CLONE_PATH);
   });

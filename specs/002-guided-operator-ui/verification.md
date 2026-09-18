@@ -17,10 +17,12 @@ Newly reproduced on `feat/guided-operator-ui-followup`, starting from `0aa5bb2f5
 
 - `npm ci --no-audit --no-fund`: passed from the checked-in lockfile, installing 77 packages.
 - `npm run build`: passed, 1,586 modules transformed.
-- `npm run test:e2e`: 96 passed, 8 skipped, 0 failed in 2.7 minutes across desktop Chromium at 1,440 x 900 and mobile Chromium at 390 x 844.
+- `npm run test:e2e`: 98 passed, 8 skipped, 0 failed in 2.9 minutes across desktop Chromium at 1,440 x 900 and mobile Chromium at 390 x 844 after the activity-state correction.
 - The eight skips are intentional: mouse-hover cases do not run on the touch project, touch-tap does not run on the desktop project, and viewport-independent direct HTTP trust tests run once on desktop.
 
 The suite covers every setup step, validation focus, disabled capabilities, completed and in-flight source switches, reset behavior, result order/disclosures, pinned and transient help, viewport edges and long help, Activity focus while events arrive, keyboard containment while streaming, completed/failed/waiting/interrupted outcomes, concise status announcements, typed counts, failed zero-work execution results, retained diagnostic artifacts, action/help sibling markup, screenshots, and axe scans. Test-only `fetch` interception supplies only progress frames and selected execution-result states; bootstrap, validation, and planning use the real host. One test uploads an in-memory ZIP through the real source endpoint and plans against the real owned workspace. No production fixture route or fake-run mode exists.
+
+Measured-count headings are state-specific: `Reported so far` for Running/Waiting, `Partial findings` for Failed/Interrupted, and `Completed counts` only for successful completion. Disconnect guidance requires inspection of retained results and the actual destination before retry because cooperative cancellation cannot guarantee that external effects stopped or rolled back.
 
 ## Executable Checks
 

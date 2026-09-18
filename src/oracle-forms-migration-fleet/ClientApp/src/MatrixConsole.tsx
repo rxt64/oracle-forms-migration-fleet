@@ -153,7 +153,11 @@ export function ActivityPane({
 
           {measured.length > 0 && <section className="mf-activity-measured" aria-labelledby="mf-activity-measured-title">
             <h3 id="mf-activity-measured-title">
-              {view.state === "completed" ? "What the server counted" : "What the server counted before it stopped"}
+              {view.state === "completed"
+                ? "Completed counts"
+                : view.state === "failed" || view.state === "interrupted"
+                  ? "Partial findings"
+                  : "Reported so far"}
               <InfoTip label="what the server counted">{help("metric.serverCounted")}</InfoTip>
             </h3>
             <ul>
@@ -164,8 +168,11 @@ export function ActivityPane({
                 </li>
               ))}
             </ul>
-            {view.state !== "completed" && <p className="mf-help">
-              These are partial findings: what the server had reported when the transcript stopped, not a finished total.
+            {(view.state === "failed" || view.state === "interrupted") && <p className="mf-help">
+              These are partial findings: what the server reported before the outcome became failed or unknown, not a finished total.
+            </p>}
+            {(view.state === "running" || view.state === "waiting") && <p className="mf-help">
+              These counts were reported by the server and may change while the operation remains open.
             </p>}
           </section>}
 
@@ -196,14 +203,12 @@ export function ActivityPane({
         </div>
 
         <footer>
-          <p><strong>Closing this pane does not stop the work.</strong> It hides the transcript only; the request that
-            started the operation carries on.</p>
+          <p><strong>Closing this pane only hides activity.</strong> Keep this tab open because the current operation still depends on its request.</p>
           <p className="mf-activity-limit">
             <AlertTriangle aria-hidden="true" />
-            There is no cancel button because cancellation here is cooperative and bound to this browser request. The server
-            stops only where it next checks for cancellation, so work already done is not undone and files already written
-            are not removed. Reloading the page or losing the connection ends the request the same way: the operation stops
-            without reporting an outcome, no durable job resumes it, and this pane says so rather than calling it finished.
+            If the connection is lost, this browser may not know whether external work stopped. Cancellation is cooperative,
+            changes already applied may remain, and there is no durable resume yet. Inspect retained results and the actual
+            destination before deciding whether retry is safe; an outcome that cannot be established needs review.
           </p>
         </footer>
       </section>
@@ -287,7 +292,7 @@ function describe(lines: ConsoleLine[], running: boolean): ActivityView {
     ...base,
     state: "interrupted",
     observed: `${base.observed} The stream then stopped without the server reporting an outcome, so what happened after that is not known from here.`,
-    nextAction: "Treat everything above as partial. Start the operation again if you need a result you can rely on.",
+    nextAction: "Treat everything above as partial. Inspect retained results and the actual destination before deciding whether retry is safe; an outcome that cannot be established needs review.",
     announcement: `${operationLabel}: ${STATES.interrupted.label}.`,
   };
 }
