@@ -345,7 +345,8 @@ public sealed class PostgresPlatformStateStore : IPlatformStateStore, IAsyncDisp
         command.Parameters.AddWithValue("tenant", tenantId);
         command.Parameters.AddWithValue("project", projectId);
         command.Parameters.AddWithValue("profile", targetProfileId);
-        command.Parameters.AddWithValue("version", version.HasValue ? version.Value : DBNull.Value);
+        command.Parameters.AddWithValue(
+            "version", NpgsqlDbType.Integer, version.HasValue ? version.Value : DBNull.Value);
 
         await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadTargetProfile(reader) : null;
