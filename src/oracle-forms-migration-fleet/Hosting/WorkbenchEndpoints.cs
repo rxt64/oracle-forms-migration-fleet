@@ -702,6 +702,14 @@ internal static class WorkbenchEndpoints
         WorkbenchIdentityResult result = identity.Authenticate(
             name => context.Request.Headers[name].FirstOrDefault());
 
+        if (!result.IsAuthenticated && identity.Mode == WorkbenchAuthenticationMode.ContainerApps)
+        {
+            context.RequestServices
+                .GetRequiredService<ILoggerFactory>()
+                .CreateLogger("OracleFormsMigrationFleet.WorkbenchIdentity")
+                .LogWarning("Container Apps identity rejected the request: {Reason}", result.Reason);
+        }
+
         actor = result.Actor ?? new WorkbenchActor(string.Empty, []);
         return result.IsAuthenticated;
     }
