@@ -96,6 +96,35 @@ class FakeWorkbench:
 
 
 class PostDeploySmokeTests(unittest.TestCase):
+    def test_managed_identity_retries_transient_errors_and_returns_token(self) -> None:
+        responses = [
+            response(500, {"error": "temporarily_unavailable"}),
+            response(429, {"error": "throttled"}),
+            response(200, {"access_token": "secret-token"}),
+        ]
+        with (
+            patch.object(SMOKE, "http_request", side_effect=responses),
+            patch.object(SMOKE.time, "sleep"),
+        ):
+            self.assertEqual("secret-token", SMOKE.managed_identity_token("client", "resource"))
+
+    def test_managed_identity_failure_reports_bounded_error_without_token(self) -> None:
+        failure = response(
+            400,
+            {
+                "error": "invalid_resource",
+                "error_description": "The requested resource is not configured.",
+                "access_token": "must-not-appear",
+            },
+        )
+        with patch.object(SMOKE, "http_request", return_value=failure):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"HTTP 400 \(invalid_resource: The requested resource is not configured\.\)",
+            ) as raised:
+                SMOKE.managed_identity_token("client", "resource")
+        self.assertNotIn("must-not-appear", str(raised.exception))
+
     def test_smoke_sequence_is_authenticated_persistent_and_non_writing(self) -> None:
         fake = FakeWorkbench()
         environment = {
