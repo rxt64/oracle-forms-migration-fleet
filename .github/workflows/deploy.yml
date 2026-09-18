@@ -214,38 +214,29 @@ jobs:
       - name: Authorize the dedicated smoke identity
         run: |
           set -euo pipefail
-          CURRENT_ALLOWED=$(az containerapp auth show \
-            --name "$CONTAINER_APP" \
-            --resource-group "$RESOURCE_GROUP" \
-            --query 'identityProviders.azureActiveDirectory.validation.defaultAuthorizationPolicy.allowedPrincipals.identities' \
-            --output json)
-          UPDATED_ALLOWED=$(python3 -c '
-          import json, os, sys
-          current = json.load(sys.stdin) or []
-          denied = os.environ["SMOKE_UNAUTHORIZED_PRINCIPAL_ID"]
-          required = {
-              os.environ["WORKBENCH_OPERATOR_PRINCIPAL_ID"],
-              os.environ["SMOKE_PRIMARY_PRINCIPAL_ID"],
-          }
-          print(json.dumps(sorted((set(current) - {denied}) | required), separators=(",", ":")))
-          ' <<< "$CURRENT_ALLOWED")
-          az containerapp auth update \
-            --name "$CONTAINER_APP" \
-            --resource-group "$RESOURCE_GROUP" \
-            --set "identityProviders.azureActiveDirectory.validation.defaultAuthorizationPolicy.allowedPrincipals.identities=$UPDATED_ALLOWED" \
+          APP_ID="/subscriptions/${{ vars.AZURE_SUBSCRIPTION_ID }}/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.App/containerApps/$CONTAINER_APP"
+          AUTH_URI="https://management.azure.com${APP_ID}/authConfigs/current?api-version=2025-01-01"
+          az rest --method get --uri "$AUTH_URI" --output json > "$RUNNER_TEMP/current-auth.json"
+          python3 .github/scripts/update_auth_allowlist.py \
+            build \
+            "$RUNNER_TEMP/current-auth.json" \
+            "$RUNNER_TEMP/updated-auth.json" \
+            --required "$WORKBENCH_OPERATOR_PRINCIPAL_ID" \
+            --required "$SMOKE_PRIMARY_PRINCIPAL_ID" \
+            --denied "$SMOKE_UNAUTHORIZED_PRINCIPAL_ID"
+          az rest \
+            --method put \
+            --uri "$AUTH_URI" \
+            --headers 'Content-Type=application/json' \
+            --body "@$RUNNER_TEMP/updated-auth.json" \
             --output none
-
-          ALLOWED=$(az containerapp auth show \
-            --name "$CONTAINER_APP" \
-            --resource-group "$RESOURCE_GROUP" \
-            --query 'identityProviders.azureActiveDirectory.validation.defaultAuthorizationPolicy.allowedPrincipals.identities' \
-            --output tsv)
-          grep -Fqx "$WORKBENCH_OPERATOR_PRINCIPAL_ID" <<< "$ALLOWED"
-          grep -Fqx "$SMOKE_PRIMARY_PRINCIPAL_ID" <<< "$ALLOWED"
-          if grep -Fqx "$SMOKE_UNAUTHORIZED_PRINCIPAL_ID" <<< "$ALLOWED"; then
-            echo "The unauthorized smoke identity must not be allowlisted." >&2
-            exit 1
-          fi
+          az rest --method get --uri "$AUTH_URI" --output json > "$RUNNER_TEMP/stored-auth.json"
+          python3 .github/scripts/update_auth_allowlist.py \
+            verify \
+            "$RUNNER_TEMP/stored-auth.json" \
+            --required "$WORKBENCH_OPERATOR_PRINCIPAL_ID" \
+            --required "$SMOKE_PRIMARY_PRINCIPAL_ID" \
+            --denied "$SMOKE_UNAUTHORIZED_PRINCIPAL_ID"
 
       - name: Capture rollback image
         id: rollback

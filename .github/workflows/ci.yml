@@ -38,6 +38,9 @@ jobs:
       - name: Test post-deployment smoke client
         run: python3 .github/scripts/test_post_deploy_smoke.py
 
+      - name: Test auth allowlist transformer
+        run: python3 .github/scripts/test_update_auth_allowlist.py
+
       - name: Type-check and build client
         working-directory: src/oracle-forms-migration-fleet/ClientApp
         run: npm run build
