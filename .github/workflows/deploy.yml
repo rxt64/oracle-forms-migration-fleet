@@ -223,7 +223,10 @@ jobs:
             "$RUNNER_TEMP/updated-auth.json" \
             --required "$WORKBENCH_OPERATOR_PRINCIPAL_ID" \
             --required "$SMOKE_PRIMARY_PRINCIPAL_ID" \
-            --denied "$SMOKE_UNAUTHORIZED_PRINCIPAL_ID"
+            --denied "$SMOKE_UNAUTHORIZED_PRINCIPAL_ID" \
+            --required-application "$WORKBENCH_AUTH_CLIENT_ID" \
+            --required-application "$SMOKE_PRIMARY_CLIENT_ID" \
+            --denied-application "$SMOKE_UNAUTHORIZED_CLIENT_ID"
           az rest \
             --method put \
             --uri "$AUTH_URI" \
@@ -236,7 +239,10 @@ jobs:
             "$RUNNER_TEMP/stored-auth.json" \
             --required "$WORKBENCH_OPERATOR_PRINCIPAL_ID" \
             --required "$SMOKE_PRIMARY_PRINCIPAL_ID" \
-            --denied "$SMOKE_UNAUTHORIZED_PRINCIPAL_ID"
+            --denied "$SMOKE_UNAUTHORIZED_PRINCIPAL_ID" \
+            --required-application "$WORKBENCH_AUTH_CLIENT_ID" \
+            --required-application "$SMOKE_PRIMARY_CLIENT_ID" \
+            --denied-application "$SMOKE_UNAUTHORIZED_CLIENT_ID"
 
       - name: Capture rollback image
         id: rollback
@@ -351,7 +357,7 @@ jobs:
             --memory 1 \
             --environment-variables \
               "APP_URL=https://$APP_FQDN" \
-              "APP_RESOURCE=$WORKBENCH_AUTH_CLIENT_ID" \
+              "APP_RESOURCE=api://$WORKBENCH_AUTH_CLIENT_ID" \
               "PRIMARY_CLIENT_ID=$SMOKE_PRIMARY_CLIENT_ID" \
               "UNAUTHORIZED_CLIENT_ID=$SMOKE_UNAUTHORIZED_CLIENT_ID" \
               "DEPLOYMENT_SHA=$DEPLOY_SHA" \
