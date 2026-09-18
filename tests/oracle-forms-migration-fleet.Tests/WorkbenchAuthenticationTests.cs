@@ -35,7 +35,7 @@ public class WorkbenchAuthenticationTests
 
     /// <summary>A platform envelope, with every claim overridable so one fact at a time can be wrong.</summary>
     private static string Envelope(
-        string? authType = "aad",
+        string? authType = "Bearer",
         string? tenant = Tenant,
         string? audience = Client,
         string? issuer = Issuer,
@@ -84,7 +84,7 @@ public class WorkbenchAuthenticationTests
         return Convert.ToBase64String(Encoding.UTF8.GetBytes(json));
     }
 
-    private static WorkbenchHeaderLookup Headers(string? principal, string? principalId = ObjectId, string? idp = null) =>
+    private static WorkbenchHeaderLookup Headers(string? principal, string? principalId = ObjectId, string? idp = "aad") =>
         name => name switch
         {
             WorkbenchPrincipalHeaders.Principal => principal,
@@ -220,7 +220,7 @@ public class WorkbenchAuthenticationTests
         ContainerAppsIdentityProvider provider = new(ContainerApps());
 
         Assert.True(provider.Authenticate(Headers(
-            Envelope(authType: "azureactivedirectory"),
+            Envelope(),
             idp: "azureactivedirectory")).IsAuthenticated);
     }
 
@@ -253,7 +253,7 @@ public class WorkbenchAuthenticationTests
     public void A_non_entra_envelope_cannot_be_overridden_by_the_idp_header()
     {
         Assert.False(new ContainerAppsIdentityProvider(ContainerApps())
-            .Authenticate(Headers(Envelope(authType: "github"), idp: "azureactivedirectory"))
+            .Authenticate(Headers(Envelope(), idp: "github"))
             .IsAuthenticated);
     }
 
@@ -262,9 +262,9 @@ public class WorkbenchAuthenticationTests
     {
         ContainerAppsIdentityProvider provider = new(ContainerApps());
 
-        Assert.False(provider.Authenticate(Headers(Envelope(authType: string.Empty))).IsAuthenticated);
-        Assert.False(provider.Authenticate(Headers(Envelope(includeAuthType: false))).IsAuthenticated);
-        Assert.False(provider.Authenticate(Headers(Envelope(authType: null))).IsAuthenticated);
+        Assert.False(provider.Authenticate(Headers(Envelope(authType: string.Empty), idp: null)).IsAuthenticated);
+        Assert.False(provider.Authenticate(Headers(Envelope(includeAuthType: false), idp: null)).IsAuthenticated);
+        Assert.False(provider.Authenticate(Headers(Envelope(authType: null), idp: null)).IsAuthenticated);
     }
 
     public static TheoryData<string, string> RejectedEnvelopes() => new()
@@ -275,7 +275,7 @@ public class WorkbenchAuthenticationTests
         { "missing audience", Envelope(audience: null) },
         { "wrong issuer", Envelope(issuer: "https://login.microsoftonline.com/common/v2.0") },
         { "missing issuer", Envelope(issuer: null) },
-        { "wrong authentication type", Envelope(authType: "twitter") },
+        { "wrong authentication type", Envelope(authType: "Basic") },
         { "missing object id", Envelope(objectId: null) },
         { "object id that is not a directory identifier", Envelope(objectId: "operator@contoso.example") },
         { "malformed role claim", Envelope(malformedClaim: true) },
