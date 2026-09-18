@@ -700,7 +700,7 @@ internal static class WorkbenchEndpoints
         out WorkbenchActor actor)
     {
         WorkbenchIdentityResult result = identity.Authenticate(
-            name => context.Request.Headers[name].FirstOrDefault());
+            name => context.Request.Headers[name] is { Count: 1 } values ? values[0] : null);
 
         if (!result.IsAuthenticated && identity.Mode == WorkbenchAuthenticationMode.ContainerApps)
         {
