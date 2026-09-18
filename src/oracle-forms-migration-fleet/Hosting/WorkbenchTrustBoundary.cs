@@ -53,6 +53,8 @@ public enum WorkbenchMutationScope
 {
     SandboxDatabaseWrite,
     ProductionWrite,
+    /// <summary>Persists and retrieves an approval lifecycle but can never authorize a side effect.</summary>
+    ValidationOnly,
 }
 
 /// <summary>

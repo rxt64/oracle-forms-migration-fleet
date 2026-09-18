@@ -1,7 +1,6 @@
 // Copyright (c) Microsoft. All rights reserved.
 
 using OracleFormsMigrationFleet.Hosting;
-
 namespace OracleFormsMigrationFleet.Tests;
 
 /// <summary>
@@ -414,6 +413,26 @@ public class PlatformStateTests : IDisposable
         Assert.False(requested.Succeeded);
         Assert.Equal(409, requested.Status);
         Assert.Contains("Production", requested.Error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Validation_only_approval_is_persisted_but_never_projects_a_mutation_grant()
+    {
+        (IPlatformStateStore store, PlatformAccessService service, string projectId, _) = await SeedAsync();
+
+        PlatformApproval requested = (await service.RequestAsync(
+            Actor(Requester),
+            RequestInput(projectId, scope: WorkbenchMutationScope.ValidationOnly),
+            CancellationToken.None)).Value!;
+
+        PlatformApproval approved = (await service.DecideAsync(
+            Actor(Approver), requested.ApprovalId, approve: true, requested.Version, null, CancellationToken.None)).Value!;
+
+        Assert.Equal(WorkbenchMutationScope.ValidationOnly, approved.Scope);
+        Assert.True(approved.IsEffective(DateTimeOffset.UtcNow));
+        Assert.NotNull(await store.GetApprovalAsync(Tenant, approved.ApprovalId, CancellationToken.None));
+        Assert.Empty(await new PlatformAuthorizationStore(store, Sandbox)
+            .ForOwnerAsync(Actor(Requester).OwnerId, CancellationToken.None));
     }
 
     [Fact]

@@ -138,13 +138,15 @@ Deploy the authenticated Azure Container Apps workbench from the GitHub runner. 
 tags the image from the commit, authenticates to Azure with OIDC, and updates the Container App:
 
 ```powershell
-gh workflow run deploy.yml --repo rxt64/oracle-forms-migration-fleet -f migrate-data=true
+$sha = (git rev-parse origin/main).Trim()
+gh workflow run deploy.yml --repo rxt64/oracle-forms-migration-fleet --ref main -f commit_sha=$sha
 ```
 
-The workflow also runs automatically after a reviewed change reaches `main`. The repository's GitHub
-Actions workflows build, test, publish immutable images to ACR, deploy the workbench and migrated demo,
-and run live workflow verification. Infrastructure preview and break-glass operational scripts are
-documented in [docs/OPERATIONS.md](docs/OPERATIONS.md); deployable images are built by CI, not a workstation.
+Manual deployment requires successful CI evidence for that exact main-branch SHA. The workflow also runs
+automatically as a dependent job after all required checks pass. The repository's GitHub Actions workflows
+build, test, publish immutable digest-addressed images to ACR, deploy the workbench and migrated demo, and
+run live workflow verification. Infrastructure preview and break-glass operational scripts are documented
+in [docs/OPERATIONS.md](docs/OPERATIONS.md); deployable images are built by CI, not a workstation.
 
 ## What gets deployed
 

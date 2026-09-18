@@ -6,6 +6,9 @@ param environmentName = 'dev'
 param foundryAccountName = 'cog-czusrhcg4gpm2'
 param foundryProjectName = 'oracle-forms-migration-fleet-dev'
 param operatorPrincipalObjectIds = split(readEnvironmentVariable('WORKBENCH_OPERATOR_PRINCIPAL_OBJECT_IDS'), ',')
+param validationPrincipalObjectIds = [
+	'3f74daff-00b7-4606-bdb8-91aba713a54d'
+]
 param platformDatabaseHost = 'pg-ofmfleet-dev-ykbpnrpd.postgres.database.azure.com'
 param platformDatabaseName = 'ofm_platform'
 param platformDatabaseUser = 'id-ofmfleet-web-dev-ykbpnrpd'

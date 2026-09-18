@@ -45,6 +45,13 @@ env:
   PLATFORM_PGUSER: id-ofmfleet-web-dev-ykbpnrpd
   PLATFORM_PGDATABASE: ofm_platform
   WORKBENCH_AUTH_CLIENT_ID: 0ff0fa49-fce8-4801-ab93-e862a62fd6ab
+  WORKBENCH_OPERATOR_PRINCIPAL_ID: dd84da40-177f-47b9-9c4d-4b657ee4de36
+  SMOKE_PRIMARY_IDENTITY_ID: /subscriptions/d4394e57-c076-4c92-a870-5de6bf44f255/resourceGroups/rg-oracle-forms-migration-fleet-dev-b9f0e875/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-ofmfleet-pgverify
+  SMOKE_PRIMARY_CLIENT_ID: afd70481-6a7e-427d-9a05-decc42477876
+  SMOKE_PRIMARY_PRINCIPAL_ID: 3f74daff-00b7-4606-bdb8-91aba713a54d
+  SMOKE_UNAUTHORIZED_IDENTITY_ID: /subscriptions/d4394e57-c076-4c92-a870-5de6bf44f255/resourceGroups/rg-oracle-forms-migration-fleet-dev-b9f0e875/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-ofmfleet-db-dev-ykbpnrpd
+  SMOKE_UNAUTHORIZED_CLIENT_ID: da7029ce-0688-4b3b-ad54-1a42440f15fd
+  SMOKE_UNAUTHORIZED_PRINCIPAL_ID: 6ec48e97-d7b0-468d-b605-efcbb5249a9a
   # Without these the reviewer and repair agents are never registered, and the fleet silently degrades
   # to single-pass deterministic conversion with no critique round.
   AZURE_OPENAI_ENDPOINT: https://cog-czusrhcg4gpm2.openai.azure.com/
@@ -191,8 +198,9 @@ jobs:
             fi
           fi
 
-      - name: Configure the sandbox database target
+      - name: Validate deployment configuration
         run: |
+          set -euo pipefail
           if [[ -z "$PLATFORM_PGHOST" || -z "$PLATFORM_PGDATABASE" || -z "$PLATFORM_PGUSER" || \
                 -z "$SANDBOX_PGHOST" || -z "$SANDBOX_PGDATABASE" || -z "$SANDBOX_PGUSER" ]]; then
             echo "Platform and sandbox PostgreSQL coordinates are required." >&2
@@ -202,40 +210,57 @@ jobs:
             echo "Platform authorization state and sandbox migration must use different PostgreSQL databases." >&2
             exit 1
           fi
-          az containerapp update \
+
+      - name: Authorize the dedicated smoke identity
+        run: |
+          set -euo pipefail
+          CURRENT_ALLOWED=$(az containerapp auth show \
             --name "$CONTAINER_APP" \
             --resource-group "$RESOURCE_GROUP" \
-            --set-env-vars \
-              "SANDBOX_PGHOST=$SANDBOX_PGHOST" \
-              "SANDBOX_PGUSER=$SANDBOX_PGUSER" \
-              "SANDBOX_PGDATABASE=$SANDBOX_PGDATABASE" \
-              "SANDBOX_PGSCHEMA=public" \
-              "SANDBOX_AZURE_TENANT_ID=${{ vars.AZURE_TENANT_ID }}" \
-              "SANDBOX_AZURE_SUBSCRIPTION_ID=${{ vars.AZURE_SUBSCRIPTION_ID }}" \
-              "SANDBOX_AZURE_RESOURCE_GROUP=$RESOURCE_GROUP" \
-              "SANDBOX_AZURE_RESOURCE_ID=/subscriptions/${{ vars.AZURE_SUBSCRIPTION_ID }}/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.DBforPostgreSQL/flexibleServers/pg-ofmfleet-dev-ykbpnrpd" \
-              "SANDBOX_AZURE_REGION=eastus2" \
-              "WORKBENCH_AUTH_MODE=ContainerApps" \
-              "WORKBENCH_AUTH_TENANT_ID=${{ vars.AZURE_TENANT_ID }}" \
-              "WORKBENCH_AUTH_CLIENT_ID=$WORKBENCH_AUTH_CLIENT_ID" \
-              "WORKBENCH_AUTH_AUDIENCE=$WORKBENCH_AUTH_CLIENT_ID,api://$WORKBENCH_AUTH_CLIENT_ID" \
-              "WORKBENCH_AUTH_ISSUER=https://login.microsoftonline.com/${{ vars.AZURE_TENANT_ID }}/v2.0" \
-              "PLATFORM_PGHOST=$PLATFORM_PGHOST" \
-              "PLATFORM_PGUSER=$PLATFORM_PGUSER" \
-              "PLATFORM_PGDATABASE=$PLATFORM_PGDATABASE" \
-              "PLATFORM_PGSCHEMA=ofm_platform" \
+            --query 'identityProviders.azureActiveDirectory.validation.defaultAuthorizationPolicy.allowedPrincipals.identities' \
+            --output json)
+          UPDATED_ALLOWED=$(python3 -c '
+          import json, os, sys
+          current = json.load(sys.stdin) or []
+          denied = os.environ["SMOKE_UNAUTHORIZED_PRINCIPAL_ID"]
+          required = {
+              os.environ["WORKBENCH_OPERATOR_PRINCIPAL_ID"],
+              os.environ["SMOKE_PRIMARY_PRINCIPAL_ID"],
+          }
+          print(json.dumps(sorted((set(current) - {denied}) | required), separators=(",", ":")))
+          ' <<< "$CURRENT_ALLOWED")
+          az containerapp auth update \
+            --name "$CONTAINER_APP" \
+            --resource-group "$RESOURCE_GROUP" \
+            --set "identityProviders.azureActiveDirectory.validation.defaultAuthorizationPolicy.allowedPrincipals.identities=$UPDATED_ALLOWED" \
             --output none
 
-      - name: Configure the review and repair agents
-        run: |
-          az containerapp update \
+          ALLOWED=$(az containerapp auth show \
             --name "$CONTAINER_APP" \
             --resource-group "$RESOURCE_GROUP" \
-            --set-env-vars \
-              "AZURE_OPENAI_ENDPOINT=$AZURE_OPENAI_ENDPOINT" \
-              "AZURE_AI_MODEL_DEPLOYMENT_NAME=$AZURE_AI_MODEL_DEPLOYMENT_NAME" \
-              "AZURE_AI_REVIEW_MODEL_DEPLOYMENT_NAME=$AZURE_AI_REVIEW_MODEL_DEPLOYMENT_NAME" \
-            --output none
+            --query 'identityProviders.azureActiveDirectory.validation.defaultAuthorizationPolicy.allowedPrincipals.identities' \
+            --output tsv)
+          grep -Fqx "$WORKBENCH_OPERATOR_PRINCIPAL_ID" <<< "$ALLOWED"
+          grep -Fqx "$SMOKE_PRIMARY_PRINCIPAL_ID" <<< "$ALLOWED"
+          if grep -Fqx "$SMOKE_UNAUTHORIZED_PRINCIPAL_ID" <<< "$ALLOWED"; then
+            echo "The unauthorized smoke identity must not be allowlisted." >&2
+            exit 1
+          fi
+
+      - name: Capture rollback image
+        id: rollback
+        run: |
+          set -euo pipefail
+          APP=$(az containerapp show \
+            --name "$CONTAINER_APP" \
+            --resource-group "$RESOURCE_GROUP" \
+            --output json)
+          PREVIOUS_IMAGE=$(jq -r '.properties.template.containers[0].image' <<< "$APP")
+          PREVIOUS_TEMPLATE=$(jq -c '.properties.template' <<< "$APP")
+          [[ -n "$PREVIOUS_IMAGE" ]]
+          [[ "$PREVIOUS_TEMPLATE" != "null" ]]
+          echo "previous_image=$PREVIOUS_IMAGE" >> "$GITHUB_OUTPUT"
+          echo "previous_template_b64=$(printf '%s' "$PREVIOUS_TEMPLATE" | base64 -w0)" >> "$GITHUB_OUTPUT"
 
       - name: Deploy the image
         env:
@@ -255,12 +280,244 @@ jobs:
             --name "$CONTAINER_APP" \
             --resource-group "$RESOURCE_GROUP" \
             --image "$REGISTRY.azurecr.io/$IMAGE@$IMAGE_DIGEST" \
+            --set-env-vars \
+              "SANDBOX_PGHOST=$SANDBOX_PGHOST" \
+              "SANDBOX_PGUSER=$SANDBOX_PGUSER" \
+              "SANDBOX_PGDATABASE=$SANDBOX_PGDATABASE" \
+              "SANDBOX_PGSCHEMA=public" \
+              "SANDBOX_AZURE_TENANT_ID=${{ vars.AZURE_TENANT_ID }}" \
+              "SANDBOX_AZURE_SUBSCRIPTION_ID=${{ vars.AZURE_SUBSCRIPTION_ID }}" \
+              "SANDBOX_AZURE_RESOURCE_GROUP=$RESOURCE_GROUP" \
+              "SANDBOX_AZURE_RESOURCE_ID=/subscriptions/${{ vars.AZURE_SUBSCRIPTION_ID }}/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.DBforPostgreSQL/flexibleServers/pg-ofmfleet-dev-ykbpnrpd" \
+              "SANDBOX_AZURE_REGION=eastus2" \
+              "WORKBENCH_AUTH_MODE=ContainerApps" \
+              "WORKBENCH_AUTH_TENANT_ID=${{ vars.AZURE_TENANT_ID }}" \
+              "WORKBENCH_AUTH_CLIENT_ID=$WORKBENCH_AUTH_CLIENT_ID" \
+              "WORKBENCH_AUTH_AUDIENCE=$WORKBENCH_AUTH_CLIENT_ID,api://$WORKBENCH_AUTH_CLIENT_ID" \
+              "WORKBENCH_AUTH_ISSUER=https://login.microsoftonline.com/${{ vars.AZURE_TENANT_ID }}/v2.0" \
+              "PLATFORM_PGHOST=$PLATFORM_PGHOST" \
+              "PLATFORM_PGUSER=$PLATFORM_PGUSER" \
+              "PLATFORM_PGDATABASE=$PLATFORM_PGDATABASE" \
+              "PLATFORM_PGSCHEMA=ofm_platform" \
+              "AZURE_OPENAI_ENDPOINT=$AZURE_OPENAI_ENDPOINT" \
+              "AZURE_AI_MODEL_DEPLOYMENT_NAME=$AZURE_AI_MODEL_DEPLOYMENT_NAME" \
+              "AZURE_AI_REVIEW_MODEL_DEPLOYMENT_NAME=$AZURE_AI_REVIEW_MODEL_DEPLOYMENT_NAME" \
             --output none
 
-      - name: Report what is running
+      - name: Verify intended revision readiness
+        id: readiness
+        run: |
+          set -euo pipefail
+          EXPECTED_IMAGE="$REGISTRY.azurecr.io/$IMAGE@$IMAGE_DIGEST"
+          for attempt in $(seq 1 60); do
+            APP=$(az containerapp show \
+              --name "$CONTAINER_APP" \
+              --resource-group "$RESOURCE_GROUP" \
+              --output json)
+            LATEST=$(jq -r '.properties.latestRevisionName' <<< "$APP")
+            READY=$(jq -r '.properties.latestReadyRevisionName' <<< "$APP")
+            ACTUAL_IMAGE=$(jq -r '.properties.template.containers[0].image' <<< "$APP")
+            if [[ "$LATEST" == "$READY" && "$ACTUAL_IMAGE" == "$EXPECTED_IMAGE" ]]; then
+              HEALTH=$(az containerapp revision show \
+                --name "$CONTAINER_APP" \
+                --resource-group "$RESOURCE_GROUP" \
+                --revision "$LATEST" \
+                --query 'properties.healthState' \
+                --output tsv)
+              if [[ "$HEALTH" == "Healthy" ]]; then
+                echo "revision=$LATEST" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+            fi
+            sleep 5
+          done
+          echo "The intended digest did not become the healthy latest-ready revision." >&2
+          exit 1
+
+      - name: Start authenticated smoke runner
+        id: smoke_runner
+        env:
+          DEPLOY_SHA: ${{ needs.verify.outputs.deploy_sha }}
+        run: |
+          set -euo pipefail
+          SMOKE_NAME="aci-ofmfleet-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "name=$SMOKE_NAME" >> "$GITHUB_OUTPUT"
+          SCRIPT_B64=$(base64 -w0 .github/scripts/post_deploy_smoke.py)
+          APP_FQDN=$(az containerapp show \
+            --name "$CONTAINER_APP" \
+            --resource-group "$RESOURCE_GROUP" \
+            --query 'properties.configuration.ingress.fqdn' \
+            --output tsv)
+          az container create \
+            --name "$SMOKE_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --location eastus2 \
+            --image mcr.microsoft.com/azure-cli:2.75.0 \
+            --assign-identity "$SMOKE_PRIMARY_IDENTITY_ID" "$SMOKE_UNAUTHORIZED_IDENTITY_ID" \
+            --restart-policy Never \
+            --cpu 1 \
+            --memory 1 \
+            --environment-variables \
+              "APP_URL=https://$APP_FQDN" \
+              "APP_RESOURCE=api://$WORKBENCH_AUTH_CLIENT_ID" \
+              "PRIMARY_CLIENT_ID=$SMOKE_PRIMARY_CLIENT_ID" \
+              "UNAUTHORIZED_CLIENT_ID=$SMOKE_UNAUTHORIZED_CLIENT_ID" \
+              "DEPLOYMENT_SHA=$DEPLOY_SHA" \
+              "VALIDATION_PROJECT_NAME=Deployment validation" \
+              "SCRIPT_B64=$SCRIPT_B64" \
+            --command-line "/bin/sh -c 'echo \"\$SCRIPT_B64\" | base64 -d > /tmp/post_deploy_smoke.py && python3 /tmp/post_deploy_smoke.py'" \
+            --output none
+
+      - name: Verify authenticated product flows
+        id: smoke
+        env:
+          SMOKE_NAME: ${{ steps.smoke_runner.outputs.name }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            STATE=$(az container show \
+              --name "$SMOKE_NAME" \
+              --resource-group "$RESOURCE_GROUP" \
+              --query 'containers[0].instanceView.currentState.state' \
+              --output tsv)
+            if [[ "$STATE" == "Terminated" ]]; then
+              break
+            fi
+            sleep 5
+          done
+          az container logs --name "$SMOKE_NAME" --resource-group "$RESOURCE_GROUP"
+          EXIT_CODE=$(az container show \
+            --name "$SMOKE_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --query 'containers[0].instanceView.currentState.exitCode' \
+            --output tsv)
+          if [[ "$EXIT_CODE" != "0" ]]; then
+            echo "Authenticated post-deployment verification failed with exit code '$EXIT_CODE'." >&2
+            exit 1
+          fi
+
+      - name: Clean up smoke runner and roll back failed image
+        if: ${{ always() }}
+        env:
+          SMOKE_NAME: ${{ steps.smoke_runner.outputs.name }}
+          PREVIOUS_IMAGE: ${{ steps.rollback.outputs.previous_image }}
+          PREVIOUS_TEMPLATE_B64: ${{ steps.rollback.outputs.previous_template_b64 }}
+          SMOKE_OUTCOME: ${{ steps.smoke.outcome }}
+        run: |
+          set -euo pipefail
+          CLEANUP_FAILED=0
+          ROLLBACK_FAILED=0
+
+          if [[ -n "$SMOKE_NAME" ]]; then
+            CLEANED=0
+            for attempt in $(seq 1 3); do
+              az container delete \
+                --name "$SMOKE_NAME" \
+                --resource-group "$RESOURCE_GROUP" \
+                --yes \
+                --only-show-errors \
+                --output none 2>&1 || true
+              for wait_attempt in $(seq 1 12); do
+                set +e
+                SHOW_OUTPUT=$(az container show \
+                  --name "$SMOKE_NAME" \
+                  --resource-group "$RESOURCE_GROUP" \
+                  --only-show-errors \
+                  --output none 2>&1)
+                SHOW_EXIT=$?
+                set -e
+                if [[ "$SHOW_EXIT" == "0" ]]; then
+                  sleep 5
+                  continue
+                fi
+                if grep -Eqi 'ResourceNotFound|could not be found|was not found' <<< "$SHOW_OUTPUT"; then
+                  CLEANED=1
+                  break 2
+                fi
+                echo "Transient error while verifying smoke-runner deletion: $SHOW_OUTPUT" >&2
+                sleep 5
+              done
+            done
+            if [[ "$CLEANED" != "1" ]]; then
+              echo "Smoke runner $SMOKE_NAME was not proven absent after cleanup attempts." >&2
+              CLEANUP_FAILED=1
+            fi
+          fi
+
+          if [[ "$SMOKE_OUTCOME" != "success" && -n "$PREVIOUS_IMAGE" && -n "$PREVIOUS_TEMPLATE_B64" ]]; then
+            echo "Post-deployment verification failed; restoring the complete previous container template." >&2
+            echo "Image rollback does not reverse database or schema changes." >&2
+            printf '%s' "$PREVIOUS_TEMPLATE_B64" | base64 -d > "$RUNNER_TEMP/previous-template.json"
+            python3 - "$RUNNER_TEMP/previous-template.json" "$RUNNER_TEMP/rollback-body.json" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as source:
+              template = json.load(source)
+          with open(sys.argv[2], "w", encoding="utf-8") as target:
+              json.dump({"properties": {"template": template}}, target, separators=(",", ":"))
+          PY
+            APP_ID="/subscriptions/${{ vars.AZURE_SUBSCRIPTION_ID }}/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.App/containerApps/$CONTAINER_APP"
+            PATCHED=0
+            for attempt in $(seq 1 3); do
+              if az rest \
+                  --method patch \
+                  --uri "https://management.azure.com${APP_ID}?api-version=2025-01-01" \
+                  --body "@$RUNNER_TEMP/rollback-body.json" \
+                  --output none; then
+                PATCHED=1
+                break
+              fi
+              sleep 5
+            done
+            if [[ "$PATCHED" != "1" ]]; then
+              ROLLBACK_FAILED=1
+            else
+              RESTORED=0
+              for attempt in $(seq 1 60); do
+                if ! APP=$(az containerapp show \
+                    --name "$CONTAINER_APP" \
+                    --resource-group "$RESOURCE_GROUP" \
+                    --output json); then
+                  sleep 5
+                  continue
+                fi
+                LATEST=$(jq -r '.properties.latestRevisionName' <<< "$APP")
+                READY=$(jq -r '.properties.latestReadyRevisionName' <<< "$APP")
+                ACTUAL_IMAGE=$(jq -r '.properties.template.containers[0].image' <<< "$APP")
+                if [[ "$LATEST" == "$READY" && "$ACTUAL_IMAGE" == "$PREVIOUS_IMAGE" ]]; then
+                  if ! HEALTH=$(az containerapp revision show \
+                      --name "$CONTAINER_APP" \
+                      --resource-group "$RESOURCE_GROUP" \
+                      --revision "$LATEST" \
+                      --query 'properties.healthState' \
+                      --output tsv); then
+                    sleep 5
+                    continue
+                  fi
+                  if [[ "$HEALTH" == "Healthy" ]]; then
+                    RESTORED=1
+                    break
+                  fi
+                fi
+                sleep 5
+              done
+              if [[ "$RESTORED" != "1" ]]; then
+                echo "The restored template did not become the healthy latest-ready revision." >&2
+                ROLLBACK_FAILED=1
+              fi
+            fi
+          fi
+
+          if [[ "$CLEANUP_FAILED" != "0" || "$ROLLBACK_FAILED" != "0" ]]; then
+            exit 1
+          fi
+
+      - name: Report verified release
+        if: ${{ success() }}
         run: |
           az containerapp show \
             --name "$CONTAINER_APP" \
             --resource-group "$RESOURCE_GROUP" \
-            --query "{image:properties.template.containers[0].image, fqdn:properties.configuration.ingress.fqdn, status:properties.runningStatus}" \
+            --query "{image:properties.template.containers[0].image, revision:properties.latestReadyRevisionName, fqdn:properties.configuration.ingress.fqdn, status:properties.runningStatus}" \
             --output yaml
