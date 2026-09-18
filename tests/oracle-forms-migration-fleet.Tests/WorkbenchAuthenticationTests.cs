@@ -35,13 +35,14 @@ public class WorkbenchAuthenticationTests
 
     /// <summary>A platform envelope, with every claim overridable so one fact at a time can be wrong.</summary>
     private static string Envelope(
-        string authType = "aad",
+        string? authType = "aad",
         string? tenant = Tenant,
         string? audience = Client,
         string? issuer = Issuer,
         string? objectId = ObjectId,
         IEnumerable<string>? roles = null,
-        bool malformedClaim = false)
+        bool malformedClaim = false,
+        bool includeAuthType = true)
     {
         List<object> claims = [];
 
@@ -68,7 +69,18 @@ public class WorkbenchAuthenticationTests
             claims.Add(new { typ = "roles", val = 42 });
         }
 
-        string json = JsonSerializer.Serialize(new { auth_typ = authType, name_typ = "name", role_typ = "roles", claims });
+        Dictionary<string, object?> envelope = new()
+        {
+            ["name_typ"] = "name",
+            ["role_typ"] = "roles",
+            ["claims"] = claims,
+        };
+        if (includeAuthType)
+        {
+            envelope["auth_typ"] = authType;
+        }
+
+        string json = JsonSerializer.Serialize(envelope);
         return Convert.ToBase64String(Encoding.UTF8.GetBytes(json));
     }
 
@@ -210,6 +222,49 @@ public class WorkbenchAuthenticationTests
         Assert.True(provider.Authenticate(Headers(
             Envelope(authType: "azureactivedirectory"),
             idp: "azureactivedirectory")).IsAuthenticated);
+    }
+
+    [Fact]
+    public void The_platform_idp_header_identifies_entra_when_the_reduced_envelope_omits_it()
+    {
+        ContainerAppsIdentityProvider provider = new(ContainerApps());
+
+        WorkbenchIdentityResult empty = provider
+            .Authenticate(Headers(
+                Envelope(authType: string.Empty),
+                idp: "azureactivedirectory"));
+        WorkbenchIdentityResult absent = provider
+            .Authenticate(Headers(
+                Envelope(includeAuthType: false),
+                idp: "azureactivedirectory"));
+        WorkbenchIdentityResult nullValue = provider
+            .Authenticate(Headers(
+                Envelope(authType: null),
+                idp: "azureactivedirectory"));
+
+        Assert.True(empty.IsAuthenticated);
+        Assert.True(absent.IsAuthenticated);
+        Assert.True(nullValue.IsAuthenticated);
+        Assert.Equal(Tenant, absent.Actor!.TenantId);
+        Assert.Equal(ObjectId, absent.Actor.ObjectId);
+    }
+
+    [Fact]
+    public void A_non_entra_envelope_cannot_be_overridden_by_the_idp_header()
+    {
+        Assert.False(new ContainerAppsIdentityProvider(ContainerApps())
+            .Authenticate(Headers(Envelope(authType: "github"), idp: "azureactivedirectory"))
+            .IsAuthenticated);
+    }
+
+    [Fact]
+    public void A_reduced_envelope_without_any_provider_identity_is_refused()
+    {
+        ContainerAppsIdentityProvider provider = new(ContainerApps());
+
+        Assert.False(provider.Authenticate(Headers(Envelope(authType: string.Empty))).IsAuthenticated);
+        Assert.False(provider.Authenticate(Headers(Envelope(includeAuthType: false))).IsAuthenticated);
+        Assert.False(provider.Authenticate(Headers(Envelope(authType: null))).IsAuthenticated);
     }
 
     public static TheoryData<string, string> RejectedEnvelopes() => new()

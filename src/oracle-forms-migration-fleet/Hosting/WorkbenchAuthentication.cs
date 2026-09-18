@@ -325,17 +325,33 @@ public sealed class ContainerAppsIdentityProvider(WorkbenchAuthenticationOptions
                 return WorkbenchIdentityResult.Deny("The platform principal was not an identity envelope.");
             }
 
-            if (!root.TryGetProperty("auth_typ", out JsonElement authType) ||
-                authType.ValueKind != JsonValueKind.String ||
-                !IsAad(authType.GetString()))
+            string? declaredAuthType = null;
+            if (root.TryGetProperty("auth_typ", out JsonElement authType))
             {
-                return WorkbenchIdentityResult.Deny("The platform principal did not declare Microsoft Entra authentication.");
+                if (authType.ValueKind == JsonValueKind.String)
+                {
+                    declaredAuthType = authType.GetString()?.Trim();
+                }
+                else if (authType.ValueKind != JsonValueKind.Null)
+                {
+                    return WorkbenchIdentityResult.Deny("The platform principal carried a malformed authentication type.");
+                }
+
+                if (!string.IsNullOrEmpty(declaredAuthType) && !IsAad(declaredAuthType))
+                {
+                    return WorkbenchIdentityResult.Deny("The platform principal declared an identity provider this host does not accept.");
+                }
             }
 
-            string? providerHeader = header(WorkbenchPrincipalHeaders.IdentityProvider);
-            if (!string.IsNullOrWhiteSpace(providerHeader) && !IsAad(providerHeader.Trim()))
+            string? providerHeader = header(WorkbenchPrincipalHeaders.IdentityProvider)?.Trim();
+            if (!string.IsNullOrEmpty(providerHeader) && !IsAad(providerHeader))
             {
                 return WorkbenchIdentityResult.Deny("The request named an identity provider this host does not accept.");
+            }
+
+            if (!IsAad(declaredAuthType) && !IsAad(providerHeader))
+            {
+                return WorkbenchIdentityResult.Deny("The platform principal did not declare Microsoft Entra authentication.");
             }
 
             if (!TryReadClaims(root, out List<(string Type, string Value)>? claims))
