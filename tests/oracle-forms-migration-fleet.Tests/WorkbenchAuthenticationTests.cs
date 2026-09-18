@@ -202,6 +202,16 @@ public class WorkbenchAuthenticationTests
             .IsAuthenticated);
     }
 
+    [Fact]
+    public void The_container_apps_entra_provider_alias_is_accepted()
+    {
+        ContainerAppsIdentityProvider provider = new(ContainerApps());
+
+        Assert.True(provider.Authenticate(Headers(
+            Envelope(authType: "azureactivedirectory"),
+            idp: "azureactivedirectory")).IsAuthenticated);
+    }
+
     public static TheoryData<string, string> RejectedEnvelopes() => new()
     {
         { "wrong tenant", Envelope(tenant: "11111111-2222-3333-4444-555555555555") },
