@@ -45,7 +45,7 @@ The existing PostgreSQL server must contain two distinct databases before an app
 
 The deployment script refuses to use the same host/database pair for both purposes. PostgreSQL does not permit ordinary SQL statements to cross database boundaries, so sandbox DDL cannot address the authorization tables. The managed identity must be provisioned in both databases with only the permissions each role requires. This repository does not create either database or grant those database permissions.
 
-`Deploy-Workbench.ps1` is retained only for privileged first-time infrastructure and Entra bootstrap in an empty environment. It is not the application release path; routine releases must use the GitHub workflow. Bootstrap requires permission to create resource-group deployments and role assignments and to create an Entra application. It never logs in on the user's behalf.
+`Deploy-Workbench.ps1` is retained only for privileged first-time infrastructure and Entra bootstrap in an empty environment. It is not the application release path; routine releases must use the GitHub workflow. Bootstrap requires permission to create resource-group deployments and role assignments and to create or update an Entra application. It exposes that dedicated application as `api://<application-client-id>` and requests v2 access tokens so managed identities receive tokens from the same issuer the workbench validates. It never logs in on the user's behalf.
 
 For the existing development environment, routine releases use the validated workflow above.
 `Deploy-Workbench.ps1 -FoundationOnly` can still create first-time foundational resources, but the

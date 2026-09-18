@@ -9,6 +9,9 @@ param operatorPrincipalObjectIds = split(readEnvironmentVariable('WORKBENCH_OPER
 param validationPrincipalObjectIds = [
 	'3f74daff-00b7-4606-bdb8-91aba713a54d'
 ]
+param validationClientApplicationIds = [
+	'afd70481-6a7e-427d-9a05-decc42477876'
+]
 param platformDatabaseHost = 'pg-ofmfleet-dev-ykbpnrpd.postgres.database.azure.com'
 param platformDatabaseName = 'ofm_platform'
 param platformDatabaseUser = 'id-ofmfleet-web-dev-ykbpnrpd'

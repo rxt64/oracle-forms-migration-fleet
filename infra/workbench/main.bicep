@@ -41,6 +41,9 @@ param operatorPrincipalObjectIds array
 @description('Dedicated non-human identities permitted to run non-writing deployment verification.')
 param validationPrincipalObjectIds array = []
 
+@description('Dedicated non-human client applications permitted to call the workbench for deployment verification.')
+param validationClientApplicationIds array = []
+
 @secure()
 @description('Entra application credential consumed only by the Container Apps authentication provider.')
 param entraClientSecret string = ''
@@ -391,6 +394,7 @@ resource workbenchAuth 'Microsoft.App/containerApps/authConfigs@2025-01-01' = if
             'api://${entraClientId}'
           ]
           defaultAuthorizationPolicy: {
+            allowedApplications: union([entraClientId], validationClientApplicationIds)
             allowedPrincipals: {
               identities: union(operatorPrincipalObjectIds, validationPrincipalObjectIds)
             }

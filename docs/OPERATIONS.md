@@ -48,7 +48,8 @@ https://<account>.services.ai.azure.com/api/projects/<project>/agents/<agent>/en
 ```
 
 `Deploy-Workbench.ps1` is a privileged first-time infrastructure and Entra bootstrap tool, not the
-application release path. It rotates the Entra client secret and **throws if two `container-app-auth-*`
+application release path. It configures the dedicated `api://<application-client-id>` resource for v2
+access tokens, rotates the Entra client secret, and **throws if two `container-app-auth-*`
 credentials already exist**. Smoke-test a bootstrap revision, then delete the superseded credential.
 It accepts only a 12-character commit tag that already exists in ACR and never builds an image. The
 foundation/build-only/auth sequence is documented in [infra/workbench/README.md](../infra/workbench/README.md).

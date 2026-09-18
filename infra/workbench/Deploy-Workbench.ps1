@@ -177,10 +177,23 @@ try {
     & az ad app update `
         --id $application.appId `
         --enable-id-token-issuance true `
+        --identifier-uris "api://$($application.appId)" `
         --web-redirect-uris $redirectUri `
         --only-show-errors 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) {
         throw 'Updating the Entra application failed.'
+    }
+
+    $accessTokenConfiguration = @{ api = @{ requestedAccessTokenVersion = 2 } } | ConvertTo-Json -Depth 3 -Compress
+    & az rest `
+        --method patch `
+        --uri "https://graph.microsoft.com/v1.0/applications/$($application.id)" `
+        --headers 'Content-Type=application/json' `
+        --body $accessTokenConfiguration `
+        --output none `
+        --only-show-errors
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Configuring v2 access tokens for the Entra application failed.'
     }
 
     $servicePrincipals = Invoke-AzJson -Arguments @(
