@@ -102,6 +102,13 @@ public static class WorkbenchExecution
             return false;
         }
 
+        if (WorkspacePath.IsWithin(OutputRoot, request.SourceRoot))
+        {
+            status = 400;
+            error = "The source folder cannot be the workbench output directory.";
+            return false;
+        }
+
         if (WorkspacePath.Validate(request.OutputRoot, "Output folder") is string outputError)
         {
             status = 400;
@@ -115,6 +122,136 @@ public static class WorkbenchExecution
         {
             OutputRoot = requested is "" or "." ? OutputRoot : $"{OutputRoot}/{requested}",
         };
+
+        status = 200;
+        error = string.Empty;
+        return true;
+    }
+
+    /// <summary>
+    /// Everything the execute endpoint needs after the server has discarded what it cannot verify.
+    /// <see cref="MutationAuthorizer"/> is fail-closed and is re-asked before each mutating phase.
+    /// </summary>
+    public sealed record WorkbenchRunPreparation(
+        string WorkspaceRoot,
+        MigrationRunRequest Request,
+        IPhaseMutationAuthorizer MutationAuthorizer);
+
+    /// <summary>
+    /// The exact entry point the execute endpoint uses.
+    ///
+    /// Path safety and ownership are settled first, then every claim of authority in the body is
+    /// discarded and re-derived from the owner-resolved source copy. The returned authorizer is bound to
+    /// the authenticated actor and to this run's source, input, and target, so a grant issued for some
+    /// other run cannot cover it.
+    /// </summary>
+    public static bool TryPrepareRun(
+        SourceWorkspaceService workspaces,
+        WorkbenchActor actor,
+        string? workspaceId,
+        MigrationRunRequest? request,
+        WorkbenchAuthorizationService authorization,
+        out WorkbenchRunPreparation? prepared,
+        out int status,
+        out string error)
+    {
+        ArgumentNullException.ThrowIfNull(workspaces);
+        ArgumentNullException.ThrowIfNull(actor);
+        ArgumentNullException.ThrowIfNull(authorization);
+
+        prepared = null;
+
+        if (!TryPrepare(workspaces, actor.OwnerId, workspaceId, request, out string root, out MigrationRunRequest? routed, out status, out error))
+        {
+            return false;
+        }
+
+        SourceWorkspaceFacts? facts = workspaces.Describe(actor.OwnerId, workspaceId!, routed!.SourceRoot);
+        if (facts is null)
+        {
+            status = 404;
+            error = "The selected source folder is not available in this workspace.";
+            return false;
+        }
+        WorkbenchRequestPreparation trusted = WorkbenchTrustBoundary.Prepare(routed!, facts);
+
+        prepared = new WorkbenchRunPreparation(
+            root,
+            trusted.Request,
+            new WorkbenchMutationAuthorizer(
+                authorization,
+                actor,
+                trusted.SourceSnapshotHash,
+                trusted.PlanInputHash,
+                trusted.TargetHash));
+
+        status = 200;
+        error = string.Empty;
+        return true;
+    }
+
+    /// <summary>
+    /// The exact entry point the plan endpoint uses.
+    ///
+    /// Planning writes nothing, so it is available with or without an acquired source. What it must not
+    /// do is repeat a caller's own claims back as findings, so verified evidence comes only from a copy
+    /// this owner acquired and this server indexed. A caller working from a manually described estate
+    /// gets a plan in which nothing is verified, which is the truthful result.
+    /// </summary>
+    public static bool TryPlanRun(
+        SourceWorkspaceService? workspaces,
+        WorkbenchActor actor,
+        string? workspaceId,
+        MigrationRunRequest? request,
+        out WorkbenchPlanResponse? response,
+        out int status,
+        out string error)
+    {
+        ArgumentNullException.ThrowIfNull(actor);
+
+        response = null;
+        if (request is null)
+        {
+            status = 400;
+            error = "The run request could not be read.";
+            return false;
+        }
+
+        if (WorkspacePath.Validate(request.SourceRoot, "Source folder") is string sourceError)
+        {
+            status = 400;
+            error = sourceError;
+            return false;
+        }
+
+        if (WorkspacePath.IsWithin(OutputRoot, request.SourceRoot))
+        {
+            status = 400;
+            error = "The source folder cannot be the workbench output directory.";
+            return false;
+        }
+
+        SourceWorkspaceSummary? summary = workspaces is not null && !string.IsNullOrWhiteSpace(workspaceId)
+            ? workspaces.DescribeSummary(actor.OwnerId, workspaceId, request.SourceRoot)
+            : null;
+
+        if (!string.IsNullOrWhiteSpace(workspaceId) && summary is null)
+        {
+            status = 404;
+            error = workspaces?.Describe(actor.OwnerId, workspaceId) is null
+                ? UnknownWorkspace
+                : "The selected source folder is not available in this workspace.";
+            return false;
+        }
+
+        MigrationRunRequest sanitized = WorkbenchTrustBoundary.PreparePlan(request, summary);
+        MigrationRunPlan plan = MigrationRunPlanner.Plan(sanitized);
+
+        response = new WorkbenchPlanResponse(
+            plan,
+            MigrationWorkbenchCatalog.Project(plan),
+            MigrationWorkbenchCatalog.ExecutionBoundary,
+            AzureFootprintCalculator.Describe(plan.Target.Database, plan.AuthorizedMode));
 
         status = 200;
         error = string.Empty;

@@ -382,6 +382,8 @@ progress::-moz-progress-bar { background: var(--mf-accent); }
 }
 .mf-inline-link.danger { color: var(--mf-danger); }
 .mf-inline-link svg { width: 14px; height: 14px; }
+.mf-command-help { display: inline-flex; align-items: center; gap: 4px; }
+.mf-command-help .mf-inline-link { margin-top: 0; }
 
 .mf-choices, .mf-evidence-group { margin: 0 0 24px; padding: 0; border: 0; }
 .mf-choices legend,
@@ -576,7 +578,7 @@ progress::-moz-progress-bar { background: var(--mf-accent); }
 .mf-lead-state.attention { border-left-color: var(--mf-warning); }
 .mf-lead-state.attention svg { color: var(--mf-warning); }
 
-.mf-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-bottom: 16px; }
+.mf-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; margin-bottom: 16px; }
 .mf-metrics article { padding: 12px; background: var(--mf-surface); border: 1px solid var(--mf-border); border-radius: var(--mf-radius); }
 .mf-metrics span { display: flex; align-items: center; gap: 4px; color: var(--mf-text-muted); font-size: 0.75rem; }
 .mf-metrics strong { display: block; margin-top: 4px; font-size: 1.25rem; font-weight: 600; }
@@ -731,6 +733,7 @@ progress::-moz-progress-bar { background: var(--mf-accent); }
   cursor: pointer;
 }
 .mf-tip-button:hover, .mf-tip-button[data-open="true"] { color: var(--mf-link); }
+.mf-tip-button[data-pinned="true"] { color: var(--mf-link); background: var(--mf-surface-2); }
 .mf-tip-button svg { width: 14px; height: 14px; }
 
 .mf-tip-bubble {
@@ -749,6 +752,8 @@ progress::-moz-progress-bar { background: var(--mf-accent); }
   text-align: left;
   white-space: normal;
 }
+/* Pinned reads as deliberate rather than accidental, and long text stays scrollable in a 390 px viewport. */
+.mf-tip-bubble[data-pinned="true"] { border-color: var(--mf-link); max-height: min(60vh, 320px); overflow-y: auto; }
 
 /* -------------------------------------------------------------- activity */
 
@@ -759,6 +764,27 @@ progress::-moz-progress-bar { background: var(--mf-accent); }
 .mf-activity header p { margin: 0; color: var(--mf-text-muted); font-size: 0.75rem; }
 
 .mf-activity-body { overflow: auto; padding: 16px; }
+
+/* The one thing that says what is happening. It sits above the counts and the raw log on purpose. */
+.mf-activity-summary { margin: 0 0 16px; padding: 12px; background: var(--mf-surface-2); border: 1px solid var(--mf-border); border-left-width: 3px; border-radius: var(--mf-radius); }
+.mf-activity-summary.info { border-left-color: var(--mf-link); }
+.mf-activity-summary.neutral { border-left-color: var(--mf-border-strong); }
+.mf-activity-summary.success { border-left-color: var(--mf-success); }
+.mf-activity-summary.danger { border-left-color: var(--mf-danger); }
+.mf-activity-summary.warn { border-left-color: var(--mf-warning); }
+.mf-activity-summary dl { display: grid; gap: 8px; margin: 0; }
+.mf-activity-summary dl > div { display: grid; grid-template-columns: 116px 1fr; gap: 12px; }
+.mf-activity-summary dt { color: var(--mf-text-muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; }
+.mf-activity-summary dd { margin: 0; font-size: 0.8125rem; line-height: 1.5; }
+.mf-activity-operation { font-weight: 600; color: var(--mf-text); }
+
+.mf-activity-measured { margin: 0 0 16px; }
+.mf-activity-measured h3 { display: flex; align-items: center; gap: 4px; margin: 0 0 8px; font-size: 0.8125rem; }
+.mf-activity-measured ul { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; margin: 0; padding: 0; list-style: none; }
+.mf-activity-measured li { display: grid; grid-template-columns: auto 1fr; gap: 8px; align-items: baseline; padding: 8px; background: var(--mf-surface-2); border: 1px solid var(--mf-border); border-radius: var(--mf-radius); font-size: 0.75rem; }
+.mf-activity-measured strong { font-size: 1rem; }
+.mf-activity-measured > .mf-help { margin: 8px 0 0; }
+
 .mf-activity-state { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 12px; color: var(--mf-text-muted); }
 .mf-activity-counts { display: grid; grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); gap: 8px; margin: 0 0 16px; padding: 0; list-style: none; }
 .mf-activity-counts li { display: grid; grid-template-columns: 16px 1fr auto; gap: 8px; align-items: center; padding: 8px; background: var(--mf-surface-2); border: 1px solid var(--mf-border); border-radius: var(--mf-radius); font-size: 0.75rem; }
@@ -807,6 +833,45 @@ progress::-moz-progress-bar { background: var(--mf-accent); }
 .mf-arch-platform small { display: block; color: var(--mf-text-muted); font-size: 0.75rem; }
 .mf-arch-note { display: grid; grid-template-columns: 16px 1fr; gap: 8px; margin: 0; color: var(--mf-text-muted); font-size: 0.8125rem; }
 
+/* ------------------------------------------------------- results ordering */
+
+/* The outcome, the blockers, and the one next action come before anything explanatory. */
+.mf-outcome {
+  display: grid;
+  grid-template-columns: 20px 1fr;
+  gap: 12px;
+  align-items: start;
+  margin-bottom: 16px;
+  padding: 16px;
+  background: var(--mf-surface);
+  border: 1px solid var(--mf-border);
+  border-left-width: 3px;
+  border-radius: var(--mf-radius);
+}
+.mf-outcome h2 { margin: 0 0 4px; font-size: 1.0625rem; }
+.mf-outcome p { margin: 0; color: var(--mf-text-muted); }
+.mf-outcome.info { border-left-color: var(--mf-link); }
+.mf-outcome.info > svg { color: var(--mf-link); }
+.mf-outcome.attention { border-left-color: var(--mf-warning); }
+.mf-outcome.attention > svg { color: var(--mf-warning); }
+.mf-outcome.danger { border-left-color: var(--mf-danger); }
+.mf-outcome.danger > svg { color: var(--mf-danger); }
+.mf-outcome.success { border-left-color: var(--mf-success); }
+.mf-outcome.success > svg { color: var(--mf-success); }
+
+.mf-next-action { margin-bottom: 16px; padding: 16px; background: var(--mf-surface); border: 1px solid var(--mf-border-strong); border-radius: var(--mf-radius); }
+.mf-next-action > h2 { margin: 0 0 8px; font-size: 1.125rem; }
+.mf-next-action .mf-primary { text-decoration: none; }
+
+.mf-disclosure { margin-bottom: 16px; background: var(--mf-surface); border: 1px solid var(--mf-border); border-radius: var(--mf-radius); }
+.mf-disclosure > summary { padding: 12px 16px; cursor: pointer; font-weight: 600; }
+.mf-disclosure[open] > summary { border-bottom: 1px solid var(--mf-border); }
+.mf-disclosure > .mf-arch, .mf-disclosure > .mf-result-section { margin: 0; border: 0; }
+.mf-disclosure > .mf-lifecycle, .mf-disclosure > .mf-phases { padding: 16px; }
+
+.mf-run-attestation-note { display: grid; grid-template-columns: 16px 1fr; gap: 8px; align-items: start; margin: 16px 0 0; color: var(--mf-text-muted); font-size: 0.8125rem; }
+.mf-run-attestation-note svg { color: var(--mf-text-muted); margin-top: 2px; }
+
 /* ------------------------------------------------------------ responsive */
 
 @media (max-width: 1080px) {
@@ -841,6 +906,7 @@ progress::-moz-progress-bar { background: var(--mf-accent); }
   .mf-review-row > div { grid-template-columns: 1fr; gap: 0; }
   .mf-lifecycle li { grid-template-columns: 24px 1fr; }
   .mf-lifecycle .mf-pill { grid-column: 2; }
+  .mf-activity-summary dl > div { grid-template-columns: 1fr; gap: 0; }
   .mf-dialog-backdrop, .mf-activity-backdrop { align-items: end; padding: 0; }
   .mf-dialog, .mf-activity { width: 100%; max-height: 92vh; border-radius: var(--mf-radius-lg) var(--mf-radius-lg) 0 0; }
   .mf-activity-line { grid-template-columns: 1fr; gap: 0; }
@@ -860,7 +926,8 @@ progress::-moz-progress-bar { background: var(--mf-accent); }
   .mf-header-actions button, .mf-servicenav button, .mf-rail button, .mf-file { border: 1px solid ButtonBorder; }
   .mf-choice.selected, .mf-evidence.selected { outline: 2px solid Highlight; outline-offset: -2px; }
   .mf-servicenav button[aria-current="page"], .mf-rail .current button { outline: 2px solid Highlight; outline-offset: -2px; }
-  .mf-tip-bubble, .mf-dialog, .mf-activity, .mf-step-purpose, .mf-result-section { border: 1px solid CanvasText; }
+  .mf-tip-bubble, .mf-dialog, .mf-activity, .mf-step-purpose, .mf-result-section,
+  .mf-outcome, .mf-next-action, .mf-disclosure, .mf-activity-summary { border: 1px solid CanvasText; }
   .mf-pill { border: 1px solid CanvasText; color: CanvasText; }
   .mf-check, .mf-radio { border: 1px solid CanvasText; }
   .selected .mf-check, .selected .mf-radio span { forced-color-adjust: none; background: Highlight; }

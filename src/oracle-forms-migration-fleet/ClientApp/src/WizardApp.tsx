@@ -1,4 +1,4 @@
-import { FormEvent, startTransition, useEffect, useId, useRef, useState } from "react";
+import { FormEvent, startTransition, useCallback, useEffect, useId, useRef, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -299,6 +299,31 @@ function StepPurpose({ guide }: { guide: StepGuidance }) {
   );
 }
 
+/**
+ * Copies a closing frame onto the transcript without its payload.
+ *
+ * The typed fields have to survive: they are how the activity pane tells a stream that finished from
+ * one that merely stopped. The `workspace` and `result` payloads deliberately do not, because the
+ * transcript is a list of messages and not a place to park state.
+ */
+function transcriptLine(frame: object, fallbackText: string): ConsoleLine {
+  const line = frame as ConsoleLine;
+  return {
+    level: line.level,
+    text: line.text || fallbackText,
+    sequence: line.sequence,
+    timestampUtc: line.timestampUtc,
+    operation: line.operation,
+    action: line.action,
+    state: line.state,
+    purpose: line.purpose,
+    observed: line.observed,
+    nextAction: line.nextAction,
+    artifactKind: line.artifactKind,
+    artifactCount: line.artifactCount,
+  };
+}
+
 const ENGINE_LABELS: Record<PhaseEngine, string> = {
   NotImplemented: "No adapter",
   Deterministic: "Deterministic code",
@@ -426,6 +451,8 @@ const PHASE_STATE_LABELS: Record<string, string> = {
 
 function ExecutionReport({ result, onPreview, workspaceId }: { result: ExecutionResult; onPreview: (path: string) => void; workspaceId?: string }) {
   const executed = result.phases.filter((phase) => phase.state === "Executed").length;
+  const unsuccessful = result.phases.filter((phase) => phase.state !== "Executed");
+  const problems = unsuccessful.filter((phase) => phase.state === "Failed" || phase.state === "BlockedByDependency");
   return (
     <div className="mf-run-report">
       <p className="mf-run-summary">
@@ -434,46 +461,61 @@ function ExecutionReport({ result, onPreview, workspaceId }: { result: Execution
         private session workspace.
       </p>
 
-      <ul className="mf-run-phases">
-        {result.phases.map((phase) => (
+      {/* Failures stay in the open. Everything that merely succeeded is one disclosure away. */}
+      {problems.length > 0 && <ul className="mf-run-phases">
+        {problems.map((phase) => (
           <li key={phase.phase}>
             <div className="mf-run-phase-head">
               <strong>{humanize(phase.phase)}</strong>
-              <span className={phase.state === "Executed" ? "mf-pill success" : phase.state === "Failed" || phase.state === "BlockedByDependency" ? "mf-pill danger" : "mf-pill warn"}>
-                {phase.state === "Executed" ? <CheckCircle2 /> : phase.state === "Failed" || phase.state === "BlockedByDependency" ? <XCircle /> : <AlertTriangle />}
-                {PHASE_STATE_LABELS[phase.state] ?? phase.state}
-              </span>
+              <span className="mf-pill danger"><XCircle />{PHASE_STATE_LABELS[phase.state] ?? phase.state}</span>
             </div>
             {phase.detail && <p>{phase.detail}</p>}
             {phase.findings.length > 0 && <ul className="mf-run-findings">{phase.findings.map((finding) => <li key={finding}>{finding}</li>)}</ul>}
           </li>
         ))}
-      </ul>
+      </ul>}
 
-      <h3>Files written</h3>
+      <details className="mf-optional">
+        <summary>Every phase in this run <span>{result.phases.length}</span></summary>
+        <ul className="mf-run-phases">
+          {result.phases.map((phase) => (
+            <li key={phase.phase}>
+              <div className="mf-run-phase-head">
+                <strong>{humanize(phase.phase)}</strong>
+                <span className={phase.state === "Executed" ? "mf-pill success" : phase.state === "Failed" || phase.state === "BlockedByDependency" ? "mf-pill danger" : "mf-pill warn"}>
+                  {phase.state === "Executed" ? <CheckCircle2 /> : phase.state === "Failed" || phase.state === "BlockedByDependency" ? <XCircle /> : <AlertTriangle />}
+                  {PHASE_STATE_LABELS[phase.state] ?? phase.state}
+                </span>
+              </div>
+              {phase.detail && <p>{phase.detail}</p>}
+              {phase.findings.length > 0 && <ul className="mf-run-findings">{phase.findings.map((finding) => <li key={finding}>{finding}</li>)}</ul>}
+            </li>
+          ))}
+        </ul>
+      </details>
+
       {result.artifacts.length === 0
         ? <p className="mf-help">Nothing was written, so there is nothing to open.</p>
-        : <><ul className="mf-run-artifacts">{result.artifacts.map((artifact) => (
-          <li key={artifact.path}>
-            <div><code>{artifact.path}</code><small>{artifact.description}</small></div>
-            {artifact.previewable
-              ? <button type="button" className="mf-inline-link" onClick={() => onPreview(artifact.path)}><FileText />Open</button>
-              : <span className="mf-help">Not a text file</span>}
-          </li>
-        ))}</ul>
-        {workspaceId && <div className="mf-export">
-          <a className="mf-secondary" href={`/api/workbench/export?workspaceId=${encodeURIComponent(workspaceId)}`} download="migration-output.zip">
-            <FileArchive />Download everything this run generated
-          </a>
-          <p className="mf-help">Your session workspace is deleted after four hours. Nothing leaves here except what the run wrote; your source copy is not included.</p>
-        </div>}</>}
+        : <>
+          <details className="mf-optional">
+            <summary>Files this run wrote <span>{result.artifacts.length}</span></summary>
+            <ul className="mf-run-artifacts">{result.artifacts.map((artifact) => (
+              <li key={artifact.path}>
+                <div><code>{artifact.path}</code><small>{artifact.description}</small></div>
+                {artifact.previewable
+                  ? <span className="mf-command-help"><button type="button" className="mf-inline-link" onClick={() => onPreview(artifact.path)}><FileText />Open</button><InfoTip label="opening a generated file">{help("action.openArtifact")}</InfoTip></span>
+                  : <span className="mf-help">Not a text file</span>}
+              </li>
+            ))}</ul>
+          </details>
+          {workspaceId && <p className="mf-help">Your session workspace is deleted after four hours. Nothing leaves here except what the run wrote; your source copy is not included.</p>}
+        </>}
 
-      <h3>Attestations</h3>
-      {result.attestations.length === 0
-        ? <p className="mf-help">No phase in this run produces a signable attestation, so none was recorded.</p>
-        : <ul className="mf-run-attestations">{result.attestations.map((attestation) => (
-          <li key={attestation.kind}><strong>{humanize(attestation.kind)}</strong><small>{attestation.summary}</small></li>
-        ))}</ul>}
+      <p className="mf-run-attestation-note">
+        {result.attestations.length === 0
+          ? <><ShieldCheck aria-hidden="true" />No phase in this run produces a signable attestation, so none was recorded. Nothing here is evidence that the output builds, runs, or behaves like the original.</>
+          : <><ShieldCheck aria-hidden="true" />{result.attestations.length} attestation{result.attestations.length === 1 ? "" : "s"} recorded: {result.attestations.map((attestation) => humanize(attestation.kind)).join(", ")}.</>}
+      </p>
     </div>
   );
 }
@@ -587,6 +629,7 @@ export default function WizardApp() {
   const dialogOpener = useRef<HTMLElement | null>(null);
   const acquisition = useRef<AbortController | null>(null);
   const run = useRef<AbortController | null>(null);
+  const closeActivity = useCallback(() => setConsoleOpen(false), []);
 
   useEffect(() => {
     let cancelled = false;
@@ -734,10 +777,10 @@ export default function WizardApp() {
           setWorkspace(acquired);
           setEvidence([...manual, ...added]);
           setAutoEvidence(added);
-          setConsoleLines((current) => [...current, {
-            level: "done",
-            text: `${acquired.fileCount} files (${formatBytes(acquired.byteCount)}) ready in workspace ${acquired.workspaceId}.`,
-          }]);
+          setConsoleLines((current) => [...current, transcriptLine(
+            event,
+            `${acquired.fileCount} files (${formatBytes(acquired.byteCount)}) ready in workspace ${acquired.workspaceId}.`,
+          )]);
           setStatus(recognised.length > 0
             ? `Copied your source. ${recognised.length} matching ${recognised.length === 1 ? "item" : "items"} on the source checklist ${recognised.length === 1 ? "is" : "are"} ticked for you.`
             : "Copied your source, but no Oracle Forms or PL/SQL artifacts were recognised.");
@@ -921,7 +964,9 @@ export default function WizardApp() {
       const response = await fetch("/api/workbench/plan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(runRequestBody()),
+        // The identifier lets the server derive source facts from the copy it took itself. Without a
+        // copy it plans from declarations alone, and nothing in the plan is marked verified.
+        body: JSON.stringify(workspace ? { ...runRequestBody(), workspaceId: workspace.workspaceId } : runRequestBody()),
       });
       if (!response.ok) throw new Error(`Planner failed (${response.status}).`);
       const result = await response.json() as PlanResponse;
@@ -955,15 +1000,19 @@ export default function WizardApp() {
 
     try {
       for await (const event of executeRun({ ...runRequestBody(), workspaceId: workspace.workspaceId }, controller.signal)) {
-        if (event.level === "done" && "result" in event) {
+        if ("result" in event) {
           const result = event.result;
           const ran = result.phases.filter((phase) => phase.state === "Executed").length;
+          const unsuccessful = event.level === "error";
           setExecution(result);
-          setConsoleLines((current) => [...current, {
-            level: "done",
-            text: `${ran} phase${ran === 1 ? "" : "s"} executed. ${result.artifacts.length} file${result.artifacts.length === 1 ? "" : "s"} written.`,
-          }]);
-          setStatus(`${ran} phase${ran === 1 ? "" : "s"} ran and wrote ${result.artifacts.length} file${result.artifacts.length === 1 ? "" : "s"} into your session workspace.`);
+          setConsoleLines((current) => [...current, transcriptLine(
+            event,
+            `${ran} phase${ran === 1 ? "" : "s"} executed. ${result.artifacts.length} file${result.artifacts.length === 1 ? "" : "s"} written.`,
+          )]);
+          setStatus(unsuccessful
+            ? `The run did not complete successfully. ${ran} phase${ran === 1 ? "" : "s"} ran and ${result.artifacts.length} file${result.artifacts.length === 1 ? " was" : "s were"} retained.`
+            : `${ran} phase${ran === 1 ? "" : "s"} ran and wrote ${result.artifacts.length} file${result.artifacts.length === 1 ? "" : "s"} into your session workspace.`);
+          if (unsuccessful) setExecutionError(event.observed || "The run did not complete successfully.");
         } else {
           setConsoleLines((current) => [...current, event as ConsoleLine]);
           if (event.level === "error") setExecutionError(event.text);
@@ -1029,6 +1078,123 @@ export default function WizardApp() {
   const activeView: ShellView = view === "results" && !plan ? "setup" : view;
   const guide = STEP_GUIDANCE[step];
   const activityAvailable = consoleLines.length > 0 || acquiring || executing;
+
+  const phasesExecuted = execution?.phases.filter((phase) => phase.state === "Executed").length ?? 0;
+  const failedPhases = execution?.phases.filter((phase) =>
+    phase.state === "Failed" ||
+    phase.state === "BlockedByDependency" ||
+    (phase.plannedStatus === "Planned" && phase.state !== "Executed")).length ?? 0;
+  const filesWritten = execution?.artifacts.length ?? 0;
+  const blockerCount = plan?.plan.blockers.length ?? 0;
+
+  /**
+   * The one sentence at the top of the results page.
+   *
+   * A finished run is never described as a success on its own: writing files is not compiling them,
+   * and the detail line says so rather than leaving the reader to assume.
+   */
+  const outcome: { tone: "info" | "attention" | "danger" | "success"; icon: typeof Info; headline: string; detail: string } =
+    executing
+      ? {
+        tone: "info",
+        icon: Activity,
+        headline: "The run is working now.",
+        detail: "Activity shows every line the server sends. Results appear here when the run reports an outcome.",
+      }
+      : execution
+        ? failedPhases > 0 || phasesExecuted === 0
+          ? {
+            tone: "danger",
+            icon: XCircle,
+            headline: phasesExecuted === 0
+              ? "The run finished without completing any phase."
+              : `Run finished with ${failedPhases} phase${failedPhases === 1 ? "" : "s"} that did not complete.`,
+            detail: `${phasesExecuted} of ${execution.phases.length} phases ran and ${filesWritten} file${filesWritten === 1 ? "" : "s"} were written into your session workspace. Read the failed phases before running anything else.`,
+          }
+          : {
+            tone: "success",
+            icon: CheckCircle2,
+            headline: `Run finished: ${phasesExecuted} of ${execution.phases.length} phases ran.`,
+            detail: `${filesWritten} file${filesWritten === 1 ? "" : "s"} written into your private session workspace. Nothing in this run compiled, deployed, or behaviour-verified that output.`,
+          }
+        : blockerCount > 0
+          ? {
+            tone: "attention",
+            icon: AlertTriangle,
+            headline: `Plan generated with ${blockerCount} blocker${blockerCount === 1 ? "" : "s"}.`,
+            detail: runnable
+              ? `${plannedPhases} phase${plannedPhases === 1 ? "" : "s"} can still run from here; the blockers below are what the rest of the plan is waiting on.`
+              : runHint || "No phase can run from this setup.",
+          }
+          : runnable
+            ? {
+              tone: "info",
+              icon: Info,
+              headline: "Plan generated with no blockers.",
+              detail: `The planner authorized ${plannedPhases} phase${plannedPhases === 1 ? "" : "s"} you can run from here.`,
+            }
+            : {
+              tone: "info",
+              icon: Info,
+              headline: "Plan generated.",
+              detail: runHint || "No phase can run from this setup.",
+            };
+
+  /**
+   * Exactly one primary action, chosen for the state the page is actually in. A results page that
+   * offers run, download, and edit with equal weight leaves the operator to work out which is safe.
+   */
+  const primaryAction: {
+    kind: "run" | "edit" | "download";
+    label: string;
+    explanation: string;
+    help: string;
+    hint?: string;
+    disabled?: boolean;
+    href?: string;
+    run?: () => void;
+  } = executing
+    ? {
+      kind: "run",
+      label: "Running...",
+      disabled: true,
+      explanation: "The run the planner authorized is under way. Nothing else should be started until it reports an outcome.",
+      help: help("action.runAuthorized"),
+      run: () => undefined,
+    }
+    : execution && filesWritten > 0
+      ? {
+        kind: "download",
+        label: "Download what this run generated",
+        href: `/api/workbench/export?workspaceId=${encodeURIComponent(workspace?.workspaceId ?? "")}`,
+        explanation: "The safest next step is to take the output off this host. Your session workspace is deleted four hours after the source was copied.",
+        help: help("action.downloadOutput"),
+      }
+      : execution
+        ? {
+          kind: "edit",
+          label: "Edit setup",
+          explanation: "This run wrote nothing, so there is nothing to take away. Change the setup and generate the plan again.",
+          help: help("action.editSetup"),
+          run: () => goToStep(0),
+        }
+        : runnable
+          ? {
+            kind: "run",
+            label: "Run authorized phases",
+            explanation: "This runs only the phases the planner marked Planned. It is the next step that produces anything.",
+            help: help("action.runAuthorized"),
+            run: () => void runAuthorized(),
+          }
+          : {
+            kind: "edit",
+            label: "Edit setup",
+            explanation: "No phase can run from this setup, so the next useful step is to change the setup rather than to start a run.",
+            hint: runHint,
+            help: help("action.editSetup"),
+            run: () => goToStep(0),
+          };
+
   const trail = activeView === "setup"
     ? ["Migration setup", guide.name]
     : activeView === "results" ? ["Plan & results"] : ["Overview"];
@@ -1106,6 +1272,7 @@ export default function WizardApp() {
             {activeView !== "setup" && <button type="button" className="mf-command accent" onClick={() => beginSetup()}><Plus aria-hidden="true" />New migration</button>}
             {activeView === "results" && <button type="button" className="mf-command" onClick={() => goToStep(0)}><Pencil aria-hidden="true" />Edit setup</button>}
             <button type="button" ref={activityButton} className="mf-command" disabled={!activityAvailable} aria-describedby={activityAvailable ? undefined : "cmd-activity-note"} onClick={() => setConsoleOpen(true)}><Activity aria-hidden="true" />Activity</button>
+            <InfoTip label="activity">{help("action.viewActivity")}</InfoTip>
             <button type="button" className="mf-command" onClick={() => setDialog("azure")}><Cloud aria-hidden="true" />Azure status</button>
             <button type="button" className="mf-command" disabled={!bootstrap.agentChatAvailable} aria-describedby={bootstrap.agentChatAvailable ? undefined : "cmd-agent-note"} onClick={() => setDialog("agent")}><Sparkles aria-hidden="true" />Ask AI</button>
             {!activityAvailable && <span className="mf-command-note" id="cmd-activity-note">Activity opens once something has run in this tab.</span>}
@@ -1184,6 +1351,7 @@ export default function WizardApp() {
                   <button type="button" className="mf-secondary mf-acquire" disabled={acquiring || !repository} onClick={() => void acquire({ mode: "repo", repositoryUrl: repoUrl.trim(), branch: repoBranch.trim() || undefined })}>
                     <GitBranch />{acquiring ? "Copying..." : workspace ? "Copy again" : "Copy this repository"}
                   </button>
+                  <InfoTip label="copying this repository">{help("action.copyRepository")}</InfoTip>
                 </>}
 
                 {value === "zip" && <div className="mf-drop">
@@ -1207,7 +1375,9 @@ export default function WizardApp() {
                   <div className="mf-workspace-actions">
                     <p className="mf-help">Detected folder: {workspace.sourceRoot} · deleted automatically {new Date(workspace.expiresUtc).toLocaleTimeString()}</p>
                     <button type="button" className="mf-inline-link" onClick={() => setConsoleOpen(true)}>View activity</button>
+                    <InfoTip label="view activity">{help("action.viewActivity")}</InfoTip>
                     <button type="button" className="mf-inline-link danger" onClick={discardWorkspace}><Trash2 aria-hidden="true" />Delete this copy now</button>
+                    <InfoTip label="deleting this copy">{help("action.deleteCopy")}</InfoTip>
                   </div>
                 </div>}
               </>}
@@ -1267,7 +1437,7 @@ export default function WizardApp() {
             <div className="mf-boundary"><LockKeyhole aria-hidden="true" /><p><strong>A typed name is planning metadata. It authorizes nothing.</strong>These fields do not sign anyone in, do not check that the person exists, and do not grant permission to write anywhere. Sandbox writes need an execution approval this workbench cannot issue, and production release is not available here at all. Treat this as recording who you would ask.</p></div>
             <div className="mf-assurance"><CheckCircle2 aria-hidden="true" /><div><strong>Sandbox and production stay separate</strong><p>Approving the plan never approves a sandbox run, and neither one approves a production release. The two names must be different people.</p></div></div>
             <div className="mf-field-grid"><Field id="executionApprover" label="Sandbox approver" hint="Optional planning contact" help={help("field.executionApprover")} placeholder="approver@contoso.com" value={fields.executionApprover} error={errors.executionApprover} onChange={(value) => updateField("executionApprover", value)} /><Field id="productionApprover" label="Production approver" hint="Optional planning contact" help={help("field.productionApprover")} placeholder="cab-chair@contoso.com" value={fields.productionApprover} error={errors.productionApprover} onChange={(value) => updateField("productionApprover", value)} /></div>
-            <p className="mf-help">These two names are not kept in your browser. They are sent with the plan request and nowhere else.</p>
+            <p className="mf-help">These names are sent as pending planning notes with plan and run requests. The server does not treat them as identity or authorization and does not persist them as approvals.</p>
           </div>}
 
           {step === 4 && <form className="mf-step" onSubmit={generatePlan} noValidate><p className="mf-kicker">{guide.name}</p><h1 ref={heading} tabIndex={-1}>{guide.heading}</h1>
@@ -1293,42 +1463,90 @@ export default function WizardApp() {
           </div>
         </section>
       </main> : <main className="mf-results" id="workspace">
-        <div className="mf-result-heading"><div><p className="mf-kicker">Plan &amp; results</p><h1 ref={heading} tabIndex={-1}>Migration plan for {plan.plan.applicationName}</h1><p>You asked for <strong>{humanize(plan.plan.requestedMode)}</strong>; the workbench authorized <strong>{humanize(plan.plan.authorizedMode)}</strong>.</p></div><button type="button" className="mf-secondary" onClick={() => goToStep(0)}><Pencil aria-hidden="true" />Edit setup</button></div>
+        <div className="mf-result-heading"><div><p className="mf-kicker">Plan &amp; results</p><h1 ref={heading} tabIndex={-1}>Migration plan for {plan.plan.applicationName}</h1></div></div>
 
-        <p className={plan.plan.blockers.length > 0 ? "mf-lead-state attention" : "mf-lead-state neutral"}>
-          {plan.plan.blockers.length > 0
-            ? <><AlertTriangle aria-hidden="true" /><span><strong>Needs attention:</strong> {plan.plan.blockers[0]}</span></>
-            : runnable
-              ? <><Info aria-hidden="true" /><span><strong>Ready to run:</strong> the planner authorized {plannedPhases} phase{plannedPhases === 1 ? "" : "s"} you can start from here.</span></>
-              : <><Info aria-hidden="true" /><span><strong>Planned:</strong> {runHint || "No phase can run from this setup."}</span></>}
-        </p>
-
-        <section className="mf-metrics" aria-label="Plan summary">
-          <article><span>Stages ready<InfoTip label="stages ready">{help("metric.stagesReady")}</InfoTip></span><strong>{plan.steps.filter((item) => item.state === "Ready" || item.state === "Current").length}/6</strong></article>
-          <article><span>Inputs provided<InfoTip label="inputs provided">{help("metric.inputsProvided")}</InfoTip></span><strong>{readyGroups}/{groups.length}</strong></article>
-          <article><span>Still missing<InfoTip label="still missing">{help("metric.stillMissing")}</InfoTip></span><strong>{plan.plan.blockers.length}</strong></article>
-          <article><span>Azure services active<InfoTip label="active Azure services">{help("metric.azureActive")}</InfoTip></span><strong>{activeAzure}/{bootstrap.azureComponents.length}</strong></article>
+        {/* 1. The short outcome. One state, one sentence, before any detail. */}
+        <section className={`mf-outcome ${outcome.tone}`} aria-labelledby="mf-outcome-title">
+          <outcome.icon aria-hidden="true" />
+          <div>
+            <h2 id="mf-outcome-title">{outcome.headline}</h2>
+            <p>{outcome.detail}</p>
+          </div>
         </section>
 
-        <section className="mf-result-section"><p className="mf-kicker">Where this run stands</p><h2>What is done, and what this workbench cannot do</h2><CapabilityStates execution={execution} /></section>
+        {/* 2. What is actually blocking, before anything that merely describes the plan. */}
+        {plan.plan.blockers.length > 0 && <section className="mf-alert" aria-labelledby="mf-blockers-title">
+          <h2 id="mf-blockers-title"><AlertTriangle aria-hidden="true" />What is blocking this migration</h2>
+          <ul>{plan.plan.blockers.slice(0, 3).map((item) => <li key={item}>{item}</li>)}</ul>
+          {plan.plan.blockers.length > 3 && <details className="mf-optional">
+            <summary>The remaining blockers <span>{plan.plan.blockers.length - 3}</span></summary>
+            <ul>{plan.plan.blockers.slice(3).map((item) => <li key={item}>{item}</li>)}</ul>
+          </details>}
+        </section>}
 
-        {plan.plan.blockers.length > 0 && <section className="mf-alert"><h2><AlertTriangle aria-hidden="true" />What is still missing</h2><ul>{plan.plan.blockers.map((item) => <li key={item}>{item}</li>)}</ul></section>}
-        <ArchitectureReveal applicationName={plan.plan.applicationName} database={database} databaseName={selectedDatabase?.name ?? database} />
-        <section className="mf-result-section"><p className="mf-kicker">Lifecycle</p><h2>Six-stage modernization path</h2><ol className="mf-lifecycle">{plan.steps.map((item) => <li key={item.step}><span>{item.order}</span><div><strong>{item.title}</strong><small>{item.phases.map(humanize).join(" · ")}</small></div><em className={item.state === "Blocked" ? "mf-pill danger" : "mf-pill neutral"}>{item.state === "Blocked" ? <XCircle aria-hidden="true" /> : <Info aria-hidden="true" />}{item.state}</em></li>)}</ol></section>
-        <section className="mf-result-section"><p className="mf-kicker">Phase detail</p><h2>Authorized work and blockers</h2><div className="mf-phases">{plan.plan.phases.map((phase) => <PhaseCard key={phase.phase} phase={phase} attribution={bootstrap.attribution?.phases.find((item) => item.phase === phase.phase)} />)}</div></section>
-        {bootstrap.attribution && <AttributionSection attribution={bootstrap.attribution} />}
-        {plan.azureFootprint && <AzureFootprintSection footprint={plan.azureFootprint} />}
-        <section className="mf-result-section"><p className="mf-kicker">Execution</p><h2>Run the authorized phases</h2>
-          <p className="mf-run-lead">This runs only the phases marked <strong>Planned</strong> above. Conversion artifacts stay in your private session workspace and your source repository is never modified. Separately approved sandbox phases may write schema and data to the host-configured PostgreSQL target; no caller can change that endpoint. Nothing is deployed and no production resource is touched.</p>
-          {!runnable && <p className="mf-help" id="run-hint">{runHint}</p>}
-          <button type="button" className="mf-primary mf-generate" disabled={!runnable || executing} aria-describedby={runnable ? undefined : "run-hint"} onClick={() => void runAuthorized()}>
-            <Play aria-hidden="true" />{executing ? "Running..." : "Run authorized phases"}
-          </button>
+        {/* 3. Exactly one primary action for the state the run is actually in. */}
+        <section className="mf-next-action" aria-labelledby="mf-next-title">
+          <h2 id="mf-next-title">Next available action</h2>
+          <p className="mf-run-lead">{primaryAction.explanation}</p>
+          {primaryAction.hint && <p className="mf-help" id="next-action-hint">{primaryAction.hint}</p>}
+          {primaryAction.kind === "download"
+            ? <a className="mf-primary mf-generate" href={primaryAction.href} download="migration-output.zip">
+              <FileArchive aria-hidden="true" />{primaryAction.label}
+            </a>
+            : <button
+              type="button"
+              className="mf-primary mf-generate"
+              disabled={primaryAction.disabled}
+              aria-describedby={primaryAction.hint ? "next-action-hint" : undefined}
+              onClick={primaryAction.run}
+            >
+              {primaryAction.kind === "run" ? <Play aria-hidden="true" /> : <Pencil aria-hidden="true" />}{primaryAction.label}
+            </button>}
+          <InfoTip label={primaryAction.label.toLowerCase()}>{primaryAction.help}</InfoTip>
           <p className="mf-status" role="status" aria-live="polite">{executing ? "The fleet is working. Activity shows each line the server sends." : execution ? "Run finished." : ""}</p>
           {executionError && <p className="mf-error" role="alert">{executionError}</p>}
-          {execution && <ExecutionReport result={execution} onPreview={(path) => void openArtifact(path)} workspaceId={workspace?.workspaceId} />}
-          {execution && <button type="button" className="mf-inline-link" onClick={() => { setConsoleMode("execution"); setConsoleOpen(true); }}>View activity</button>}
+
+          {/* Write effects stay visible. They are the part an operator must not have to expand to find. */}
+          <div className="mf-boundary"><LockKeyhole aria-hidden="true" /><p><strong>What running actually writes.</strong>Conversion artifacts are written into your private session workspace and your source repository is never modified. Separately approved sandbox phases may write schema and data to the host-configured PostgreSQL target, and no caller can change that endpoint. Nothing is deployed, no Azure resource is created, and no production resource is touched.</p></div>
+          {(activityAvailable || executing) && <span className="mf-command-help"><button type="button" className="mf-inline-link" onClick={() => { setConsoleMode(execution || executing ? "execution" : "source"); setConsoleOpen(true); }}><Activity aria-hidden="true" />View activity</button><InfoTip label="view activity">{help("action.viewActivity")}</InfoTip></span>}
         </section>
+
+        {/* 4. The run's own results, concise. */}
+        <section className="mf-result-section" aria-labelledby="mf-run-results-title">
+          <p className="mf-kicker">Run results</p>
+          <h2 id="mf-run-results-title">What this run produced, and what it did not</h2>
+          <div className="mf-metrics" role="group" aria-label="Plan summary">
+            <article><span>Stages ready<InfoTip label="stages ready">{help("metric.stagesReady")}</InfoTip></span><strong>{plan.steps.filter((item) => item.state === "Ready" || item.state === "Current").length}/6</strong></article>
+            <article><span>Inputs provided<InfoTip label="inputs provided">{help("metric.inputsProvided")}</InfoTip></span><strong>{readyGroups}/{groups.length}</strong></article>
+            <article><span>Still missing<InfoTip label="still missing">{help("metric.stillMissing")}</InfoTip></span><strong>{plan.plan.blockers.length}</strong></article>
+            <article><span>Phases that ran<InfoTip label="phases that ran">{help("metric.phasesExecuted")}</InfoTip></span><strong>{execution ? `${phasesExecuted}/${execution.phases.length}` : "0/0"}</strong></article>
+            <article><span>Files written<InfoTip label="files written">{help("metric.filesWritten")}</InfoTip></span><strong>{execution?.artifacts.length ?? 0}</strong></article>
+            <article><span>Azure services active<InfoTip label="active Azure services">{help("metric.azureActive")}</InfoTip></span><strong>{activeAzure}/{bootstrap.azureComponents.length}</strong></article>
+          </div>
+          <CapabilityStates execution={execution} />
+          {execution && <ExecutionReport result={execution} onPreview={(path) => void openArtifact(path)} workspaceId={workspace?.workspaceId} />}
+        </section>
+
+        {/* Everything below explains the plan rather than telling the operator what to do next. */}
+        <details className="mf-disclosure"><summary>Target architecture diagram</summary>
+          <ArchitectureReveal applicationName={plan.plan.applicationName} database={database} databaseName={selectedDatabase?.name ?? database} />
+        </details>
+
+        <details className="mf-disclosure"><summary>Six-stage modernization lifecycle</summary>
+          <ol className="mf-lifecycle">{plan.steps.map((item) => <li key={item.step}><span>{item.order}</span><div><strong>{item.title}</strong><small>{item.phases.map(humanize).join(" · ")}</small></div><em className={item.state === "Blocked" ? "mf-pill danger" : "mf-pill neutral"}>{item.state === "Blocked" ? <XCircle aria-hidden="true" /> : <Info aria-hidden="true" />}{item.state}</em></li>)}</ol>
+        </details>
+
+        <details className="mf-disclosure"><summary>Full phase detail: inputs, outputs, and blockers</summary>
+          <div className="mf-phases">{plan.plan.phases.map((phase) => <PhaseCard key={phase.phase} phase={phase} attribution={bootstrap.attribution?.phases.find((item) => item.phase === phase.phase)} />)}</div>
+        </details>
+
+        {bootstrap.attribution && <details className="mf-disclosure"><summary>Which model and which code runs each step</summary>
+          <AttributionSection attribution={bootstrap.attribution} />
+        </details>}
+
+        {plan.azureFootprint && <details className="mf-disclosure"><summary>Azure footprint this plan would need</summary>
+          <AzureFootprintSection footprint={plan.azureFootprint} />
+        </details>}
       </main>}
 
           <p className="mf-status mf-pane-status" role="status" aria-live="polite">{status}</p>
@@ -1354,7 +1572,7 @@ export default function WizardApp() {
         lines={consoleLines}
         running={acquiring || executing}
         fallbackFocus={activityButton}
-        onClose={() => setConsoleOpen(false)}
+        onClose={closeActivity}
       />}
     </>
   );

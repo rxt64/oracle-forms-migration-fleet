@@ -18,9 +18,49 @@ export interface SourceWorkspace {
   expiresUtc: string;
 }
 
+/**
+ * What the server says an operation is doing, in its own words.
+ *
+ * `Completed` and `Failed` are terminal: exactly one of them ends a healthy stream. A stream that
+ * stops without either is neither, and the browser reports that difference rather than smoothing it
+ * into success.
+ */
+export type ProgressState = "Running" | "Waiting" | "Completed" | "Failed";
+
+export type ConsoleLevel = "info" | "warn" | "error" | "found" | "skip" | "done" | "keepalive";
+
+/**
+ * One frame of a server progress stream.
+ *
+ * `level` and `text` are the original contract and still carry the raw line. Everything below them
+ * is typed framing the server supplies: the browser never reads a count, a state, or an outcome out
+ * of `text`. A frame without the typed fields is raw tool output and is shown only in the log.
+ */
 export interface ConsoleLine {
-  level: "info" | "warn" | "error" | "found" | "skip" | "done";
+  level: ConsoleLevel;
   text: string;
+  /** Assigned by the endpoint, so a gap is distinguishable from a reorder. */
+  sequence?: number;
+  timestampUtc?: string;
+  operation?: string;
+  action?: string;
+  state?: ProgressState;
+  purpose?: string;
+  observed?: string;
+  nextAction?: string;
+  artifactKind?: string | null;
+  /** A total the server measured. Never derived from text, and absent rather than zero. */
+  artifactCount?: number | null;
+}
+
+export const OPERATION_LABELS: Readonly<Record<string, string>> = {
+  "source.acquire": "Copying your source",
+  "migration.run": "Running the authorized phases",
+};
+
+/** True only for a frame the server marked as an outcome. Used to tell "finished" from "stopped". */
+export function isTerminal(line: ConsoleLine): boolean {
+  return line.state === "Completed" || line.state === "Failed";
 }
 
 export interface RepositoryTarget {
@@ -130,7 +170,7 @@ export async function* acquireSource(
 export async function* executeRun(
   body: Record<string, unknown>,
   signal: AbortSignal,
-): AsyncGenerator<ConsoleLine | { level: "done"; result: ExecutionResult }> {
+): AsyncGenerator<ConsoleLine | (ConsoleLine & { level: "done" | "error"; result: ExecutionResult })> {
   let response: Response;
   try {
     response = await fetch("/api/workbench/execute", {
@@ -149,7 +189,7 @@ export async function* executeRun(
     const payload = await response.json().catch(() => null) as { error?: string } | null;
     throw new Error(payload?.error ?? `The server refused the request (${response.status}).`);
   }
-  yield* readEvents<{ level: "done"; result: ExecutionResult }>(response);
+  yield* readEvents<ConsoleLine & { level: "done" | "error"; result: ExecutionResult }>(response);
 }
 
 export async function fetchArtifact(workspaceId: string, path: string, signal?: AbortSignal) {

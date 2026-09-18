@@ -1,9 +1,31 @@
 # Verification
 
+## Repeatable Browser Suite
+
+The follow-up suite is checked in under `ClientApp/tests/e2e`, configured by `ClientApp/playwright.config.ts`, and starts the real .NET workbench host itself. From `src/oracle-forms-migration-fleet/ClientApp`:
+
+```powershell
+npm ci
+npm run build
+npm run test:e2e:install
+npm run test:e2e
+```
+
+Prerequisites are Node.js 22 and .NET 10. Set `DOTNET_EXE` only when the .NET executable is neither on `PATH` nor under the user's `.dotnet` directory. CI runs the same build and browser command on pull requests to `main`, installs Chromium with its Linux dependencies, and uploads `playwright-report` plus `test-results` even when a test fails.
+
+Newly reproduced on `feat/guided-operator-ui-followup`, starting from `0aa5bb2f5bc548b0e17f2b1d9b45e597ac35b64b`:
+
+- `npm ci --no-audit --no-fund`: passed from the checked-in lockfile, installing 77 packages.
+- `npm run build`: passed, 1,586 modules transformed.
+- `npm run test:e2e`: 96 passed, 8 skipped, 0 failed in 2.7 minutes across desktop Chromium at 1,440 x 900 and mobile Chromium at 390 x 844.
+- The eight skips are intentional: mouse-hover cases do not run on the touch project, touch-tap does not run on the desktop project, and viewport-independent direct HTTP trust tests run once on desktop.
+
+The suite covers every setup step, validation focus, disabled capabilities, completed and in-flight source switches, reset behavior, result order/disclosures, pinned and transient help, viewport edges and long help, Activity focus while events arrive, keyboard containment while streaming, completed/failed/waiting/interrupted outcomes, concise status announcements, typed counts, failed zero-work execution results, retained diagnostic artifacts, action/help sibling markup, screenshots, and axe scans. Test-only `fetch` interception supplies only progress frames and selected execution-result states; bootstrap, validation, and planning use the real host. One test uploads an in-memory ZIP through the real source endpoint and plans against the real owned workspace. No production fixture route or fake-run mode exists.
+
 ## Executable Checks
 
 - `npm run build` in `src/oracle-forms-migration-fleet/ClientApp`: passed after the final UI changes; 1,586 modules transformed.
-- `dotnet test .\oracle-forms-migration-fleet.slnx --nologo`: passed 1,157 of 1,157 tests on .NET 10.0.11.
+- `dotnet test .\oracle-forms-migration-fleet.slnx --nologo`: passed 1,190 of 1,190 tests on .NET 10.0.11 after the follow-up trust and progress regressions were added.
 - Focused strict-reader tests: passed 18 of 18 cases, including numeric encoding rejection and actionable IR v1 refusal.
 - `git diff --check`: passed; Git reported only line-ending conversion notices.
 
@@ -52,8 +74,12 @@ The captured plan request proved:
 - The same transition was repeated while the clone response was deliberately delayed. Source-mode reset aborted and invalidated the active acquisition; releasing the stale response afterward left `evidence: []`, zero checked items, and Activity unavailable.
 - Starting `New migration` cleared all manual and detected evidence, source values, application fields, plan, and execution state.
 
-The backend still accepts approval-shaped request records and does not authenticate their actor. Trusted durable approvals remain a separate required increment.
+The API still deserializes approval-shaped request records for contract compatibility, but the server trust boundary forces them to Pending, drops client attestations, and derives verified source facts from the owned workspace. Durable authorization issuance and authenticated approval persistence remain separate required increments.
 
-## Working Tree Boundary
+## Manual Checks Still Required
 
-`portal.css` and `Guidance.tsx` are intentional new source files in this uncommitted increment. `wizard.css` is intentionally removed and replaced by `portal.css`. Generated `wwwroot` output is ignored and is not part of the source change. The pre-existing untracked `.agent_configs/` and `eval.yaml` remain unrelated and untouched.
+- Native screen-reader review.
+- Native Windows high-contrast review.
+- Actual browser zoom at 200%; the automated narrow viewport is only a reflow proxy.
+
+The earlier manual browser observations remain historical evidence from the parent commit. The checked-in suite above is the reproducible evidence for this follow-up. Axe results are not a WCAG conformance claim.

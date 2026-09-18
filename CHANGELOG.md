@@ -6,6 +6,15 @@ Notable changes to behaviour, with the reasoning that is not visible in a diff.
 
 ### Added
 
+- Repeatable guided-UI verification and server-owned API trust boundaries. Typed ordered activity events now
+  distinguish running, waiting, completed, failed, and interrupted outcomes without parsing log prose; raw output
+  starts collapsed, focus stays stable while frames arrive, and advanced result detail starts collapsed behind the
+  next safe action. A checked-in Playwright/axe suite runs the real local host in desktop and mobile Chromium and is
+  enforced by CI. Workbench planning and execution now discard client-created verification, approvals, signals, and
+  attestations; verified source facts and hashes are derived from the authenticated owner's exact selected workspace
+  folder. Sandbox and production writes remain unavailable until a trusted scoped authorization service exists, and
+  are rechecked immediately before any future side effect.
+
 - Guided operator workbench UI. The current five-step setup now uses an Azure-inspired dark shell,
   business-language guidance, an auditable contextual-help registry, truthful capability states, and a
   real-event activity pane without terminal decoration. Typed contacts remain pending planning notes and

@@ -59,14 +59,36 @@ internal static class WorkbenchEndpoints
                 attribution));
         });
 
-        endpoints.MapPost("/api/workbench/plan", (MigrationRunRequest request) =>
+        endpoints.MapPost("/api/workbench/plan", async (HttpContext context, CancellationToken cancellationToken) =>
         {
-            MigrationRunPlan plan = MigrationRunPlanner.Plan(request);
-            return Results.Ok(new WorkbenchPlanResponse(
-                plan,
-                MigrationWorkbenchCatalog.Project(plan),
-                MigrationWorkbenchCatalog.ExecutionBoundary,
-                AzureFootprintCalculator.Describe(plan.Target.Database, plan.AuthorizedMode)));
+            if (!TryActor(context, entraAuthenticationConfigured, out WorkbenchActor actor))
+            {
+                return Results.Unauthorized();
+            }
+
+            // Read as a document so 'workspaceId' rides alongside the run request without changing that
+            // contract, exactly as the execute endpoint already does.
+            MigrationRunRequest? request = null;
+            string? workspaceId = null;
+
+            try
+            {
+                using JsonDocument document = await JsonDocument.ParseAsync(context.Request.Body, cancellationToken: cancellationToken);
+                workspaceId = document.RootElement.TryGetProperty("workspaceId", out JsonElement id) && id.ValueKind == JsonValueKind.String
+                    ? id.GetString()
+                    : null;
+                request = document.RootElement.Deserialize<MigrationRunRequest>(RequestOptions);
+            }
+            catch (JsonException)
+            {
+                request = null;
+            }
+
+            return WorkbenchExecution.TryPlanRun(
+                sourceWorkspaces, actor, workspaceId, request,
+                out WorkbenchPlanResponse? response, out int status, out string error)
+                ? Results.Ok(response)
+                : Results.Json(new { error }, statusCode: status);
         });
 
         endpoints.MapPost("/api/workbench/agent", async (
@@ -112,23 +134,32 @@ internal static class WorkbenchEndpoints
                 .GetRequiredService<ILoggerFactory>()
                 .CreateLogger("OracleFormsMigrationFleet.Workbench");
 
-            MapSourceAcquisition(endpoints, sourceWorkspaces);
-            MapExecution(endpoints, sourceWorkspaces, logger);
+            MapSourceAcquisition(endpoints, sourceWorkspaces, entraAuthenticationConfigured);
+            MapExecution(endpoints, sourceWorkspaces, logger, entraAuthenticationConfigured);
         }
     }
 
-    private static void MapSourceAcquisition(IEndpointRouteBuilder endpoints, SourceWorkspaceService workspaces)
+    private static void MapSourceAcquisition(
+        IEndpointRouteBuilder endpoints,
+        SourceWorkspaceService workspaces,
+        bool entraAuthenticationConfigured)
     {
         endpoints.MapPost("/api/workbench/source/clone", async (
             HttpContext context,
             WorkbenchCloneRequest request,
             CancellationToken cancellationToken) =>
         {
+            if (!TryOwner(context, entraAuthenticationConfigured, out string owner))
+            {
+                context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                return;
+            }
+
             await StreamAsync(
                 context,
-                workspaces.CloneAsync(Owner(context), request.RepositoryUrl ?? string.Empty, request.Branch, cancellationToken),
+                workspaces.CloneAsync(owner, request.RepositoryUrl ?? string.Empty, request.Branch, cancellationToken),
                 workspaces,
-                Owner(context),
+                owner,
                 cancellationToken);
         });
 
@@ -136,6 +167,12 @@ internal static class WorkbenchEndpoints
             HttpContext context,
             CancellationToken cancellationToken) =>
         {
+            if (!TryOwner(context, entraAuthenticationConfigured, out string owner))
+            {
+                context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                return;
+            }
+
             // Uploaded source is much larger than any JSON payload this console handles.
             if (context.Features.Get<IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } sizeFeature)
             {
@@ -158,14 +195,16 @@ internal static class WorkbenchEndpoints
             await using Stream stream = file.OpenReadStream();
             await StreamAsync(
                 context,
-                workspaces.ExtractAsync(Owner(context), stream, file.FileName, cancellationToken),
+                workspaces.ExtractAsync(owner, stream, file.FileName, cancellationToken),
                 workspaces,
-                Owner(context),
+                owner,
                 cancellationToken);
         });
 
         endpoints.MapDelete("/api/workbench/source/{workspaceId}", (HttpContext context, string workspaceId) =>
-            workspaces.Release(Owner(context), workspaceId) ? Results.NoContent() : Results.NotFound());
+            !TryOwner(context, entraAuthenticationConfigured, out string owner)
+                ? Results.Unauthorized()
+                : workspaces.Release(owner, workspaceId) ? Results.NoContent() : Results.NotFound());
     }
 
     /// <summary>
@@ -176,11 +215,20 @@ internal static class WorkbenchEndpoints
     /// output directory; the read-only source copy, the customer's repository, and every database and
     /// Azure resource are untouched.
     /// </summary>
-    private static void MapExecution(IEndpointRouteBuilder endpoints, SourceWorkspaceService workspaces, ILogger logger)
+    private static void MapExecution(
+        IEndpointRouteBuilder endpoints,
+        SourceWorkspaceService workspaces,
+        ILogger logger,
+        bool entraAuthenticationConfigured)
     {
         endpoints.MapPost("/api/workbench/execute", async (HttpContext context, CancellationToken cancellationToken) =>
         {
-            string owner = Owner(context);
+            if (!TryActor(context, entraAuthenticationConfigured, out WorkbenchActor actor))
+            {
+                context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                return;
+            }
+            string owner = actor.OwnerId;
             MigrationRunRequest? request = null;
             string? workspaceId = null;
 
@@ -197,19 +245,32 @@ internal static class WorkbenchEndpoints
                 request = null;
             }
 
-            if (!WorkbenchExecution.TryPrepare(
-                workspaces, owner, workspaceId, request,
-                out string workspaceRoot, out MigrationRunRequest? prepared, out int status, out string error))
+            // The authorization service is resolved from the container rather than constructed here, so a
+            // deployment that gains a trusted store gets it without this endpoint changing. Absent one it
+            // is backed by a store that holds nothing, and every mutating phase is refused.
+            WorkbenchAuthorizationService authorization =
+                context.RequestServices.GetService<WorkbenchAuthorizationService>() ?? new WorkbenchAuthorizationService();
+
+            if (!WorkbenchExecution.TryPrepareRun(
+                workspaces, actor, workspaceId, request, authorization,
+                out WorkbenchExecution.WorkbenchRunPreparation? preparation, out int status, out string error))
             {
                 context.Response.StatusCode = status;
                 await context.Response.WriteAsJsonAsync(new { error }, cancellationToken);
                 return;
             }
 
+            string workspaceRoot = preparation!.WorkspaceRoot;
+            MigrationRunRequest prepared = preparation.Request;
+
             context.Response.ContentType = "text/event-stream";
             context.Response.Headers.CacheControl = "no-cache";
 
             WorkbenchExecution.ResetOutput(workspaceRoot);
+
+            // Sequence numbers are assigned here, in one place, so a consumer can tell a gap from a
+            // reorder. The producers know what happened; only the stream knows the order it left in.
+            WorkbenchProgressSequence frames = new();
 
             Channel<ExecutionProgress> channel = Channel.CreateUnbounded<ExecutionProgress>(
                 new UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
@@ -221,7 +282,8 @@ internal static class WorkbenchEndpoints
                     context.RequestServices.GetService<IDataMigrationGateway>(),
                     context.RequestServices.GetService<Fleet.Agents.CritiqueRepairOrchestrator>(),
                     context.RequestServices.GetService<ProgramUnitRepairLoop>(),
-                    context.RequestServices.GetService<IApplicationBuildGateway>()));
+                    context.RequestServices.GetService<IApplicationBuildGateway>()),
+                preparation.MutationAuthorizer);
 
             // The run moves off the request thread to keep progress frames flowing while it works.
             Task<MigrationExecutionResult> run = Task.Run(async () =>
@@ -229,7 +291,7 @@ internal static class WorkbenchEndpoints
                 try
                 {
                     return await executor.ExecuteAsync(
-                        prepared!,
+                        prepared,
                         owner,
                         step => channel.Writer.TryWrite(step),
                         cancellationToken);
@@ -250,23 +312,60 @@ internal static class WorkbenchEndpoints
 
                     if (completed == heartbeat)
                     {
-                        await WriteFrameAsync(context, new { level = "keepalive", text = "Build or migration work is still running." }, cancellationToken);
+                        // Waiting, not working: the run has produced nothing new for twenty seconds.
+                        await WriteFrameAsync(
+                            context,
+                            WorkbenchProgressFrame.Create(
+                                frames,
+                                "keepalive",
+                                "Build or migration work is still running.",
+                                new ProgressSignal(
+                                    ProgressOperations.MigrationRun,
+                                    ProgressActions.RunHeartbeat,
+                                    ProgressState.Waiting,
+                                    RunPurpose,
+                                    "The run is still open but has reported nothing new for twenty seconds.",
+                                    "Leave this open, or close it and come back \u2014 the run is not affected either way.")),
+                            cancellationToken);
                         continue;
                     }
 
                     while (channel.Reader.TryRead(out ExecutionProgress? step))
                     {
-                        await WriteFrameAsync(context, new { level = step.Level, text = step.Text }, cancellationToken);
+                        await WriteFrameAsync(context, WorkbenchProgressFrame.Create(frames, step.Level, step.Text, step.Signal), cancellationToken);
                     }
                 }
 
                 while (channel.Reader.TryRead(out ExecutionProgress? step))
                 {
-                    await WriteFrameAsync(context, new { level = step.Level, text = step.Text }, cancellationToken);
+                    await WriteFrameAsync(context, WorkbenchProgressFrame.Create(frames, step.Level, step.Text, step.Signal), cancellationToken);
                 }
 
                 MigrationExecutionResult result = await run;
-                await WriteFrameAsync(context, new { level = "done", result = WorkbenchExecution.Project(result) }, cancellationToken);
+                int executed = result.Phases.Count(phase => phase.State == PhaseExecutionState.Executed);
+                bool failed = WorkbenchRunOutcome.Failed(result.Phases);
+
+                // Terminal frame. The browser treats a stream that ends without one as interrupted,
+                // so this is the only thing entitled to say the run reached an outcome.
+                await WriteFrameAsync(
+                    context,
+                    WorkbenchProgressFrame.Create(
+                        frames,
+                        failed ? "error" : "done",
+                        string.Empty,
+                        new ProgressSignal(
+                            ProgressOperations.MigrationRun,
+                            failed ? ProgressActions.RunFailed : ProgressActions.RunCompleted,
+                            failed ? ProgressState.Failed : ProgressState.Completed,
+                            RunPurpose,
+                            $"{executed} of {result.Phases.Count} phase(s) ran and {result.Artifacts.Count} file(s) were written.",
+                            failed
+                                ? "Read the unperformed or failed phases below before running anything else."
+                                : "Review what was written. Generated code that has never been compiled is not working software.",
+                            "GeneratedFile",
+                            result.Artifacts.Count),
+                        extra: new Dictionary<string, object?> { ["result"] = WorkbenchExecution.Project(result) }),
+                    cancellationToken);
             }
             catch (OperationCanceledException)
             {
@@ -278,15 +377,30 @@ internal static class WorkbenchEndpoints
                 logger.LogError(exception, "Workbench execution failed for workspace {WorkspaceId}.", workspaceId);
                 await WriteFrameAsync(
                     context,
-                    new { level = "error", text = "The run stopped before it finished. Nothing further was written." },
+                    WorkbenchProgressFrame.Create(
+                        frames,
+                        "error",
+                        "The run stopped before it finished. Nothing further was written.",
+                        new ProgressSignal(
+                            ProgressOperations.MigrationRun,
+                            ProgressActions.RunFailed,
+                            ProgressState.Failed,
+                            RunPurpose,
+                            "The run stopped before it finished. Nothing further was written.",
+                            "Nothing beyond the files already listed was produced. Start the run again when the cause is understood.")),
                     CancellationToken.None);
             }
         });
 
         endpoints.MapGet("/api/workbench/artifact", (HttpContext context, string? workspaceId, string? path) =>
         {
+            if (!TryOwner(context, entraAuthenticationConfigured, out string owner))
+            {
+                return Results.Unauthorized();
+            }
+
             if (!WorkbenchExecution.TryResolveArtifact(
-                workspaces, Owner(context), workspaceId, path,
+                workspaces, owner, workspaceId, path,
                 out string absolutePath, out int status, out string error))
             {
                 return Results.Json(new { error }, statusCode: status);
@@ -319,8 +433,14 @@ internal static class WorkbenchEndpoints
         // Session workspaces are swept after four hours, so without this a completed migration is lost.
         endpoints.MapGet("/api/workbench/export", async (HttpContext context, string? workspaceId, CancellationToken cancellationToken) =>
         {
+            if (!TryOwner(context, entraAuthenticationConfigured, out string owner))
+            {
+                await Results.Unauthorized().ExecuteAsync(context);
+                return;
+            }
+
             if (!WorkbenchExecution.TryResolveExport(
-                workspaces, Owner(context), workspaceId,
+                workspaces, owner, workspaceId,
                 out string runRoot, out int status, out string error))
             {
                 await Results.Json(new { error }, statusCode: status).ExecuteAsync(context);
@@ -346,6 +466,12 @@ internal static class WorkbenchEndpoints
         });
     }
 
+    private const string RunPurpose =
+        "Running the phases the planner authorized and writing their output into your session workspace.";
+
+    private const string AcquisitionPurpose =
+        "Taking a private read-only copy of your source so the fleet has something it can read.";
+
     private static async Task WriteFrameAsync(HttpContext context, object payload, CancellationToken cancellationToken)
     {
         await context.Response.WriteAsync($"data: {JsonSerializer.Serialize(payload, JsonOptions)}\n\n", cancellationToken);
@@ -362,15 +488,46 @@ internal static class WorkbenchEndpoints
         context.Response.ContentType = "text/event-stream";
         context.Response.Headers.CacheControl = "no-cache";
 
+        WorkbenchProgressSequence frames = new();
+        bool terminal = false;
+
         await foreach (SourceProgress step in progress.WithCancellation(cancellationToken))
         {
-            object payload = step.Level == "done" && workspaces.Get(owner, step.Text) is SourceWorkspaceSummary summary
-                ? new { level = "done", workspace = summary }
-                : new { level = step.Level, text = step.Text };
+            Dictionary<string, object?> frame =
+                step.Level == "done" && workspaces.Get(owner, step.Text) is SourceWorkspaceSummary summary
+                    ? WorkbenchProgressFrame.Create(
+                        frames,
+                        "done",
+                        string.Empty,
+                        step.Signal,
+                        new Dictionary<string, object?> { ["workspace"] = summary })
+                    : WorkbenchProgressFrame.Create(frames, step.Level, step.Text, step.Signal);
 
-            await context.Response.WriteAsync($"data: {JsonSerializer.Serialize(payload, JsonOptions)}\n\n", cancellationToken);
-            await context.Response.Body.FlushAsync(cancellationToken);
+            terminal |= step.Signal?.State is ProgressState.Completed or ProgressState.Failed;
+            await WriteFrameAsync(context, frame, cancellationToken);
         }
+
+        if (terminal)
+        {
+            return;
+        }
+
+        // The enumerator finished without either outcome. Saying so is the honest frame: the browser
+        // would otherwise have to guess, and a stopped stream is not a successful copy.
+        await WriteFrameAsync(
+            context,
+            WorkbenchProgressFrame.Create(
+                frames,
+                "error",
+                "The copy stopped before it reported an outcome. Nothing was kept.",
+                new ProgressSignal(
+                    ProgressOperations.SourceAcquisition,
+                    ProgressActions.SourceFailed,
+                    ProgressState.Failed,
+                    AcquisitionPurpose,
+                    "The copy stopped before it reported an outcome.",
+                    "Nothing was kept. Start the copy again.")),
+            cancellationToken);
     }
 
     private static readonly JsonSerializerOptions JsonOptions =
@@ -386,10 +543,82 @@ internal static class WorkbenchEndpoints
     /// Workspace ownership comes from the Container Apps authentication header only. It is never
     /// taken from the request body, so one signed-in user cannot address another user's copy.
     /// </summary>
-    private static string Owner(HttpContext context) =>
-        context.Request.Headers["X-MS-CLIENT-PRINCIPAL-ID"].FirstOrDefault() is { Length: > 0 } principal
-            ? principal
-            : "local-development";
+    private static bool TryOwner(
+        HttpContext context,
+        bool entraAuthenticationConfigured,
+        out string owner)
+    {
+        if (!entraAuthenticationConfigured)
+        {
+            owner = "local-development";
+            return true;
+        }
+
+        owner = context.Request.Headers["X-MS-CLIENT-PRINCIPAL-ID"].FirstOrDefault() ?? string.Empty;
+        return !string.IsNullOrWhiteSpace(owner);
+    }
+
+    /// <summary>
+    /// The authenticated caller and the roles the host says they hold.
+    ///
+    /// Both come from the Container Apps authentication headers, which the platform overwrites on every
+    /// inbound request. No request body is consulted: a caller who could name their own roles would be
+    /// granting themselves authority. A principal header this method cannot parse yields no roles, so an
+    /// unreadable claim set denies rather than defaults.
+    /// </summary>
+    private static bool TryActor(
+        HttpContext context,
+        bool entraAuthenticationConfigured,
+        out WorkbenchActor actor)
+    {
+        if (!TryOwner(context, entraAuthenticationConfigured, out string owner))
+        {
+            actor = new WorkbenchActor(string.Empty, []);
+            return false;
+        }
+
+        actor = new WorkbenchActor(owner, entraAuthenticationConfigured ? Roles(context) : []);
+        return true;
+    }
+
+    private static IReadOnlyList<string> Roles(HttpContext context)
+    {
+        string? encoded = context.Request.Headers["X-MS-CLIENT-PRINCIPAL"].FirstOrDefault();
+        if (string.IsNullOrEmpty(encoded) || encoded.Length > 32_768)
+        {
+            return [];
+        }
+
+        try
+        {
+            using JsonDocument principal = JsonDocument.Parse(Convert.FromBase64String(encoded));
+            if (!principal.RootElement.TryGetProperty("claims", out JsonElement claims) ||
+                claims.ValueKind != JsonValueKind.Array)
+            {
+                return [];
+            }
+
+            return
+            [.. claims.EnumerateArray()
+                .Where(claim => claim.ValueKind == JsonValueKind.Object
+                    && claim.TryGetProperty("typ", out JsonElement type)
+                    && type.ValueKind == JsonValueKind.String
+                    && IsRoleClaimType(type.GetString()))
+                .Select(claim => claim.TryGetProperty("val", out JsonElement value) && value.ValueKind == JsonValueKind.String
+                    ? value.GetString()
+                    : null)
+                .OfType<string>()
+                .Where(role => role.Length is > 0 and <= 256)
+                .Distinct(StringComparer.OrdinalIgnoreCase)];
+        }
+        catch (Exception exception) when (exception is FormatException or JsonException)
+        {
+            return [];
+        }
+    }
+
+    private static bool IsRoleClaimType(string? type) =>
+        type is "roles" or "role" or "http://schemas.microsoft.com/ws/2008/06/identity/claims/role";
 
     /// <summary>Reports presence only. The connection string value is never read into the response.</summary>
     private static bool ApplicationInsightsConfigured() =>

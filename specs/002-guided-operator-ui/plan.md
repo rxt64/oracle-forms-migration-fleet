@@ -9,24 +9,27 @@ Progressively restyle the existing React 19 workbench instead of replacing its A
 - `Guidance.tsx`: typed registry for step, field, choice, action, status, metric, navigation, and glossary help.
 - `InfoTip.tsx`: accessible help trigger and viewport-aware popover behavior.
 - `WizardApp.tsx`: shell, navigation, breadcrumb, command bar, guided copy, accurate capability and approval language.
-- `MatrixConsole.tsx`: calm activity dialog, real event transcript, honest connection/request boundary.
+- `MatrixConsole.tsx`: explanatory activity dialog driven by typed progress state, with raw output collapsed.
 - `portal.css`: cohesive dark tokens and responsive layout replacing decorative overrides.
+- `ProgressSignal.cs`, `SourceWorkspaceService.cs`, `MigrationExecutor.cs`, and `WorkbenchEndpoints.cs`: additive typed activity fields and ordered wire frames.
+- `tests/e2e` and `playwright.config.ts`: real-host Chromium checks with browser-only stream fixtures.
 
 ## Contracts And Boundaries
 
-- Keep request and response types in `types.ts` unchanged.
-- Keep source acquisition and execution calls in `sourceClient.ts` unchanged.
+- Keep migration request and result types unchanged; extend only progress frames with additive typed fields.
+- Keep source acquisition and execution endpoint behavior unchanged while preserving legacy `level` and `text` fields.
 - Do not add tenant selectors, source connectors, persistence, cancellation, or approval controls without matching backend contracts.
 - The current local-storage draft remains session/browser convenience and is never described as server autosave.
 - Typed approver names remain plan annotations only.
 - Raw server lines are technical details, not migration progress percentages.
+- Typed counts are producer-measured facts. Message counts describe the transcript only.
 
 ## Verification
 
 - TypeScript and Vite production build.
-- Focused component/browser tests for help Escape/outside dismissal, activity close/return behavior, validation focus, and truthful labels.
+- Checked-in Playwright tests for pointer-pinned help, streaming focus, operation outcomes, source-switch races, result disclosures, validation focus, and truthful labels.
 - Playwright screenshots and horizontal-overflow assertions at desktop and 390 px.
-- Automated accessibility scan plus manual keyboard, 200% zoom, reduced-motion, and forced-colors checks.
+- Axe scans plus separate manual keyboard, browser-zoom, screen-reader, reduced-motion, and forced-colors checks.
 - Full .NET solution tests because the UI is bundled into the host application.
 
 ## Rollout

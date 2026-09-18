@@ -287,6 +287,16 @@ const ENTRIES = {
     term: "Theme",
     body: "Switches between the dark and light versions of the same interface. The choice is remembered in this browser only.",
   },
+  "action.editSetup": {
+    category: "action",
+    term: "Edit setup",
+    body: "Returns to the five setup steps with your answers intact. The current plan and any run result are discarded, because they describe the setup as it was.",
+  },
+  "action.rawOutput": {
+    category: "action",
+    term: "Raw server output",
+    body: "Every line the server sent, in order, including tool output such as git's own progress. It is collapsed because the summary above already states what is happening; open it when you need the detail behind that summary.",
+  },
 
   // ------------------------------------------------------------------ statuses
   "status.planningReady": {
@@ -329,6 +339,11 @@ const ENTRIES = {
     term: "Active",
     body: "This service has been reached at runtime by this workbench. Components without that evidence are shown as not configured rather than assumed working.",
   },
+  "status.runInterrupted": {
+    category: "status",
+    term: "Interrupted or unknown",
+    body: "The progress stream stopped without the server declaring an outcome. That is not success and not a reported failure: what the server did after the last message is not known from the browser. Anything shown is partial.",
+  },
 
   // ------------------------------------------------------------------- metrics
   "metric.stagesReady": {
@@ -355,6 +370,41 @@ const ENTRIES = {
     category: "metric",
     term: "Required inputs ready",
     body: "How many checklist requirements have at least one item ticked. You can generate a plan without meeting them all; each unmet one becomes a blocker.",
+  },
+  "metric.activityMessages": {
+    category: "metric",
+    term: "Activity messages",
+    body: "How many progress and completion messages the server sent. It counts messages, not files, phases or artifacts \u2014 a single step can send several.",
+  },
+  "metric.discoveryMessages": {
+    category: "metric",
+    term: "Discovery messages",
+    body: "How many messages reported something recognised in your source. It counts messages, not files. Actual file counts appear under what the server counted.",
+  },
+  "metric.warningMessages": {
+    category: "metric",
+    term: "Warning messages",
+    body: "How many messages the server marked as a warning or a skipped step. A warning does not stop the operation; read the transcript for what it was.",
+  },
+  "metric.errorMessages": {
+    category: "metric",
+    term: "Error messages",
+    body: "How many messages the server marked as an error. One error can stop an operation, so read the state above rather than inferring an outcome from this number.",
+  },
+  "metric.serverCounted": {
+    category: "metric",
+    term: "What the server counted",
+    body: "Totals the server measured and sent as numbers, not figures read out of a message. When the operation did not finish these are partial: they are what had been counted when the transcript stopped.",
+  },
+  "metric.phasesExecuted": {
+    category: "metric",
+    term: "Phases that ran",
+    body: "How many authorised phases an adapter actually executed in this run, out of the phases the plan contained. Skipped and unimplemented phases are counted separately below.",
+  },
+  "metric.filesWritten": {
+    category: "metric",
+    term: "Files written",
+    body: "How many files this run wrote into your private session workspace. Writing a file is not compiling it, running it, or deploying it.",
   },
 
   // ------------------------------------------------------------------ glossary

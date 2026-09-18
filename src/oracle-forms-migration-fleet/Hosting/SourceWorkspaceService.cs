@@ -1,15 +1,24 @@
 // Copyright (c) Microsoft. All rights reserved.
 
 using System.Collections.Concurrent;
+using System.Buffers.Binary;
 using System.Diagnostics;
 using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
+using OracleFormsMigrationFleet.Fleet;
+using OracleFormsMigrationFleet.Fleet.Execution;
 
 namespace OracleFormsMigrationFleet.Hosting;
 
-/// <summary>A single acquisition step reported back to the operator console as it happens.</summary>
-public sealed record SourceProgress(string Level, string Text);
+/// <summary>
+/// A single acquisition step reported back to the operator console as it happens.
+///
+/// <paramref name="Signal"/> is the typed framing the browser renders. Lines that carry none are
+/// raw tool output — git's own progress, for instance — and stay inspectable detail rather than
+/// something the summary is allowed to interpret.
+/// </summary>
+public sealed record SourceProgress(string Level, string Text, ProgressSignal? Signal = null);
 
 public sealed record SourceArtifact(string Kind, int Count, string Example);
 
@@ -23,6 +32,16 @@ public sealed record SourceWorkspaceSummary(
     IReadOnlyList<SourceArtifact> Artifacts,
     DateTimeOffset AcquiredUtc,
     DateTimeOffset ExpiresUtc);
+
+/// <summary>
+/// What the server knows about an owned source copy, including facts the browser is never given.
+///
+/// <paramref name="SnapshotHash"/> identifies the exact bytes that were acquired. It is server-only
+/// metadata: an authorization is bound to it so a grant obtained against one source cannot be replayed
+/// against a different one, and it is deliberately absent from <see cref="SourceWorkspaceSummary"/>,
+/// which is serialized to the operator console.
+/// </summary>
+public sealed record SourceWorkspaceFacts(SourceWorkspaceSummary Summary, string SnapshotHash);
 
 /// <summary>
 /// Acquires a read-only copy of customer source into a per-session sandbox.
@@ -61,7 +80,23 @@ public sealed class SourceWorkspaceService : IDisposable
         _sweeper = new Timer(_ => Sweep(), null, TimeSpan.FromMinutes(10), TimeSpan.FromMinutes(10));
     }
 
-    private sealed record WorkspaceRecord(string Owner, string Path, SourceWorkspaceSummary Summary);
+    private sealed record WorkspaceRecord(string Owner, string Path, SourceWorkspaceSummary Summary, string SnapshotHash);
+    private sealed record ScopedSource(SourceWorkspaceSummary Summary, string Path);
+
+    private const string AcquisitionPurpose =
+        "Taking a private read-only copy of your source so the fleet has something it can read.";
+
+    private static ProgressSignal Acquiring(string action, string observed, string nextAction) =>
+        new(ProgressOperations.SourceAcquisition, action, ProgressState.Running, AcquisitionPurpose, observed, nextAction);
+
+    private static ProgressSignal AcquisitionFailed(string observed) =>
+        new(
+            ProgressOperations.SourceAcquisition,
+            ProgressActions.SourceFailed,
+            ProgressState.Failed,
+            AcquisitionPurpose,
+            observed,
+            "Nothing was kept. Correct the problem above and start the copy again.");
 
     /// <summary>True when the address is an https URL on a supported host with no embedded credentials.</summary>
     public static bool TryParseRepositoryUrl(string? raw, out Uri? repository, out string error)
@@ -112,6 +147,66 @@ public sealed class SourceWorkspaceService : IDisposable
             : null;
 
     /// <summary>
+    /// Everything the server knows about a copy the caller owns, for server-side decisions only. A
+    /// caller who does not own the workspace gets null rather than any fact about it.
+    /// </summary>
+    public SourceWorkspaceFacts? Describe(string owner, string workspaceId) =>
+        _workspaces.TryGetValue(workspaceId, out WorkspaceRecord? record) &&
+        string.Equals(record.Owner, owner, StringComparison.Ordinal)
+            ? new SourceWorkspaceFacts(record.Summary, record.SnapshotHash)
+            : null;
+
+    /// <summary>
+    /// Server-owned facts for the exact source folder a run selected. Files elsewhere in the same
+    /// repository cannot satisfy evidence or change the authorization binding for this scope.
+    /// </summary>
+    public SourceWorkspaceFacts? Describe(string owner, string workspaceId, string sourceRoot)
+    {
+        ScopedSource? scoped = Scope(owner, workspaceId, sourceRoot);
+        return scoped is null ? null : new SourceWorkspaceFacts(scoped.Summary, SnapshotHash(scoped.Path));
+    }
+
+    /// <summary>Scoped source inventory for planning, which needs no content digest.</summary>
+    public SourceWorkspaceSummary? DescribeSummary(string owner, string workspaceId, string sourceRoot) =>
+        Scope(owner, workspaceId, sourceRoot)?.Summary;
+
+    private ScopedSource? Scope(string owner, string workspaceId, string sourceRoot)
+    {
+        if (!_workspaces.TryGetValue(workspaceId, out WorkspaceRecord? record) ||
+            !string.Equals(record.Owner, owner, StringComparison.Ordinal) ||
+            WorkspacePath.Validate(sourceRoot, "Source folder") is not null)
+        {
+            return null;
+        }
+
+        string normalized = WorkspacePath.Normalize(sourceRoot);
+        string root = Path.GetFullPath(record.Path);
+        string selected = Path.GetFullPath(Path.Combine(root, normalized.Replace('/', Path.DirectorySeparatorChar)));
+        string prefix = root.EndsWith(Path.DirectorySeparatorChar) ? root : root + Path.DirectorySeparatorChar;
+        if ((!string.Equals(selected, root, StringComparison.Ordinal) && !selected.StartsWith(prefix, StringComparison.Ordinal)) ||
+            !Directory.Exists(selected))
+        {
+            return null;
+        }
+
+        try
+        {
+            SourceInventory inventory = SourceInventory.Build(selected, MaxFiles, MaxBytes);
+            return new ScopedSource(record.Summary with
+            {
+                FileCount = inventory.FileCount,
+                ByteCount = inventory.ByteCount,
+                SourceRoot = normalized,
+                Artifacts = inventory.Artifacts,
+            }, selected);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Absolute path of a workspace the caller owns, for server-side work only. The value is never
     /// returned to a browser, and a caller who does not own the workspace gets null rather than a path.
     /// </summary>
@@ -149,19 +244,21 @@ public sealed class SourceWorkspaceService : IDisposable
     {
         if (!TryParseRepositoryUrl(repositoryUrl, out Uri? repository, out string error))
         {
-            yield return new SourceProgress("error", error);
+            yield return new SourceProgress("error", error, AcquisitionFailed(error));
             yield break;
         }
 
         if (branch is not null && !IsSafeRefName(branch))
         {
-            yield return new SourceProgress("error", "That branch name contains characters that are not allowed.");
+            const string BranchRejected = "That branch name contains characters that are not allowed.";
+            yield return new SourceProgress("error", BranchRejected, AcquisitionFailed(BranchRejected));
             yield break;
         }
 
         if (!TryReserveDisk())
         {
-            yield return new SourceProgress("error", "The workbench is holding too many source copies right now. Delete one and try again.");
+            const string NoRoom = "The workbench is holding too many source copies right now. Delete one and try again.";
+            yield return new SourceProgress("error", NoRoom, AcquisitionFailed(NoRoom));
             yield break;
         }
 
@@ -169,8 +266,14 @@ public sealed class SourceWorkspaceService : IDisposable
         string path = Path.Combine(_root, workspaceId);
         Directory.CreateDirectory(path);
 
-        yield return new SourceProgress("info", $"Workspace {workspaceId} created for this session.");
-        yield return new SourceProgress("info", $"Connecting to {repository!.Host}...");
+        yield return new SourceProgress(
+            "info",
+            $"Workspace {workspaceId} created for this session.",
+            Acquiring(ProgressActions.WorkspaceCreated, "A private session folder was created.", "Connecting to the repository host."));
+        yield return new SourceProgress(
+            "info",
+            $"Connecting to {repository!.Host}...",
+            Acquiring(ProgressActions.RepositoryClone, $"Copying from {repository.Host}.", "Indexing the copied files once the copy finishes."));
 
         List<string> arguments =
         [
@@ -206,14 +309,21 @@ public sealed class SourceWorkspaceService : IDisposable
         if (!cloned)
         {
             DeleteDirectory(path);
-            yield return new SourceProgress("error", "Clone failed. Private repositories are not supported yet; export a zip instead.");
+            const string CloneFailed = "Clone failed. Private repositories are not supported yet; export a zip instead.";
+            yield return new SourceProgress("error", CloneFailed, AcquisitionFailed(CloneFailed));
             yield break;
         }
 
         // The .git directory is only needed to fetch. Dropping it removes any chance of a later
         // command pushing back to the customer's remote.
         DeleteDirectory(Path.Combine(path, ".git"));
-        yield return new SourceProgress("info", "Remote metadata removed. This copy cannot push back to your repository.");
+        yield return new SourceProgress(
+            "info",
+            "Remote metadata removed. This copy cannot push back to your repository.",
+            Acquiring(
+                ProgressActions.RemoteDetached,
+                "Git remote metadata was deleted, so the copy cannot push back to your repository.",
+                "Indexing the copied files."));
 
         string label = $"{repository.Host}{repository.AbsolutePath.TrimEnd('/')}";
         await foreach (SourceProgress progress in FinishAsync(owner, workspaceId, path, repository.ToString(), label, cancellationToken))
@@ -230,7 +340,8 @@ public sealed class SourceWorkspaceService : IDisposable
     {
         if (!TryReserveDisk())
         {
-            yield return new SourceProgress("error", "The workbench is holding too many source copies right now. Delete one and try again.");
+            const string NoRoom = "The workbench is holding too many source copies right now. Delete one and try again.";
+            yield return new SourceProgress("error", NoRoom, AcquisitionFailed(NoRoom));
             yield break;
         }
 
@@ -239,8 +350,14 @@ public sealed class SourceWorkspaceService : IDisposable
         Directory.CreateDirectory(path);
         string fullRoot = Path.GetFullPath(path) + Path.DirectorySeparatorChar;
 
-        yield return new SourceProgress("info", $"Workspace {workspaceId} created for this session.");
-        yield return new SourceProgress("info", $"Opening {Sanitize(fileName)}...");
+        yield return new SourceProgress(
+            "info",
+            $"Workspace {workspaceId} created for this session.",
+            Acquiring(ProgressActions.WorkspaceCreated, "A private session folder was created.", "Opening the archive."));
+        yield return new SourceProgress(
+            "info",
+            $"Opening {Sanitize(fileName)}...",
+            Acquiring(ProgressActions.ArchiveExtract, $"Expanding {Sanitize(fileName)}.", "Indexing the expanded files once extraction finishes."));
 
         bool failed = false;
         string failure = string.Empty;
@@ -304,11 +421,16 @@ public sealed class SourceWorkspaceService : IDisposable
         if (failed)
         {
             DeleteDirectory(path);
-            yield return new SourceProgress("error", failure);
+            yield return new SourceProgress("error", failure, AcquisitionFailed(failure));
             yield break;
         }
 
-        yield return new SourceProgress("info", $"Expanded {files} files.");
+        yield return new SourceProgress(
+            "info",
+            $"Expanded {files} files.",
+            Acquiring(ProgressActions.ArchiveExtract, $"{files} files were expanded from the archive.", "Indexing the expanded files.")
+                with
+            { ArtifactKind = "ExtractedFile", ArtifactCount = files });
 
         await foreach (SourceProgress progress in FinishAsync(owner, workspaceId, path, Sanitize(fileName), Sanitize(fileName), cancellationToken))
         {
@@ -324,7 +446,10 @@ public sealed class SourceWorkspaceService : IDisposable
         string label,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        yield return new SourceProgress("info", "Indexing files...");
+        yield return new SourceProgress(
+            "info",
+            "Indexing files...",
+            Acquiring(ProgressActions.Index, "Reading the copied file names to recognise Oracle artifacts.", "Reporting what was recognised."));
 
         // This directory is owned by the workbench. A clone or archive may contain a path with the
         // same name, but supplied content must never be mistaken for compiler-accepted run state.
@@ -343,27 +468,51 @@ public sealed class SourceWorkspaceService : IDisposable
         if (inventory is null)
         {
             DeleteDirectory(path);
-            yield return new SourceProgress("error", "The copied files could not be read.");
+            const string Unreadable = "The copied files could not be read.";
+            yield return new SourceProgress("error", Unreadable, AcquisitionFailed(Unreadable));
             yield break;
         }
 
         if (inventory.Truncated)
         {
-            yield return new SourceProgress("warn", "This source is very large, so only part of it was indexed.");
+            yield return new SourceProgress(
+                "warn",
+                "This source is very large, so only part of it was indexed.",
+                Acquiring(
+                    ProgressActions.Index,
+                    "The source exceeded the indexing limits, so only part of it was read.",
+                    "Treat the recognised list as incomplete when you fill in the source checklist."));
         }
 
         foreach (SourceArtifact artifact in inventory.Artifacts)
         {
-            yield return new SourceProgress("found", $"{artifact.Count} x {artifact.Kind} ({artifact.Example})");
+            yield return new SourceProgress(
+                "found",
+                $"{artifact.Count} x {artifact.Kind} ({artifact.Example})",
+                Acquiring(
+                    ProgressActions.ArtifactCounted,
+                    $"{artifact.Count} {artifact.Kind} file(s) recognised by name, for example {artifact.Example}.",
+                    "Matching source-checklist items will be ticked for you when the copy finishes.")
+                    with
+                { ArtifactKind = artifact.Kind, ArtifactCount = artifact.Count });
         }
 
         if (inventory.Artifacts.Count == 0)
         {
-            yield return new SourceProgress("warn", "No Oracle Forms or PL/SQL artifacts were recognised.");
+            yield return new SourceProgress(
+                "warn",
+                "No Oracle Forms or PL/SQL artifacts were recognised.",
+                Acquiring(
+                    ProgressActions.Index,
+                    "No Oracle Forms or PL/SQL artifacts were recognised by file name.",
+                    "Fill in the source checklist yourself; nothing was ticked for you."));
         }
 
         MarkReadOnly(path);
-        yield return new SourceProgress("info", "Copy locked read-only. The workbench cannot modify it.");
+        yield return new SourceProgress(
+            "info",
+            "Copy locked read-only. The workbench cannot modify it.",
+            Acquiring(ProgressActions.LockedReadOnly, "The copy was locked read-only.", "Finishing the copy."));
 
         DateTimeOffset now = DateTimeOffset.UtcNow;
         var summary = new SourceWorkspaceSummary(
@@ -377,8 +526,19 @@ public sealed class SourceWorkspaceService : IDisposable
             now,
             now.Add(Lifetime));
 
-        _workspaces[workspaceId] = new WorkspaceRecord(owner, path, summary);
-        yield return new SourceProgress("done", workspaceId);
+        _workspaces[workspaceId] = new WorkspaceRecord(owner, path, summary, SnapshotHash(path));
+        yield return new SourceProgress(
+            "done",
+            workspaceId,
+            new ProgressSignal(
+                ProgressOperations.SourceAcquisition,
+                ProgressActions.SourceReady,
+                ProgressState.Completed,
+                AcquisitionPurpose,
+                $"{inventory.FileCount} file(s) copied and locked read-only; {inventory.Artifacts.Count} Oracle artifact kind(s) recognised.",
+                "Continue the setup. The copy is deleted automatically four hours from now.",
+                ArtifactKind: "RecognisedArtifactKind",
+                ArtifactCount: inventory.Artifacts.Count));
     }
 
     private static async IAsyncEnumerable<SourceProgress> RunGitAsync(
@@ -502,6 +662,87 @@ public sealed class SourceWorkspaceService : IDisposable
 
     private static string NewWorkspaceId() =>
         Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
+
+    /// <summary>
+    /// Deterministic identity of the acquired bytes, over sorted relative paths plus each file's length
+    /// and content. Two acquisitions of the same tree agree; any changed, added, renamed, or removed file
+    /// changes the value.
+    ///
+    /// The digest is one-way and never leaves the server, so it identifies the source without disclosing
+    /// anything about it. <see cref="WorkbenchExecution.OutputRoot"/> is excluded because it is the
+    /// workbench's own output area: a run writing into it must not change the identity of what it read.
+    /// Enumeration stops at the same intake limits acquisition used, and a tree that exceeds them hashes
+    /// to a value that cannot match any bounded read, so an oversized source can never be authorized.
+    /// </summary>
+    private static string SnapshotHash(string path)
+    {
+        string prefix = Path.GetFullPath(path) + Path.DirectorySeparatorChar;
+        string excluded = WorkbenchExecution.OutputRoot + "/";
+
+        List<string> relativePaths;
+        try
+        {
+            relativePaths =
+            [.. Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories)
+                .Select(file => Path.GetFullPath(file))
+                .Where(file => file.StartsWith(prefix, StringComparison.Ordinal))
+                .Select(file => file[prefix.Length..].Replace('\\', '/'))
+                .Where(relative => !relative.StartsWith(excluded, StringComparison.Ordinal))
+                .Take(MaxFiles + 1)];
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return UnhashableSource;
+        }
+
+        if (relativePaths.Count > MaxFiles)
+        {
+            return UnhashableSource;
+        }
+
+        relativePaths.Sort(StringComparer.Ordinal);
+
+        using IncrementalHash digest = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        byte[] buffer = new byte[64 * 1024];
+        Span<byte> length = stackalloc byte[sizeof(long)];
+        long total = 0;
+
+        foreach (string relative in relativePaths)
+        {
+            FileInfo info = new(Path.Combine(path, relative.Replace('/', Path.DirectorySeparatorChar)));
+            total += info.Length;
+            if (total > MaxBytes)
+            {
+                return UnhashableSource;
+            }
+
+            digest.AppendData(Encoding.UTF8.GetBytes(relative));
+            BinaryPrimitives.WriteInt64BigEndian(length, info.Length);
+            digest.AppendData(length);
+
+            try
+            {
+                using FileStream stream = info.OpenRead();
+                int read;
+                while ((read = stream.Read(buffer, 0, buffer.Length)) > 0)
+                {
+                    digest.AppendData(buffer, 0, read);
+                }
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                return UnhashableSource;
+            }
+        }
+
+        return Convert.ToHexString(digest.GetHashAndReset()).ToLowerInvariant();
+    }
+
+    /// <summary>
+    /// Stands in for a snapshot that could not be read within the intake limits. It is not a digest, so
+    /// it matches nothing an authorization could ever have been issued against.
+    /// </summary>
+    private const string UnhashableSource = "unhashable";
 
     private static void MarkReadOnly(string path)
     {
