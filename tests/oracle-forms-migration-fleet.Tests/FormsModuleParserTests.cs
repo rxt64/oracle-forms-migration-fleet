@@ -138,6 +138,178 @@ public class FormsModuleParserTests
     }
 
     [Fact]
+    public void Trigger_bodies_are_preserved_from_attribute_and_element_exports()
+    {
+        FormsModule attributeModule = Assert.Single(FormsModuleParser.Parse(Export).Modules);
+        FormsModule elementModule = Assert.Single(FormsModuleParser.Parse(RealExport).Modules);
+
+        Assert.Equal("BEGIN EXECUTE_QUERY; END;", Assert.Single(attributeModule.Triggers).Body);
+        Assert.Equal(FormsTriggerBodyEncoding.Attribute, Assert.Single(attributeModule.Triggers).BodyEncoding);
+        Assert.Equal(
+            "LEGACY_BANKING_API.APPROVE_REQUEST(1, 2);",
+            Assert.Single(attributeModule.Blocks[0].Triggers).Body);
+        Assert.Equal("BEGIN NULL; END;", Assert.Single(elementModule.Triggers).Body?.Trim());
+        Assert.Equal(FormsTriggerBodyEncoding.Element, Assert.Single(elementModule.Triggers).BodyEncoding);
+    }
+
+    [Fact]
+    public void Identical_trigger_identity_with_changed_body_remains_distinguishable()
+    {
+        string changed = Export.Replace(
+            "BEGIN EXECUTE_QUERY; END;",
+            "BEGIN ENTER_QUERY; END;",
+            StringComparison.Ordinal);
+
+        FormsTrigger original = Assert.Single(FormsModuleParser.Parse(Export).Modules[0].Triggers);
+        FormsTrigger modified = Assert.Single(FormsModuleParser.Parse(changed).Modules[0].Triggers);
+
+        Assert.Equal(original.Name, modified.Name);
+        Assert.Equal(original.Scope, modified.Scope);
+        Assert.NotEqual(original.Body, modified.Body);
+    }
+
+    [Fact]
+    public void Item_triggers_retain_the_item_scope()
+    {
+        FormsModule module = Assert.Single(FormsModuleParser.Parse("""
+            <FormModule xmlns="http://xmlns.oracle.com/Forms" Name="ORDER_ENTRY">
+              <Block Name="ORDER_BLOCK" QueryDataSourceName="ORDERS">
+                <Item Name="QUANTITY">
+                  <Trigger Name="WHEN-VALIDATE-ITEM"><TriggerText>BEGIN VALIDATE_QUANTITY; END;</TriggerText></Trigger>
+                </Item>
+                <Item Name="PRICE">
+                  <Trigger Name="WHEN-VALIDATE-ITEM"><TriggerText>BEGIN VALIDATE_PRICE; END;</TriggerText></Trigger>
+                </Item>
+              </Block>
+            </FormModule>
+            """).Modules);
+
+        Assert.Equal(
+            ["ORDER_BLOCK.QUANTITY", "ORDER_BLOCK.PRICE"],
+            module.Blocks[0].Triggers.Select(trigger => trigger.Scope));
+        Assert.Equal(2, module.Blocks[0].Triggers.Select(trigger => trigger.Body).Distinct().Count());
+    }
+
+    [Theory]
+    [InlineData("TriggerText=\"BEGIN ATTRIBUTE_BODY; END;\"><TriggerText>BEGIN ELEMENT_BODY; END;</TriggerText>")]
+    [InlineData("><TriggerText>BEGIN FIRST; END;</TriggerText><TriggerText>BEGIN SECOND; END;</TriggerText>")]
+    [InlineData("><TriggerText>BEGIN <Nested>NULL;</Nested> END;</TriggerText>")]
+    public void Ambiguous_or_nested_trigger_text_is_refused(string bodyShape)
+    {
+        FormsModuleParse parsed = FormsModuleParser.Parse($"""
+            <FormModule xmlns="http://xmlns.oracle.com/Forms" Name="ORDER_ENTRY">
+              <Trigger Name="WHEN-NEW-FORM-INSTANCE" {bodyShape}</Trigger>
+            </FormModule>
+            """);
+
+        Assert.Empty(parsed.Modules);
+        Assert.Contains(parsed.Findings, finding => finding.Severity == ConversionSeverity.Unsupported);
+    }
+
+      [Theory]
+      [InlineData("TriggerText=\"   \"")]
+      [InlineData("triggertext=\"BEGIN NULL; END;\"")]
+      [InlineData("><TriggerText>   </TriggerText>")]
+      [InlineData("><triggertext>BEGIN NULL; END;</triggertext>")]
+      public void Explicit_blank_or_mis_cased_trigger_text_is_refused(string bodyShape)
+      {
+        FormsModuleParse parsed = FormsModuleParser.Parse($"""
+          <FormModule xmlns="http://xmlns.oracle.com/Forms" Name="ORDER_ENTRY">
+            <Trigger Name="WHEN-NEW-FORM-INSTANCE" {bodyShape}</Trigger>
+          </FormModule>
+          """);
+
+        Assert.Empty(parsed.Modules);
+        Assert.Contains(parsed.Findings, finding => finding.Severity == ConversionSeverity.Unsupported);
+      }
+
+      [Fact]
+      public void Duplicate_source_trigger_identity_is_an_unsupported_module_finding()
+      {
+        FormsModuleParse parsed = FormsModuleParser.Parse("""
+          <FormModule xmlns="http://xmlns.oracle.com/Forms" Name="ORDER_ENTRY">
+            <Trigger Name="WHEN-NEW-FORM-INSTANCE" TriggerText="BEGIN FIRST; END;"/>
+            <Trigger Name="WHEN-NEW-FORM-INSTANCE" TriggerText="BEGIN SECOND; END;"/>
+          </FormModule>
+          """);
+
+        Assert.Single(parsed.Modules);
+        Assert.Contains(parsed.Findings, finding =>
+          finding.Severity == ConversionSeverity.Unsupported
+          && finding.Category == "Forms module"
+          && finding.Reason.Contains("more than one trigger", StringComparison.Ordinal));
+      }
+
+      [Theory]
+      [InlineData("<Block Name=\"DUPLICATE\"/><Block Name=\"DUPLICATE\"/>", "more than one block")]
+      [InlineData("<Block Name=\"B\"><Item Name=\"DUPLICATE\"/><Item Name=\"DUPLICATE\"/></Block>", "more than one item")]
+      public void Duplicate_source_block_or_item_identity_is_an_unsupported_module_finding(string structure, string expected)
+      {
+        FormsModuleParse parsed = FormsModuleParser.Parse($"""
+          <FormModule xmlns="http://xmlns.oracle.com/Forms" Name="ORDER_ENTRY">
+            {structure}
+          </FormModule>
+          """);
+
+        Assert.Single(parsed.Modules);
+        Assert.Contains(parsed.Findings, finding =>
+          finding.Severity == ConversionSeverity.Unsupported
+          && finding.Category == "Forms module"
+          && finding.Reason.Contains(expected, StringComparison.Ordinal));
+      }
+
+      [Fact]
+      public void Source_module_count_beyond_the_reader_limit_is_refused_before_any_module_is_read()
+      {
+        string modules = string.Concat(Enumerable.Range(0, FormsIntermediateReader.MaxModules + 1)
+          .Select(index => $"<FormModule Name=\"M{index}\"/>"));
+
+        FormsModuleParse parsed = FormsModuleParser.Parse($"""
+          <Module xmlns="http://xmlns.oracle.com/Forms">{modules}</Module>
+          """);
+
+        Assert.Empty(parsed.Modules);
+        Assert.Contains(parsed.Findings, finding =>
+          finding.Severity == ConversionSeverity.Unsupported
+          && finding.Reason.Contains("5001 module entries", StringComparison.Ordinal));
+      }
+
+      [Fact]
+      public void Duplicate_modules_in_one_source_export_are_unsupported()
+      {
+        FormsModuleParse parsed = FormsModuleParser.Parse("""
+          <Module xmlns="http://xmlns.oracle.com/Forms">
+            <FormModule Name="DUPLICATE"/>
+            <FormModule Name="DUPLICATE"/>
+          </Module>
+          """);
+
+        Assert.Equal(2, parsed.Modules.Count);
+        Assert.Contains(parsed.Findings, finding =>
+          finding.Severity == ConversionSeverity.Unsupported
+          && finding.Category == "Forms module"
+          && finding.Reason.Contains("more than one module", StringComparison.Ordinal));
+      }
+
+      [Fact]
+      public void Source_child_count_beyond_the_reader_limit_is_an_unsupported_module_finding()
+      {
+        string items = string.Concat(Enumerable.Range(0, FormsIntermediateReader.MaxChildren + 1)
+          .Select(index => $"<Item Name=\"I{index}\"/>"));
+
+        FormsModuleParse parsed = FormsModuleParser.Parse($"""
+          <FormModule xmlns="http://xmlns.oracle.com/Forms" Name="ORDER_ENTRY">
+            <Block Name="B">{items}</Block>
+          </FormModule>
+          """);
+
+        Assert.Single(parsed.Modules);
+        Assert.Contains(parsed.Findings, finding =>
+          finding.Severity == ConversionSeverity.Unsupported
+          && finding.Reason.Contains("20001 item entries", StringComparison.Ordinal));
+      }
+
+    [Fact]
     public void A_document_type_definition_is_refused_rather_than_resolved()
     {
         // An export is untrusted input; resolving an external entity would read files off the host.
@@ -196,6 +368,7 @@ public class FormsModuleParserTests
     [InlineData("<evil:Block xmlns:evil=\"urn:example:evil\" Name=\"INJECTED\" QueryDataSourceName=\"SECRETS\"/>")]
     [InlineData("<evil:Item xmlns:evil=\"urn:example:evil\" Name=\"INJECTED\" ColumnName=\"PASSWORD_HASH\"/>")]
     [InlineData("<evil:Trigger xmlns:evil=\"urn:example:evil\" Name=\"WHEN-INJECTED\"/>")]
+    [InlineData("<evil:TriggerText xmlns:evil=\"urn:example:evil\">BEGIN NULL; END;</evil:TriggerText>")]
     [InlineData("<evil:ProgramUnit xmlns:evil=\"urn:example:evil\" Name=\"INJECTED\"/>")]
     [InlineData("<evil:LOV xmlns:evil=\"urn:example:evil\" Name=\"INJECTED\"/>")]
     [InlineData("<evil:AttachedLibrary xmlns:evil=\"urn:example:evil\" Name=\"INJECTED\"/>")]

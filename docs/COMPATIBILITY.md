@@ -87,8 +87,9 @@ generation for each intake family: Forms 6i (`6.0.8.28`), 9i (`9.0.2.0`), 10g (`
 and source-file provenance, IR authority metadata, and key generated Java and browser descriptor content. The existing negative
 matrix verifies that a binary-only estate fails closed for every family.
 
-With these five matrix rows and the reference-catalog checks, the current local solution passes all
-1,069 tests.
+These five matrix rows and the reference-catalog checks run as part of the complete local solution test suite.
+The exact total is reported by the current CI run rather than duplicated here, where it would become stale as
+unrelated regression coverage grows.
 
 Run the positive matrix locally with:
 

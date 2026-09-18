@@ -6,6 +6,30 @@ Notable changes to behaviour, with the reasoning that is not visible in a diff.
 
 ### Added
 
+- Repeatable guided-UI verification and server-owned API trust boundaries. Typed ordered activity events now
+  distinguish running, waiting, completed, failed, and interrupted outcomes without parsing log prose; raw output
+  starts collapsed, focus stays stable while frames arrive, and advanced result detail starts collapsed behind the
+  next safe action. A checked-in Playwright/axe suite runs the real local host in desktop and mobile Chromium and is
+  enforced by CI. Workbench planning and execution now discard client-created verification, approvals, signals, and
+  attestations; verified source facts and hashes are derived from the authenticated owner's exact selected workspace
+  folder. Sandbox and production writes remain unavailable until a trusted scoped authorization service exists, and
+  are rechecked immediately before any future side effect.
+
+- Guided operator workbench UI. The current five-step setup now uses an Azure-inspired dark shell,
+  business-language guidance, an auditable contextual-help registry, truthful capability states, and a
+  real-event activity pane without terminal decoration. Typed contacts remain pending planning notes and
+  manually selected source items remain unverified declarations, so this GUI cannot manufacture approval or
+  verification records. Desktop/mobile Playwright checks cover focus, overflow, reduced motion, forced colors,
+  and WCAG 2.2 automated rules; durable projects, authenticated approvals, and resumable jobs remain explicit
+  follow-up capabilities.
+
+- Oracle Forms trigger bodies now survive XML parsing and source normalization as inert, untrusted text in
+  Forms IR schema version 2. The IR records module, block, or item scope and whether Oracle supplied the body
+  as an XML attribute or child element. Ambiguous encodings, nested body markup, duplicate trigger identities,
+  per-trigger size overflow, and aggregate IR overflow fail closed. Retained bodies are never translated or
+  executed, are not browser-previewable, and remain explicitly unsupported until independent behavior tests
+  establish an equivalent implementation.
+
 - Azure-native innovation documentation and architecture package. The root README now follows a demo-first
   overview, architecture, stage, quick-start, deployment, security, cost, cleanup, and troubleshooting
   flow. Two self-contained Azure SVG diagrams and editable Excalidraw sources show the migration pipeline

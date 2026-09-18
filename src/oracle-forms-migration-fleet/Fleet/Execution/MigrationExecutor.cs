@@ -25,7 +25,14 @@ public enum PhaseExecutionState
     BlockedByDependency,
 }
 
-public sealed record ExecutionProgress(string Level, string Text);
+/// <summary>
+/// One line of run progress.
+///
+/// <paramref name="Signal"/> carries the typed framing the browser renders. Adapter chatter leaves it
+/// null and stays inspectable detail; the executor attaches a signal to the structural moments — the
+/// authorization, each phase transition — because those are what a summary is entitled to describe.
+/// </summary>
+public sealed record ExecutionProgress(string Level, string Text, ProgressSignal? Signal = null);
 
 public sealed record PhaseOutcome(
     MigrationPhase Phase,
@@ -55,12 +62,26 @@ public sealed record MigrationExecutionResult(
 /// </summary>
 public sealed class MigrationExecutor
 {
+    private const string RunPurpose =
+        "Running the phases the planner authorized and writing their output into your session workspace.";
+
     private readonly WorkspaceWriter _workspace;
     private readonly Dictionary<MigrationPhase, IPhaseAdapter> _adapters = [];
+    private readonly IPhaseMutationAuthorizer? _mutationAuthorizer;
 
-    public MigrationExecutor(string workspaceRoot, IEnumerable<IPhaseAdapter>? adapters = null)
+    /// <summary>
+    /// <paramref name="mutationAuthorizer"/> is consulted immediately before any phase that writes
+    /// outside the session workspace. Omitting it keeps the planner's decision as the only gate, which
+    /// is the contract in-process callers already have; a host that serves an untrusted caller supplies
+    /// one, and supplies one that denies when it cannot establish authority.
+    /// </summary>
+    public MigrationExecutor(
+        string workspaceRoot,
+        IEnumerable<IPhaseAdapter>? adapters = null,
+        IPhaseMutationAuthorizer? mutationAuthorizer = null)
     {
         _workspace = new WorkspaceWriter(workspaceRoot);
+        _mutationAuthorizer = mutationAuthorizer;
 
         foreach (IPhaseAdapter adapter in adapters ?? DefaultAdapters())
         {
@@ -224,9 +245,29 @@ public sealed class MigrationExecutor
             progress?.Invoke(entry);
         }
 
+        void ReportPhase(string level, string text, string action, string observed, string nextAction, int? artifactCount = null)
+        {
+            ExecutionProgress entry = new(level, text, new ProgressSignal(
+                ProgressOperations.MigrationRun,
+                action,
+                ProgressState.Running,
+                RunPurpose,
+                observed,
+                nextAction,
+                artifactCount is null ? null : "GeneratedFile",
+                artifactCount));
+            log.Add(entry);
+            progress?.Invoke(entry);
+        }
+
         bool canAttest = !string.IsNullOrWhiteSpace(operatorIdentity) && !FleetGuardrails.ContainsPotentialSecret(operatorIdentity);
 
-        Report("info", $"Planner authorized {plan.AuthorizedMode} of the requested {plan.RequestedMode} for {plan.EngagementId}/{plan.ApplicationName}.");
+        ReportPhase(
+            "info",
+            $"Planner authorized {plan.AuthorizedMode} of the requested {plan.RequestedMode} for {plan.EngagementId}/{plan.ApplicationName}.",
+            ProgressActions.PlanAuthorized,
+            $"The planner authorized {plan.AuthorizedMode} of the requested {plan.RequestedMode}.",
+            "Running each authorized phase in lifecycle order.");
 
         if (plan.Phases.Count == 0)
         {
@@ -250,7 +291,12 @@ public sealed class MigrationExecutor
             if (phase.Status != PhaseStatus.Planned)
             {
                 string detail = phase.Blockers.Count > 0 ? string.Join(" ", phase.Blockers) : "The planner did not authorize this phase.";
-                Report("skip", $"{phase.Phase}: {phase.Status}. {detail}");
+                ReportPhase(
+                    "skip",
+                    $"{phase.Phase}: {phase.Status}. {detail}",
+                    ProgressActions.PhaseSkipped,
+                    $"{phase.Phase} was not authorized, so no adapter was invoked.",
+                    "Clear the blockers on this phase and generate the plan again.");
                 outcomes.Add(new PhaseOutcome(phase.Phase, phase.Status, PhaseExecutionState.SkippedByPlanner, [], [], detail));
                 continue;
             }
@@ -258,7 +304,12 @@ public sealed class MigrationExecutor
             if (!_adapters.TryGetValue(phase.Phase, out IPhaseAdapter? adapter))
             {
                 const string Detail = "The phase is authorized but no execution adapter is registered for it. Nothing was generated and nothing was attested.";
-                Report("warn", $"{phase.Phase}: {Detail}");
+                ReportPhase(
+                    "warn",
+                    $"{phase.Phase}: {Detail}",
+                    ProgressActions.PhaseNoAdapter,
+                    $"{phase.Phase} is authorized but has no adapter here, so nothing was generated.",
+                    "This is a missing capability rather than a setup problem; the remaining phases continue.");
                 outcomes.Add(new PhaseOutcome(phase.Phase, phase.Status, PhaseExecutionState.AdapterNotImplemented, [], [], Detail));
                 continue;
             }
@@ -270,12 +321,49 @@ public sealed class MigrationExecutor
                     $"{blocking.Reason}. Running it anyway would generate from source nothing in this run adjudicated, so nothing was " +
                     "generated and nothing was attested.";
 
-                Report("error", $"{phase.Phase}: {detail}");
+                ReportPhase(
+                    "error",
+                    $"{phase.Phase}: {detail}",
+                    ProgressActions.PhaseBlocked,
+                    $"{phase.Phase} was not run because {blocking.Prerequisite} did not complete in this run.",
+                    $"Resolve {blocking.Prerequisite} first; nothing was generated for this phase.");
                 outcomes.Add(new PhaseOutcome(phase.Phase, phase.Status, PhaseExecutionState.BlockedByDependency, [], [detail], detail));
                 continue;
             }
 
-            Report("info", $"{phase.Phase}: running {adapter.GetType().Name}.");
+            // Checked here rather than at plan time: the planner answers what the run may do, and this
+            // answers whether the side effect is still authorized at the moment it would happen.
+            if (phase.Mutation is MutationClass.SandboxDatabaseWrite or MutationClass.ProductionWrite &&
+                _mutationAuthorizer is not null)
+            {
+                MutationAuthorizationResult decision = await _mutationAuthorizer.AuthorizeAsync(
+                    new MutationAuthorizationRequest(phase.Phase, phase.Mutation, request, operatorIdentity),
+                    cancellationToken).ConfigureAwait(false);
+
+                if (!decision.IsAuthorized)
+                {
+                    string detail =
+                        $"{phase.Phase} writes outside this session workspace and was not authorized at the moment it " +
+                        $"would have run: {decision.Reason} Nothing was written and nothing was attested.";
+
+                    ReportPhase(
+                        "error",
+                        $"{phase.Phase}: {detail}",
+                        ProgressActions.PhaseBlocked,
+                        $"{phase.Phase} was refused by the server before any change was made.",
+                        "Obtain a scoped authorization for this run before attempting this phase again.");
+                    outcomes.Add(new PhaseOutcome(
+                        phase.Phase, phase.Status, PhaseExecutionState.Failed, [], [detail], detail));
+                    continue;
+                }
+            }
+
+            ReportPhase(
+                "info",
+                $"{phase.Phase}: running {adapter.GetType().Name}.",
+                ProgressActions.PhaseStarted,
+                $"{phase.Phase} is running.",
+                "Waiting for this phase to report what it wrote.");
 
             PhaseExecutionContext context = new(
                 _workspace.Root,
@@ -306,7 +394,12 @@ public sealed class MigrationExecutor
             if (!result.Succeeded)
             {
                 string detail = result.FailureReason ?? "The adapter reported failure without a reason.";
-                Report("error", $"{phase.Phase}: {detail}");
+                ReportPhase(
+                    "error",
+                    $"{phase.Phase}: {detail}",
+                    ProgressActions.PhaseFinished,
+                    $"{phase.Phase} failed: {detail}",
+                    "Read the phase report before continuing; nothing was attested for this phase.");
                 artifacts.AddRange(result.Artifacts);
                 outcomes.Add(new PhaseOutcome(
                     phase.Phase,
@@ -320,7 +413,14 @@ public sealed class MigrationExecutor
 
             artifacts.AddRange(result.Artifacts);
             outcomes.Add(new PhaseOutcome(phase.Phase, phase.Status, PhaseExecutionState.Executed, result.Artifacts, result.Findings, null));
-            Report("done", $"{phase.Phase}: wrote {result.Artifacts.Count.ToString(CultureInfo.InvariantCulture)} artifacts.");
+            // No count rides on this frame: it would be this phase's total, and the consumer keeps
+            // the latest count per artifact kind. The run's terminal frame carries the real total.
+            ReportPhase(
+                "done",
+                $"{phase.Phase}: wrote {result.Artifacts.Count.ToString(CultureInfo.InvariantCulture)} artifacts.",
+                ProgressActions.PhaseFinished,
+                $"{phase.Phase} completed and wrote {result.Artifacts.Count.ToString(CultureInfo.InvariantCulture)} file(s) into the session workspace.",
+                "Continuing with the next authorized phase.");
 
             if (AttestationFor(phase.Phase) is not AttestationKind kind)
             {

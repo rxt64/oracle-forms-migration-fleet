@@ -4,7 +4,11 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "build": "tsc -b && vite build && node -e \"require('node:fs').writeFileSync('.build-stamp', '')\""
+    "build": "tsc -b && vite build && node -e \"require('node:fs').writeFileSync('.build-stamp', '')\"",
+    "test:e2e": "playwright test",
+    "test:e2e:desktop": "playwright test --project=desktop-chromium",
+    "test:e2e:mobile": "playwright test --project=mobile-chromium",
+    "test:e2e:install": "playwright install chromium"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",
@@ -12,6 +16,8 @@
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.10.1",
+    "@playwright/test": "^1.49.1",
     "@types/node": "^22.10.2",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",

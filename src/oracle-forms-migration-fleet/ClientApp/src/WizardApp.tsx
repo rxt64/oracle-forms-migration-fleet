@@ -1,25 +1,34 @@
-import { FormEvent, startTransition, useEffect, useId, useRef, useState } from "react";
+import { FormEvent, startTransition, useCallback, useEffect, useId, useRef, useState } from "react";
 import {
+  Activity,
   AlertTriangle,
   ArrowLeft,
   ArrowRight,
   Check,
   CheckCircle2,
+  ChevronRight,
+  ClipboardList,
   Cloud,
   Cpu,
   Database,
   FileArchive,
+  FileBarChart2,
   FileCheck2,
   FileText,
   GitBranch,
+  HelpCircle,
+  Home,
   Info,
   ListChecks,
   LockKeyhole,
+  Moon,
   PanelTop,
   Pencil,
   Play,
+  Plus,
   ShieldCheck,
   Sparkles,
+  Sun,
   Trash2,
   X,
   XCircle,
@@ -49,27 +58,30 @@ import {
   type SourceWorkspace,
 } from "./sourceClient";
 import { ServiceGlyph, glyphForComponent, glyphForDatabase, glyphForHost } from "./ServiceGlyph";
-import { MatrixConsole } from "./MatrixConsole";
+import { ActivityPane } from "./MatrixConsole";
 import { ArchitectureReveal } from "./ArchitectureReveal";
 import { InfoTip } from "./InfoTip";
-import "./wizard.css";
+import { ProjectApprovals } from "./ProjectApprovals";
+import {
+  EVIDENCE_HELP,
+  EVIDENCE_NAMES,
+  GLOSSARY,
+  STEP_GUIDANCE,
+  help,
+  type StepGuidance,
+} from "./Guidance";
+import "./portal.css";
 
-const STORAGE_KEY = "ofm-workbench-draft-v1";
 const INTRO_KEY = "ofm-workbench-intro-v1";
-const STEPS = ["Application", "Destination", "Evidence", "Approvals", "Review"] as const;
+const THEME_KEY = "ofm-workbench-theme-v1";
+const STEPS = STEP_GUIDANCE.map((item) => item.name);
 const SOURCE_CHOICES = [
-  { value: "repo", name: "Clone a Git repository", description: "GitHub, Azure DevOps, GitLab, or Bitbucket. The server takes a shallow, read-only copy into a private folder for your session." },
-  { value: "zip", name: "Upload a zip", description: "Send an export of your code. It is expanded into the same private per-session folder and locked read-only." },
-  { value: "manual", name: "Type a folder path", description: "Describe where the code lives without copying it. The plan records the path only." },
+  { value: "repo", name: "Clone a Git repository", description: help("choice.sourceRepo") },
+  { value: "zip", name: "Upload a zip", description: help("choice.sourceZip") },
+  { value: "manual", name: "Describe a folder path", description: help("choice.sourceManual") },
 ];
 
-const STEP_SUMMARIES = [
-  "Name the app and point at its code",
-  "Pick the Azure database",
-  "Tick what you already have",
-  "Name the approvers (optional)",
-  "Read it back, then generate",
-] as const;
+type ShellView = "overview" | "setup" | "results";
 
 const emptyFields: RunFields = {
   engagementId: "",
@@ -118,48 +130,6 @@ const DATABASE_VERSIONS = [
   { value: "21c", label: "Oracle 21c" },
   { value: "23", label: "Oracle 23ai / Free 23" },
 ];
-
-// Server-supplied evidence names are enum-derived, so the plain-language wording lives here.
-const EVIDENCE_NAMES: Record<string, string> = {
-  FormsModuleInventory: "Forms module inventory",
-  FormsModuleSource: "Forms module source (.fmb)",
-  FormsXmlExport: "Forms XML export",
-  MenuModuleSource: "Menu module source (.mmb)",
-  SharedLibrarySource: "Shared library source (.pll)",
-  ObjectLibrarySource: "Object library source (.olb)",
-  OracleReportsInventory: "Oracle Reports inventory",
-  PlSqlProgramUnit: "PL/SQL program units",
-  DatabaseSchemaExport: "Database schema export",
-  DatabaseLinkUsage: "Database link usage",
-  ExternalProcedureUsage: "External procedure usage",
-};
-
-const EVIDENCE_HELP: Record<string, string> = {
-  FormsModuleInventory: "A list of every form in the application, with names and owners.",
-  FormsModuleSource: "The original .fmb form files.",
-  FormsXmlExport: "Forms exported to XML with the Forms2XML converter.",
-  MenuModuleSource: "The .mmb menu module files.",
-  SharedLibrarySource: "The .pll shared library files.",
-  ObjectLibrarySource: "The .olb object library files.",
-  OracleReportsInventory: "A list of the Oracle Reports the application calls.",
-  PlSqlProgramUnit: "The PL/SQL packages, procedures, functions and triggers.",
-  DatabaseSchemaExport: "A schema-only export of the Oracle database: structure, no data.",
-  DatabaseLinkUsage: "Where the schema reaches other databases through database links.",
-  ExternalProcedureUsage: "Any calls out to external C or Java procedures.",
-  ScheduledJobInventory: "Scheduled jobs the application depends on.",
-  IntegrationInventory: "The other systems this application exchanges data with.",
-  BusinessProcessCatalog: "What the application does, described in business terms.",
-  AuthenticationTopology: "How users sign in today.",
-  DataProfile: "Table sizes, row counts and growth rates.",
-  TestBaseline: "Existing tests, or a record of what working looks like today.",
-  CutoverAndRollbackPlan: "How you would switch over, and how you would roll back.",
-  LicensingAndSupportPosition: "Current Oracle licence and support commitments.",
-  UsageAndBusinessValue: "Who uses the application and how much it matters.",
-  ReplacementProductFit: "Whether an off-the-shelf product could replace it instead.",
-  WorkloadProfile: "Peak load, concurrency and performance expectations.",
-  ComplianceConstraint: "Regulatory rules the system has to satisfy.",
-  NetworkTopology: "How the network and connectivity are laid out.",
-};
 
 function queryFields(): RunFields {
   const query = new URLSearchParams(window.location.search);
@@ -318,6 +288,43 @@ function ReviewRow({ label, value, onEdit }: { label: string; value: string; onE
   );
 }
 
+/** The same four questions on every setup step: goal, input, what runs, what comes out. */
+function StepPurpose({ guide }: { guide: StepGuidance }) {
+  return (
+    <dl className="mf-step-purpose">
+      <div><dt>Goal</dt><dd>{guide.goal}</dd></div>
+      <div><dt>What you provide</dt><dd>{guide.input}</dd></div>
+      <div><dt>What the workbench does</dt><dd>{guide.platform}</dd></div>
+      <div><dt>What you get</dt><dd>{guide.output}</dd></div>
+    </dl>
+  );
+}
+
+/**
+ * Copies a closing frame onto the transcript without its payload.
+ *
+ * The typed fields have to survive: they are how the activity pane tells a stream that finished from
+ * one that merely stopped. The `workspace` and `result` payloads deliberately do not, because the
+ * transcript is a list of messages and not a place to park state.
+ */
+function transcriptLine(frame: object, fallbackText: string): ConsoleLine {
+  const line = frame as ConsoleLine;
+  return {
+    level: line.level,
+    text: line.text || fallbackText,
+    sequence: line.sequence,
+    timestampUtc: line.timestampUtc,
+    operation: line.operation,
+    action: line.action,
+    state: line.state,
+    purpose: line.purpose,
+    observed: line.observed,
+    nextAction: line.nextAction,
+    artifactKind: line.artifactKind,
+    artifactCount: line.artifactCount,
+  };
+}
+
 const ENGINE_LABELS: Record<PhaseEngine, string> = {
   NotImplemented: "No adapter",
   Deterministic: "Deterministic code",
@@ -331,7 +338,7 @@ function PhaseCard({ phase, attribution }: { phase: Phase; attribution?: PhaseAt
     <article className="mf-phase">
       <header>
         <div><p className="mf-kicker">{humanize(phase.owner)} · {humanize(phase.mutation)}</p><h3>{humanize(phase.phase)}</h3></div>
-        <span className={blocked ? "mf-pill danger" : "mf-pill success"}>{blocked ? <XCircle /> : <CheckCircle2 />}{humanize(phase.status)}</span>
+        <span className={blocked ? "mf-pill danger" : "mf-pill neutral"}>{blocked ? <XCircle /> : <Info />}{humanize(phase.status)}</span>
       </header>
       <p>{phase.objective}</p>
       {attribution && <p className="mf-attribution">
@@ -445,6 +452,8 @@ const PHASE_STATE_LABELS: Record<string, string> = {
 
 function ExecutionReport({ result, onPreview, workspaceId }: { result: ExecutionResult; onPreview: (path: string) => void; workspaceId?: string }) {
   const executed = result.phases.filter((phase) => phase.state === "Executed").length;
+  const unsuccessful = result.phases.filter((phase) => phase.state !== "Executed");
+  const problems = unsuccessful.filter((phase) => phase.state === "Failed" || phase.state === "BlockedByDependency");
   return (
     <div className="mf-run-report">
       <p className="mf-run-summary">
@@ -453,47 +462,127 @@ function ExecutionReport({ result, onPreview, workspaceId }: { result: Execution
         private session workspace.
       </p>
 
-      <ul className="mf-run-phases">
-        {result.phases.map((phase) => (
+      {/* Failures stay in the open. Everything that merely succeeded is one disclosure away. */}
+      {problems.length > 0 && <ul className="mf-run-phases">
+        {problems.map((phase) => (
           <li key={phase.phase}>
             <div className="mf-run-phase-head">
               <strong>{humanize(phase.phase)}</strong>
-              <span className={phase.state === "Executed" ? "mf-pill success" : phase.state === "Failed" || phase.state === "BlockedByDependency" ? "mf-pill danger" : "mf-pill warn"}>
-                {phase.state === "Executed" ? <CheckCircle2 /> : phase.state === "Failed" || phase.state === "BlockedByDependency" ? <XCircle /> : <AlertTriangle />}
-                {PHASE_STATE_LABELS[phase.state] ?? phase.state}
-              </span>
+              <span className="mf-pill danger"><XCircle />{PHASE_STATE_LABELS[phase.state] ?? phase.state}</span>
             </div>
             {phase.detail && <p>{phase.detail}</p>}
             {phase.findings.length > 0 && <ul className="mf-run-findings">{phase.findings.map((finding) => <li key={finding}>{finding}</li>)}</ul>}
           </li>
         ))}
-      </ul>
+      </ul>}
 
-      <h3>Files written</h3>
+      <details className="mf-optional">
+        <summary>Every phase in this run <span>{result.phases.length}</span></summary>
+        <ul className="mf-run-phases">
+          {result.phases.map((phase) => (
+            <li key={phase.phase}>
+              <div className="mf-run-phase-head">
+                <strong>{humanize(phase.phase)}</strong>
+                <span className={phase.state === "Executed" ? "mf-pill success" : phase.state === "Failed" || phase.state === "BlockedByDependency" ? "mf-pill danger" : "mf-pill warn"}>
+                  {phase.state === "Executed" ? <CheckCircle2 /> : phase.state === "Failed" || phase.state === "BlockedByDependency" ? <XCircle /> : <AlertTriangle />}
+                  {PHASE_STATE_LABELS[phase.state] ?? phase.state}
+                </span>
+              </div>
+              {phase.detail && <p>{phase.detail}</p>}
+              {phase.findings.length > 0 && <ul className="mf-run-findings">{phase.findings.map((finding) => <li key={finding}>{finding}</li>)}</ul>}
+            </li>
+          ))}
+        </ul>
+      </details>
+
       {result.artifacts.length === 0
         ? <p className="mf-help">Nothing was written, so there is nothing to open.</p>
-        : <><ul className="mf-run-artifacts">{result.artifacts.map((artifact) => (
-          <li key={artifact.path}>
-            <div><code>{artifact.path}</code><small>{artifact.description}</small></div>
-            {artifact.previewable
-              ? <button type="button" className="mf-inline-link" onClick={() => onPreview(artifact.path)}><FileText />Open</button>
-              : <span className="mf-help">Not a text file</span>}
-          </li>
-        ))}</ul>
-        {workspaceId && <div className="mf-export">
-          <a className="mf-secondary" href={`/api/workbench/export?workspaceId=${encodeURIComponent(workspaceId)}`} download="migration-output.zip">
-            <FileArchive />Download everything this run generated
-          </a>
-          <p className="mf-help">Your session workspace is deleted after four hours. Nothing leaves here except what the run wrote; your source copy is not included.</p>
-        </div>}</>}
+        : <>
+          <details className="mf-optional">
+            <summary>Files this run wrote <span>{result.artifacts.length}</span></summary>
+            <ul className="mf-run-artifacts">{result.artifacts.map((artifact) => (
+              <li key={artifact.path}>
+                <div><code>{artifact.path}</code><small>{artifact.description}</small></div>
+                {artifact.previewable
+                  ? <span className="mf-command-help"><button type="button" className="mf-inline-link" onClick={() => onPreview(artifact.path)}><FileText />Open</button><InfoTip label="opening a generated file">{help("action.openArtifact")}</InfoTip></span>
+                  : <span className="mf-help">Not a text file</span>}
+              </li>
+            ))}</ul>
+          </details>
+          {workspaceId && <p className="mf-help">Your session workspace is deleted after four hours. Nothing leaves here except what the run wrote; your source copy is not included.</p>}
+        </>}
 
-      <h3>Attestations</h3>
-      {result.attestations.length === 0
-        ? <p className="mf-help">No phase in this run produces a signable attestation, so none was recorded.</p>
-        : <ul className="mf-run-attestations">{result.attestations.map((attestation) => (
-          <li key={attestation.kind}><strong>{humanize(attestation.kind)}</strong><small>{attestation.summary}</small></li>
-        ))}</ul>}
+      <p className="mf-run-attestation-note">
+        {result.attestations.length === 0
+          ? <><ShieldCheck aria-hidden="true" />No phase in this run produces a signable attestation, so none was recorded. Nothing here is evidence that the output builds, runs, or behaves like the original.</>
+          : <><ShieldCheck aria-hidden="true" />{result.attestations.length} attestation{result.attestations.length === 1 ? "" : "s"} recorded: {result.attestations.map((attestation) => humanize(attestation.kind)).join(", ")}.</>}
+      </p>
     </div>
+  );
+}
+
+/**
+ * What this run has and has not achieved, as separate claims.
+ *
+ * Generated, built, tested, deployed and behaviour-verified are different things. Each state is
+ * derived from its own executed phase, artifact, or successful attestation.
+ */
+function CapabilityStates({ execution }: { execution: ExecutionResult | null }) {
+  const generated = execution?.artifacts.length ?? 0;
+  const normalizedForms = execution?.artifacts.some((artifact) => artifact.path.endsWith("/forms-ir.json")) ?? false;
+  const build = execution?.phases.find((phase) => phase.phase === "BuildAndStaticValidation");
+  const behavior = execution?.attestations.find((attestation) => attestation.kind === "DifferentialBehaviorTestPassed" && attestation.succeeded);
+  const rows: Array<{ label: string; state: "done" | "pending" | "retained" | "failed" | "unavailable"; detail: string }> = [
+    { label: "Plan generated", state: "done", detail: "The deterministic planner produced the plan below." },
+    {
+      label: "Files generated",
+      state: generated > 0 ? "done" : "pending",
+      detail: generated > 0
+        ? `${generated} file${generated === 1 ? "" : "s"} written into your session workspace.`
+        : "No authorized run has written a file in this tab yet.",
+    },
+    {
+      label: "Code compiled",
+      state: build?.state === "Executed" ? "done" : build?.state === "Failed" ? "failed" : "pending",
+      detail: build?.state === "Executed"
+        ? "The build and static-validation adapter completed for this run."
+        : build?.state === "Failed"
+          ? "Build or static validation failed; inspect the phase report before continuing."
+          : "No build and static-validation phase has completed in this tab yet.",
+    },
+    {
+      label: "Behaviour tested",
+      state: behavior ? "done" : "unavailable",
+      detail: behavior ? behavior.summary : "No successful differential behavior-test attestation is recorded.",
+    },
+    ...(normalizedForms ? [{
+      label: "Source logic retained; not yet converted",
+      state: "retained" as const,
+      detail: help("status.triggerRetained"),
+    }] : []),
+    { label: "Deployed", state: "unavailable", detail: "No adapter provisions or deploys an Azure resource from this workbench." },
+    {
+      label: "Behaviour verified",
+      state: behavior ? "done" : "unavailable",
+      detail: behavior
+        ? `Successful differential behavior-test attestation: ${behavior.summary}`
+        : "Conversion, generation, sandbox migration, reconciliation, and acceptance do not by themselves verify behavior.",
+    },
+  ];
+
+  return (
+    <ul className="mf-capabilities">
+      {rows.map((row) => (
+        <li key={row.label} className={row.state}>
+          {row.state === "done" ? <CheckCircle2 aria-hidden="true" /> : row.state === "failed" ? <XCircle aria-hidden="true" /> : row.state === "pending" ? <AlertTriangle aria-hidden="true" /> : row.state === "retained" ? <Info aria-hidden="true" /> : <LockKeyhole aria-hidden="true" />}
+          <div>
+            <strong>{row.label}</strong>
+            <span className="mf-capability-state">{row.state === "done" ? "Yes" : row.state === "failed" ? "Failed" : row.state === "pending" ? "Not yet" : row.state === "retained" ? "Not converted" : "Not available here"}</span>
+            <small>{row.detail}</small>
+          </div>
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -512,14 +601,19 @@ export default function WizardApp() {
   const [repoBranch, setRepoBranch] = useState("");
   const [repoFolder, setRepoFolder] = useState("");
   const [workspace, setWorkspace] = useState<SourceWorkspace | null>(null);
+
+  // The project the operator is acting in. It travels as an identifier beside the run request; the
+  // server resolves the membership and the target profile behind it.
+  const [projectId, setProjectId] = useState<string | null>(null);
   const [consoleLines, setConsoleLines] = useState<ConsoleLine[]>([]);
   const [consoleOpen, setConsoleOpen] = useState(false);
   const [acquiring, setAcquiring] = useState(false);
   const [sourceError, setSourceError] = useState("");
   const [step, setStep] = useState(0);
-  const [started, setStarted] = useState(() => {
-    try { return localStorage.getItem(INTRO_KEY) === "1"; } catch { return false; }
+  const [view, setView] = useState<ShellView>(() => {
+    try { return localStorage.getItem(INTRO_KEY) === "1" ? "setup" : "overview"; } catch { return "overview"; }
   });
+  const [theme, setTheme] = useState<"dark" | "light">(() => (document.documentElement.dataset.theme === "light" ? "light" : "dark"));
   const [errors, setErrors] = useState<FieldErrors>({});
   const [status, setStatus] = useState("Loading migration catalog...");
   const [plan, setPlan] = useState<PlanResponse | null>(null);
@@ -529,16 +623,18 @@ export default function WizardApp() {
   const [executionError, setExecutionError] = useState("");
   const [consoleMode, setConsoleMode] = useState<"source" | "execution">("source");
   const [artifact, setArtifact] = useState<{ path: string; text: string; error: string } | null>(null);
-  const [dialog, setDialog] = useState<"agent" | "azure" | "artifact" | null>(null);
+  const [dialog, setDialog] = useState<"agent" | "azure" | "artifact" | "glossary" | null>(null);
   const [agentMessage, setAgentMessage] = useState("");
   const [agentAnswer, setAgentAnswer] = useState("");
   const [agentStatus, setAgentStatus] = useState("");
   const [asking, setAsking] = useState(false);
   const heading = useRef<HTMLHeadingElement>(null);
+  const activityButton = useRef<HTMLButtonElement>(null);
   const dialogBody = useRef<HTMLElement>(null);
   const dialogOpener = useRef<HTMLElement | null>(null);
   const acquisition = useRef<AbortController | null>(null);
   const run = useRef<AbortController | null>(null);
+  const closeActivity = useCallback(() => setConsoleOpen(false), []);
 
   useEffect(() => {
     let cancelled = false;
@@ -549,15 +645,11 @@ export default function WizardApp() {
       })
       .then((catalog) => {
         if (cancelled) return;
-        let saved: { database?: string; mode?: string; evidence?: string[] } = {};
-        try { saved = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}"); } catch { saved = {}; }
         const databases = catalog.databaseTargets.map((option) => option.target);
-        const modes = catalog.executionModes.map((option) => option.mode);
-        const kinds = new Set(catalog.evidenceKinds.map((option) => option.kind));
         setBootstrap(catalog);
-        setDatabase(databases.includes(saved.database ?? "") ? saved.database! : databases[0] ?? "");
-        setMode(modes.includes(saved.mode ?? "") ? saved.mode! : "PlanOnly");
-        setEvidence((saved.evidence ?? []).filter((kind) => kinds.has(kind)));
+        setDatabase(databases[0] ?? "");
+        setMode("PlanOnly");
+        setEvidence([]);
         setStatus("Ready when you are.");
       })
       .catch((error: Error) => setStatus(error.message));
@@ -565,26 +657,25 @@ export default function WizardApp() {
   }, []);
 
   useEffect(() => {
-    if (!bootstrap || !database) return;
-    const manual = evidence.filter((kind) => !autoEvidence.includes(kind));
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ database, mode, evidence: manual }));
-  }, [bootstrap, database, mode, evidence, autoEvidence]);
+    document.documentElement.dataset.theme = theme;
+    try { localStorage.setItem(THEME_KEY, theme); } catch { /* storage unavailable */ }
+  }, [theme]);
 
   useEffect(() => {
-    document.title = plan
-      ? "Migration plan · Migration Fleet"
-      : started
+    document.title = view === "results"
+      ? "Plan and results · Migration Fleet"
+      : view === "setup"
         ? `Step ${step + 1} of ${STEPS.length}: ${STEPS[step]} · Migration Fleet`
-        : "Migration Fleet · Plan an Oracle Forms migration";
+        : "Overview · Migration Fleet";
     requestAnimationFrame(() => heading.current?.focus());
-  }, [step, plan, started]);
+  }, [step, view]);
 
   useEffect(() => {
     if (!dialog) return;
     dialogOpener.current = document.activeElement as HTMLElement | null;
     const body = dialogBody.current;
     const focusable = () => Array.from(
-      body?.querySelectorAll<HTMLElement>('button:not([disabled]), a[href], input:not([disabled]), textarea:not([disabled]), select:not([disabled])') ?? [])
+      body?.querySelectorAll<HTMLElement>('button:not([disabled]), a[href], input:not([disabled]), textarea:not([disabled]), select:not([disabled]), details > summary, [tabindex]:not([tabindex="-1"])') ?? [])
       .filter((element) => element.offsetParent !== null);
     requestAnimationFrame(() => focusable()[0]?.focus());
 
@@ -641,11 +732,13 @@ export default function WizardApp() {
   // Execution reads a copy the server holds, so it needs a workspace and at least one phase the
   // planner actually authorized. Anything else is explained rather than silently disabled.
   const plannedPhases = plan?.plan.phases.filter((phase) => phase.status === "Planned").length ?? 0;
-  const runnable = Boolean(workspace) && sourceMode !== "manual" && plannedPhases > 0;
-  const runHint = sourceMode === "manual"
-    ? "A typed folder path only describes where the code lives. Copy a repository or upload a zip on step 1 to give the fleet something to read."
+  const runnable = Boolean(projectId) && Boolean(workspace) && sourceMode !== "manual" && plannedPhases > 0;
+  const runHint = !projectId
+    ? "Select or create a project before running. Project membership owns the source copy and every generated artifact."
+    : sourceMode === "manual"
+    ? "A typed folder path only describes where the code lives. Copy a repository or upload a zip on Your application to give the fleet something to read."
     : !workspace
-      ? "Copy a repository or upload a zip on step 1 first. The fleet only reads the copy held for your session."
+      ? "Copy a repository or upload a zip on Your application first. The fleet only reads the copy held for your session."
       : plannedPhases === 0
         ? "The planner authorized no phase, so there is nothing to run. Clear the blockers above, then generate the plan again."
         : "";
@@ -655,11 +748,16 @@ export default function WizardApp() {
    * console. The stream is the only source of truth for what happened.
    */
   async function acquire(request: { mode: "repo"; repositoryUrl: string; branch?: string } | { mode: "zip"; file: File }) {
+    if (!projectId) {
+      setSourceError("Select or create a project before copying source.");
+      return;
+    }
+
     acquisition.current?.abort();
     const controller = new AbortController();
     acquisition.current = controller;
 
-    if (workspace) void releaseSource(workspace.workspaceId).catch(() => undefined);
+    if (workspace) void releaseSource(workspace.workspaceId, projectId).catch(() => undefined);
     setWorkspace(null);
     // The outgoing copy's detected ticks describe a source that is being replaced, so they are
     // retired here. Whatever the operator ticked themselves survives.
@@ -673,7 +771,13 @@ export default function WizardApp() {
     setSourceError("");
 
     try {
-      for await (const event of acquireSource(request, controller.signal)) {
+      for await (const event of acquireSource(request, projectId, controller.signal)) {
+        if (acquisition.current !== controller || controller.signal.aborted) {
+          if (event.level === "done" && "workspace" in event) {
+            void releaseSource(event.workspace.workspaceId, projectId).catch(() => undefined);
+          }
+          return;
+        }
         if (event.level === "done" && "workspace" in event) {
           const acquired = event.workspace;
           const known = new Set(bootstrap!.evidenceKinds.map((option) => option.kind));
@@ -685,12 +789,12 @@ export default function WizardApp() {
           setWorkspace(acquired);
           setEvidence([...manual, ...added]);
           setAutoEvidence(added);
-          setConsoleLines((current) => [...current, {
-            level: "done",
-            text: `${acquired.fileCount} files (${formatBytes(acquired.byteCount)}) ready in workspace ${acquired.workspaceId}.`,
-          }]);
+          setConsoleLines((current) => [...current, transcriptLine(
+            event,
+            `${acquired.fileCount} files (${formatBytes(acquired.byteCount)}) ready in workspace ${acquired.workspaceId}.`,
+          )]);
           setStatus(recognised.length > 0
-            ? `Copied your source. ${recognised.length} matching ${recognised.length === 1 ? "answer" : "answers"} on step 3 ${recognised.length === 1 ? "is" : "are"} ticked for you.`
+            ? `Copied your source. ${recognised.length} matching ${recognised.length === 1 ? "item" : "items"} on the source checklist ${recognised.length === 1 ? "is" : "are"} ticked for you.`
             : "Copied your source, but no Oracle Forms or PL/SQL artifacts were recognised.");
         } else {
           setConsoleLines((current) => [...current, event as ConsoleLine]);
@@ -709,8 +813,8 @@ export default function WizardApp() {
   }
 
   function discardWorkspace() {
-    if (!workspace) return;
-    void releaseSource(workspace.workspaceId).catch(() => undefined);
+    if (!workspace || !projectId) return;
+    void releaseSource(workspace.workspaceId, projectId).catch(() => undefined);
     setWorkspace(null);
     // The source those ticks pointed at no longer exists, so the ticks go with it.
     setEvidence((current) => current.filter((kind) => !autoEvidence.includes(kind)));
@@ -726,13 +830,46 @@ export default function WizardApp() {
     setErrors((current) => ({ ...current, [name]: undefined }));
   }
 
+  function clearWorkspaceEvidence(preserveManualEvidence: boolean) {
+    const activeAcquisition = acquisition.current;
+    acquisition.current = null;
+    activeAcquisition?.abort();
+    if (workspace && projectId) void releaseSource(workspace.workspaceId, projectId).catch(() => undefined);
+    const manual = preserveManualEvidence ? evidence.filter((kind) => !autoEvidence.includes(kind)) : [];
+    setWorkspace(null);
+    setEvidence(manual);
+    setAutoEvidence([]);
+    setConsoleLines([]);
+    setConsoleOpen(false);
+    setAcquiring(false);
+    setExecution(null);
+    setExecutionError("");
+  }
+
+  function changeSourceMode(nextMode: string) {
+    if (nextMode !== sourceMode) clearWorkspaceEvidence(true);
+    setSourceMode(nextMode);
+    setSourceError("");
+  }
+
   function beginSetup(prefill?: RunFields) {
-    if (prefill) setFields(prefill);
+    clearWorkspaceEvidence(false);
+    setFields(prefill ?? emptyFields);
+    setDatabase(bootstrap?.databaseTargets[0]?.target ?? "");
+    setMode("PlanOnly");
+    setSourceMode(prefill ? "manual" : "repo");
+    setRepoUrl("");
+    setRepoBranch("");
+    setRepoFolder("");
+    setSourceError("");
+    setPlan(null);
     try { localStorage.setItem(INTRO_KEY, "1"); } catch { /* storage unavailable */ }
     setErrors({});
     setStep(0);
-    setStarted(true);
-    setStatus(prefill ? "Example details filled in. Change anything you like." : "Answers are kept for this session only.");
+    setView("setup");
+    setStatus(prefill
+      ? "Example values filled in. They describe no real application; change anything you like."
+      : "Answers are held in this browser tab only. Nothing is saved on the server.");
   }
 
   function validateApplication() {
@@ -774,7 +911,7 @@ export default function WizardApp() {
       return;
     }
     setStep((current) => Math.min(current + 1, STEPS.length - 1));
-    setStatus("Answers preserved for this session.");
+    setStatus("Answers held in this browser tab.");
   }
 
   function goToStep(next: number) {
@@ -782,6 +919,7 @@ export default function WizardApp() {
     setExecution(null);
     setExecutionError("");
     setStep(next);
+    setView("setup");
   }
 
   function toggleEvidence(kind: string) {
@@ -792,9 +930,11 @@ export default function WizardApp() {
 
   /** The exact request shape both the planner and the executor accept. */
   function runRequestBody() {
-    const approval = (approverId: string) => approverId.trim()
-      ? { decision: "Approved", approverId: approverId.trim(), notes: null }
-      : { decision: "Pending", approverId: null, notes: null };
+    const pendingContact = (contact: string) => ({
+      decision: "Pending",
+      approverId: null,
+      notes: contact.trim() ? `Planning contact: ${contact.trim()}` : null,
+    });
     return {
       engagementId: fields.engagementId.trim(),
       applicationName: fields.applicationName.trim(),
@@ -804,16 +944,30 @@ export default function WizardApp() {
       oracleDatabaseVersion: fields.oracleDatabaseVersion.trim() || "unknown",
       sourceRoot: sourceRoot.trim(),
       outputRoot: fields.outputRoot.trim(),
-      evidence: evidence.map((kind, index) => ({ id: `EV-${index + 1}`, kind, source: "operator-console", summary: `${humanize(kind)} verified by the operator.`, isVerified: true, signals: [] })),
-      planApproval: approval(""),
-      executionApproval: approval(fields.executionApprover),
-      productionApproval: approval(fields.productionApprover),
+      evidence: evidence.map((kind, index) => {
+        const detected = autoEvidence.includes(kind);
+        return {
+          id: `EV-${index + 1}`,
+          kind,
+          source: detected ? "source-indexer" : "operator-declared",
+          summary: detected ? `${humanize(kind)} detected in the copied source.` : `${humanize(kind)} declared by the operator; not independently verified.`,
+          isVerified: detected,
+          signals: [],
+        };
+      }),
+      planApproval: pendingContact(""),
+      executionApproval: pendingContact(fields.executionApprover),
+      productionApproval: pendingContact(fields.productionApprover),
       attestations: [],
     };
   }
 
   async function generatePlan(event: FormEvent) {
     event.preventDefault();
+    if (!projectId) {
+      setStatus("Select or create a project before planning.");
+      return;
+    }
     if (!validateApplication() || !validateApprovals()) {
       setStatus("Review the highlighted fields before planning.");
       return;
@@ -826,11 +980,16 @@ export default function WizardApp() {
       const response = await fetch("/api/workbench/plan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(runRequestBody()),
+        // The identifier lets the server derive source facts from the copy it took itself. Without a
+        // copy it plans from declarations alone, and nothing in the plan is marked verified.
+        body: JSON.stringify(workspace
+          ? { ...runRequestBody(), workspaceId: workspace.workspaceId, projectId }
+          : { ...runRequestBody(), projectId }),
       });
       if (!response.ok) throw new Error(`Planner failed (${response.status}).`);
       const result = await response.json() as PlanResponse;
       startTransition(() => setPlan(result));
+      setView("results");
       setStatus(`Plan generated with ${result.plan.blockers.length} blocker${result.plan.blockers.length === 1 ? "" : "s"}.`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "The planner request failed.");
@@ -844,7 +1003,7 @@ export default function WizardApp() {
    * and never a path, and every line in the console is one the server emitted while working.
    */
   async function runAuthorized() {
-    if (!workspace || !plan) return;
+    if (!workspace || !plan || !projectId) return;
     run.current?.abort();
     const controller = new AbortController();
     run.current = controller;
@@ -858,16 +1017,26 @@ export default function WizardApp() {
     setStatus("Running the phases the planner authorized...");
 
     try {
-      for await (const event of executeRun({ ...runRequestBody(), workspaceId: workspace.workspaceId }, controller.signal)) {
-        if (event.level === "done" && "result" in event) {
+      for await (const event of executeRun({
+        ...runRequestBody(),
+        workspaceId: workspace.workspaceId,
+        // Identifiers only. The server resolves membership and the immutable target profile itself.
+        projectId,
+        targetProfileId: "sandbox",
+      }, controller.signal)) {
+        if ("result" in event) {
           const result = event.result;
           const ran = result.phases.filter((phase) => phase.state === "Executed").length;
+          const unsuccessful = event.level === "error";
           setExecution(result);
-          setConsoleLines((current) => [...current, {
-            level: "done",
-            text: `${ran} phase${ran === 1 ? "" : "s"} executed. ${result.artifacts.length} file${result.artifacts.length === 1 ? "" : "s"} written.`,
-          }]);
-          setStatus(`${ran} phase${ran === 1 ? "" : "s"} ran and wrote ${result.artifacts.length} file${result.artifacts.length === 1 ? "" : "s"} into your session workspace.`);
+          setConsoleLines((current) => [...current, transcriptLine(
+            event,
+            `${ran} phase${ran === 1 ? "" : "s"} executed. ${result.artifacts.length} file${result.artifacts.length === 1 ? "" : "s"} written.`,
+          )]);
+          setStatus(unsuccessful
+            ? `The run did not complete successfully. ${ran} phase${ran === 1 ? "" : "s"} ran and ${result.artifacts.length} file${result.artifacts.length === 1 ? " was" : "s were"} retained.`
+            : `${ran} phase${ran === 1 ? "" : "s"} ran and wrote ${result.artifacts.length} file${result.artifacts.length === 1 ? "" : "s"} into your session workspace.`);
+          if (unsuccessful) setExecutionError(event.observed || "The run did not complete successfully.");
         } else {
           setConsoleLines((current) => [...current, event as ConsoleLine]);
           if (event.level === "error") setExecutionError(event.text);
@@ -885,11 +1054,11 @@ export default function WizardApp() {
   }
 
   async function openArtifact(path: string) {
-    if (!workspace) return;
+    if (!workspace || !projectId) return;
     setArtifact({ path, text: "", error: "" });
     setDialog("artifact");
     try {
-      const text = await fetchArtifact(workspace.workspaceId, path);
+      const text = await fetchArtifact(workspace.workspaceId, path, projectId);
       setArtifact({ path, text, error: "" });
     } catch (error) {
       setArtifact({ path, text: "", error: error instanceof Error ? error.message : "The artifact could not be loaded." });
@@ -930,87 +1099,299 @@ export default function WizardApp() {
     </label>
   );
 
+  const activeView: ShellView = view === "results" && !plan ? "setup" : view;
+  const guide = STEP_GUIDANCE[step];
+  const activityAvailable = consoleLines.length > 0 || acquiring || executing;
+
+  const phasesExecuted = execution?.phases.filter((phase) => phase.state === "Executed").length ?? 0;
+  const failedPhases = execution?.phases.filter((phase) =>
+    phase.state === "Failed" ||
+    phase.state === "BlockedByDependency" ||
+    (phase.plannedStatus === "Planned" && phase.state !== "Executed")).length ?? 0;
+  const filesWritten = execution?.artifacts.length ?? 0;
+  const blockerCount = plan?.plan.blockers.length ?? 0;
+
+  /**
+   * The one sentence at the top of the results page.
+   *
+   * A finished run is never described as a success on its own: writing files is not compiling them,
+   * and the detail line says so rather than leaving the reader to assume.
+   */
+  const outcome: { tone: "info" | "attention" | "danger" | "success"; icon: typeof Info; headline: string; detail: string } =
+    executing
+      ? {
+        tone: "info",
+        icon: Activity,
+        headline: "The run is working now.",
+        detail: "Activity shows every line the server sends. Results appear here when the run reports an outcome.",
+      }
+      : execution
+        ? failedPhases > 0 || phasesExecuted === 0
+          ? {
+            tone: "danger",
+            icon: XCircle,
+            headline: phasesExecuted === 0
+              ? "The run finished without completing any phase."
+              : `Run finished with ${failedPhases} phase${failedPhases === 1 ? "" : "s"} that did not complete.`,
+            detail: `${phasesExecuted} of ${execution.phases.length} phases ran and ${filesWritten} file${filesWritten === 1 ? "" : "s"} were written into your session workspace. Read the failed phases before running anything else.`,
+          }
+          : {
+            tone: "success",
+            icon: CheckCircle2,
+            headline: `Run finished: ${phasesExecuted} of ${execution.phases.length} phases ran.`,
+            detail: `${filesWritten} file${filesWritten === 1 ? "" : "s"} written into your private session workspace. Nothing in this run compiled, deployed, or behaviour-verified that output.`,
+          }
+        : blockerCount > 0
+          ? {
+            tone: "attention",
+            icon: AlertTriangle,
+            headline: `Plan generated with ${blockerCount} blocker${blockerCount === 1 ? "" : "s"}.`,
+            detail: runnable
+              ? `${plannedPhases} phase${plannedPhases === 1 ? "" : "s"} can still run from here; the blockers below are what the rest of the plan is waiting on.`
+              : runHint || "No phase can run from this setup.",
+          }
+          : runnable
+            ? {
+              tone: "info",
+              icon: Info,
+              headline: "Plan generated with no blockers.",
+              detail: `The planner authorized ${plannedPhases} phase${plannedPhases === 1 ? "" : "s"} you can run from here.`,
+            }
+            : {
+              tone: "info",
+              icon: Info,
+              headline: "Plan generated.",
+              detail: runHint || "No phase can run from this setup.",
+            };
+
+  /**
+   * Exactly one primary action, chosen for the state the page is actually in. A results page that
+   * offers run, download, and edit with equal weight leaves the operator to work out which is safe.
+   */
+  const primaryAction: {
+    kind: "run" | "edit" | "download";
+    label: string;
+    explanation: string;
+    help: string;
+    hint?: string;
+    disabled?: boolean;
+    href?: string;
+    run?: () => void;
+  } = executing
+    ? {
+      kind: "run",
+      label: "Running...",
+      disabled: true,
+      explanation: "The run the planner authorized is under way. Nothing else should be started until it reports an outcome.",
+      help: help("action.runAuthorized"),
+      run: () => undefined,
+    }
+    : execution && filesWritten > 0
+      ? {
+        kind: "download",
+        label: "Download what this run generated",
+        href: `/api/workbench/export?workspaceId=${encodeURIComponent(workspace?.workspaceId ?? "")}&projectId=${encodeURIComponent(projectId ?? "")}`,
+        explanation: "The safest next step is to take the output off this host. Your session workspace is deleted four hours after the source was copied.",
+        help: help("action.downloadOutput"),
+      }
+      : execution
+        ? {
+          kind: "edit",
+          label: "Edit setup",
+          explanation: "This run wrote nothing, so there is nothing to take away. Change the setup and generate the plan again.",
+          help: help("action.editSetup"),
+          run: () => goToStep(0),
+        }
+        : runnable
+          ? {
+            kind: "run",
+            label: "Run authorized phases",
+            explanation: "This runs only the phases the planner marked Planned. It is the next step that produces anything.",
+            help: help("action.runAuthorized"),
+            run: () => void runAuthorized(),
+          }
+          : {
+            kind: "edit",
+            label: "Edit setup",
+            explanation: "No phase can run from this setup, so the next useful step is to change the setup rather than to start a run.",
+            hint: runHint,
+            help: help("action.editSetup"),
+            run: () => goToStep(0),
+          };
+
+  const trail = activeView === "setup"
+    ? ["Migration setup", guide.name]
+    : activeView === "results" ? ["Plan & results"] : ["Overview"];
+
+  const sections = [
+    { id: "overview", label: "Overview", icon: <Home aria-hidden="true" />, enabled: true, reason: "" },
+    { id: "setup", label: "Migration setup", icon: <ClipboardList aria-hidden="true" />, enabled: true, reason: "" },
+    { id: "activity", label: "Activity", icon: <Activity aria-hidden="true" />, enabled: activityAvailable, reason: "Nothing has run in this tab yet." },
+    { id: "results", label: "Plan & results", icon: <FileBarChart2 aria-hidden="true" />, enabled: Boolean(plan), reason: "Generate a plan first." },
+  ] as const;
+
+  function openSection(id: (typeof sections)[number]["id"]) {
+    if (id === "activity") { setConsoleOpen(true); return; }
+    if (id === "overview") { setView("overview"); return; }
+    if (id === "results") { setView("results"); return; }
+    setView("setup");
+  }
+
   return (
     <>
-      <a className="mf-skip" href="#workspace">Skip to current step</a>
+      <a className="mf-skip" href="#workspace">Skip to main content</a>
       <header className="mf-topbar">
-        <div className="mf-brand"><span className="mf-logo"><Database /><ArrowRight /><PanelTop /></span><span><strong>Migration Fleet</strong><small>Oracle Forms modernization</small></span></div>
+        <div className="mf-brand">
+          <span className="mf-logo" aria-hidden="true"><Database /><ArrowRight /><PanelTop /></span>
+          <span><strong>Migration Fleet</strong><small>Oracle Forms modernization workbench</small></span>
+        </div>
+        <p className="mf-env">
+          <ShieldCheck aria-hidden="true" />
+          <span>Planning workbench · session workspace</span>
+          <InfoTip label="this environment">This workbench plans migrations and writes into a private per-session folder on the server. It is not an Azure portal extension, it holds no saved project, and it is signed in to no customer subscription.</InfoTip>
+        </p>
         <div className="mf-header-actions">
-          <button type="button" title="See which Azure services this workbench is connected to" onClick={() => setDialog("azure")}><Cloud /><span>Azure status</span></button>
-          <button type="button" title="Ask the migration AI a question about your plan" onClick={() => setDialog("agent")} disabled={!bootstrap.agentChatAvailable}><Sparkles /><span>Ask AI</span></button>
-        </div>      </header>
+          <button type="button" onClick={() => setDialog("glossary")} title="Open the glossary"><HelpCircle aria-hidden="true" /><span>Help</span></button>
+          <button type="button" aria-pressed={theme === "light"} onClick={() => setTheme((current) => (current === "dark" ? "light" : "dark"))}>
+            {theme === "dark" ? <Sun aria-hidden="true" /> : <Moon aria-hidden="true" />}
+            <span>{theme === "dark" ? "Light theme" : "Dark theme"}</span>
+          </button>
+        </div>
+      </header>
 
-      {!started ? <main className="mf-intro" id="workspace">
-        <p className="mf-kicker">Oracle Forms modernization</p>
-        <h1 ref={heading} tabIndex={-1}>Plan your move off Oracle Forms</h1>
-        <p className="mf-lead">Answer five short questions about your Oracle Forms application. The workbench turns them into a written migration plan for a React front end, a Java Spring Boot back end, and an Azure database. It takes a couple of minutes.</p>
+      <div className="mf-shell">
+        <nav className="mf-servicenav" aria-label="Workbench sections">
+          <p>Migration Fleet</p>
+          <ul>
+            {sections.map((section) => (
+              <li key={section.id}>
+                <button
+                  type="button"
+                  disabled={!section.enabled}
+                  title={section.enabled ? undefined : section.reason}
+                  aria-current={section.id === activeView ? "page" : undefined}
+                  onClick={() => openSection(section.id)}
+                >
+                  {section.icon}<span>{section.label}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </nav>
+
+        <div className="mf-pane">
+          <nav className="mf-breadcrumb" aria-label="Breadcrumb">
+            <ol>
+              <li>Migration Fleet</li>
+              {trail.map((crumb, index) => (
+                <li key={crumb}>
+                  <ChevronRight aria-hidden="true" />
+                  <span aria-current={index === trail.length - 1 ? "page" : undefined}>{crumb}</span>
+                </li>
+              ))}
+            </ol>
+          </nav>
+
+          <div className="mf-commandbar" role="toolbar" aria-label="Commands">
+            {activeView !== "setup" && <button type="button" className="mf-command accent" disabled={!projectId} onClick={() => beginSetup()}><Plus aria-hidden="true" />New migration</button>}
+            {activeView === "results" && <button type="button" className="mf-command" onClick={() => goToStep(0)}><Pencil aria-hidden="true" />Edit setup</button>}
+            <button type="button" ref={activityButton} className="mf-command" disabled={!activityAvailable} aria-describedby={activityAvailable ? undefined : "cmd-activity-note"} onClick={() => setConsoleOpen(true)}><Activity aria-hidden="true" />Activity</button>
+            <InfoTip label="activity">{help("action.viewActivity")}</InfoTip>
+            <button type="button" className="mf-command" onClick={() => setDialog("azure")}><Cloud aria-hidden="true" />Azure status</button>
+            <button type="button" className="mf-command" disabled={!bootstrap.agentChatAvailable} aria-describedby={bootstrap.agentChatAvailable ? undefined : "cmd-agent-note"} onClick={() => setDialog("agent")}><Sparkles aria-hidden="true" />Ask AI</button>
+            {!activityAvailable && <span className="mf-command-note" id="cmd-activity-note">Activity opens once something has run in this tab.</span>}
+            {!bootstrap.agentChatAvailable && <span className="mf-command-note" id="cmd-agent-note">Ask AI needs a configured Foundry deployment; this host has none.</span>}
+          </div>
+
+      {activeView === "overview" ? <main className="mf-intro" id="workspace">
+        <p className="mf-kicker">Overview</p>
+        <h1 ref={heading} tabIndex={-1}>Plan a move off Oracle Forms</h1>
+        <p className="mf-lead">Answer five short sets of questions about your Oracle Forms application. The workbench turns them into a written migration plan for a React front end, a Java Spring Boot back end, and an Azure database.</p>
 
         <ol className="mf-intro-steps">
-          {STEPS.map((item, index) => <li key={item}><span>{index + 1}</span><div><strong>{item}</strong><small>{STEP_SUMMARIES[index]}</small></div></li>)}
+          {STEP_GUIDANCE.map((item, index) => <li key={item.id}><span>{index + 1}</span><div><strong>{item.name}</strong><small>{item.railSummary}</small></div></li>)}
         </ol>
 
         <div className="mf-intro-cards">
-          <article><ListChecks /><h2>What you need</h2><p>A repository or archive, the folder that holds your Forms files, and a rough idea of which exports you already have. Acquired source stays in your owner-scoped session workspace.</p></article>
-          <article><FileCheck2 /><h2>What you get</h2><p>A plan covering the six migration stages, what each stage produces, and a plain list of anything still missing.</p></article>
-          <article><ShieldCheck /><h2>What it will not do</h2><p>It never modifies your source repository or production resources. Generated files stay in your private session workspace; only separately approved sandbox phases may write to the host-configured PostgreSQL target.</p></article>
+          <article><ListChecks aria-hidden="true" /><h2>What you need</h2><p>A repository address, a zip export, or the folder path holding your Forms files, plus a rough idea of which Oracle exports you already have.</p></article>
+          <article><FileCheck2 aria-hidden="true" /><h2>What you get</h2><p>A written plan across the six migration stages: what each stage would produce, which phases can be authorised here, and what is still missing.</p></article>
+          <article><ShieldCheck aria-hidden="true" /><h2>What it will not do</h2><p>It does not modify your repository, provision anything in Azure, or deploy. Authorised phases write only into your private session workspace.</p></article>
         </div>
 
-        <div className="mf-intro-actions">
-          <button type="button" className="mf-primary" onClick={() => beginSetup()}><Play />Start</button>
-          <button type="button" className="mf-secondary" onClick={() => beginSetup(exampleFields)}>Fill in an example</button>
+        <div className="mf-boundary compact">
+          <LockKeyhole aria-hidden="true" />
+          <p>
+            <strong>Your answers stay in this browser tab.</strong>
+            There is no saved project and no server-side autosave. Closing or reloading the tab discards the setup, and any copied
+            source is deleted from the server four hours after it was copied.
+          </p>
         </div>
-        <p className="mf-status" role="status" aria-live="polite">{status}</p>
-      </main> : !plan ? <main className="mf-journey" id="workspace">
+
+        <ProjectApprovals onProjectChange={setProjectId} />
+
+        <div className="mf-intro-actions">
+          <button type="button" className="mf-primary" disabled={!projectId} onClick={() => beginSetup()}><Play aria-hidden="true" />New migration</button>
+          <button type="button" className="mf-secondary" disabled={!projectId} onClick={() => beginSetup(exampleFields)}>Load example values</button>
+          <p className="mf-help">
+            {projectId
+              ? "The example fills the text fields with sample values so you can see the shape of the setup. It describes no real application, copies no code, and connects to nothing."
+              : "Create or select a project above first. Project membership owns every source copy, plan, run, and generated artifact."}
+          </p>
+        </div>
+      </main> : activeView === "setup" || !plan ? <main className="mf-journey" id="workspace">
         <nav className="mf-rail" aria-label="Migration setup progress">
           <p>Migration setup</p>
-          <ol>{STEPS.map((item, index) => <li className={index === step ? "current" : index < step ? "complete" : ""} key={item}>
+          <ol>{STEP_GUIDANCE.map((item, index) => <li className={index === step ? "current" : index < step ? "complete" : ""} key={item.id}>
             <button type="button" disabled={index > step} aria-current={index === step ? "step" : undefined} onClick={() => index < step && setStep(index)}>
-              <span>{index < step ? <Check /> : index + 1}</span><span><strong>{item}</strong><small>{STEP_SUMMARIES[index]}</small></span>
+              <span>{index < step ? <Check aria-hidden="true" /> : index + 1}</span><span><strong>{item.name}</strong><small>{item.railSummary}</small></span>
             </button>
           </li>)}</ol>
-          <div className="mf-boundary compact"><LockKeyhole /><p><strong>Gated mode</strong>Planning writes nothing. Authorized conversion writes stay in your private session workspace. Separately approved sandbox phases may write to the host-configured PostgreSQL target; source and production resources remain unchanged.</p></div>
+          <div className="mf-boundary compact"><LockKeyhole aria-hidden="true" /><p><strong>Gated mode</strong>Planning writes nothing. Authorized conversion writes stay in your private session workspace. Separately approved sandbox phases may write to the host-configured PostgreSQL target; source and production resources remain unchanged.</p></div>
         </nav>
 
         <section className="mf-page">
+          {step === 0 && <ProjectApprovals onProjectChange={setProjectId} />}
           <div className="mf-progress"><span aria-hidden="true">Step {step + 1} of {STEPS.length}</span><progress max={STEPS.length} value={step + 1} /></div>
           <p className="mf-visually-hidden" aria-live="polite">{`Step ${step + 1} of ${STEPS.length}: ${STEPS[step]}`}</p>
 
-          {step === 0 && <div className="mf-step"><p className="mf-kicker">Application</p><h1 ref={heading} tabIndex={-1}>What are you migrating?</h1><p className="mf-lead">Name the application, then point the plan at the code.</p>
-            <div className="mf-assurance"><Info /><div><strong>We work on a copy, never your original</strong><p>The server takes a shallow, read-only copy into a private folder that only your sign-in can reach. Git history is stripped, so the copy cannot push back to your repository, and it is deleted automatically after four hours.</p><button type="button" className="mf-inline-link" onClick={() => { setFields(exampleFields); setSourceMode("manual"); setSourceError(""); setErrors({}); setStatus("Example details filled in. Change anything you like."); }}>Not sure? Fill in an example</button></div></div>
+          {step === 0 && <div className="mf-step"><p className="mf-kicker">{guide.name}</p><h1 ref={heading} tabIndex={-1}>{guide.heading}</h1>
+            <StepPurpose guide={guide} />
+            <div className="mf-assurance"><Info aria-hidden="true" /><div><strong>We work on a copy, never your original</strong><p>The server takes a shallow, read-only copy into a private folder that only your session can reach. Git history is stripped, so the copy cannot push back to your repository, and it is deleted automatically after four hours.</p><button type="button" className="mf-inline-link" onClick={() => beginSetup(exampleFields)}>Not sure? Load example values</button></div></div>
             <div className="mf-field-grid">
-            <Field id="engagementId" label="Reference for this plan" hint="Any label" help="So you can recognise this plan later: a ticket number, a project code, or anything else. Example: ENG-0042" placeholder="ENG-0042" value={fields.engagementId} error={errors.engagementId} onChange={(value) => updateField("engagementId", value)} />
-            <Field id="applicationName" label="Which application?" help="The name your team uses for the Oracle Forms application you want to move. It becomes the plan title. Example: ORDERS" placeholder="ORDERS" value={fields.applicationName} error={errors.applicationName} onChange={(value) => updateField("applicationName", value)} />
+            <Field id="engagementId" label="Reference for this plan" hint="Any label" help={help("field.engagementId")} placeholder="ENG-0042" value={fields.engagementId} error={errors.engagementId} onChange={(value) => updateField("engagementId", value)} />
+            <Field id="applicationName" label="Application name" help={help("field.applicationName")} placeholder="ORDERS" value={fields.applicationName} error={errors.applicationName} onChange={(value) => updateField("applicationName", value)} />
           </div>
             <ChoiceCards
               legend="Where is the code?"
-              hint="Pick one. Only the option you choose opens up, so you never see three sets of fields at once."
+              hint={help("group.sourceLocation")}
               value={sourceMode}
-              onChange={(value) => { setSourceMode(value); setSourceError(""); }}
+              onChange={changeSourceMode}
               options={SOURCE_CHOICES.map((choice) => ({
                 ...choice,
                 glyph: <ServiceGlyph id={choice.value === "repo" ? glyphForHost(repository?.host ?? "") : choice.value === "zip" ? "archive" : "oracle-forms"} size={22} />,
               }))}
               renderDetail={(value) => <>
                 {value === "repo" && <>
-                  <div className="mf-field"><div className="mf-label-row"><label htmlFor="repoUrl"><GitBranch />Repository address</label><InfoTip label="the repository address">Copy it from your browser's address bar while looking at the repository. Only public repositories on GitHub, Azure DevOps, GitLab and Bitbucket can be copied. Never paste a token or password.</InfoTip></div><p className="mf-sr-only" id="repoUrl-help">Example: https://github.com/contoso/orders</p><input id="repoUrl" value={repoUrl} placeholder="https://github.com/contoso/orders" autoComplete="off" spellCheck={false} aria-invalid={Boolean(sourceError)} aria-describedby={sourceError ? "source-error repoUrl-help" : "repoUrl-help"} onChange={(event) => { setRepoUrl(event.target.value); setSourceError(""); }} /></div>
-                  <div className="mf-field"><div className="mf-label-row"><label htmlFor="repoBranch">Branch</label><InfoTip label="the branch">Leave empty to copy the repository's default branch. Example: main</InfoTip><span className="mf-label-hint">Optional</span></div><input id="repoBranch" value={repoBranch} placeholder="main" autoComplete="off" spellCheck={false} onChange={(event) => setRepoBranch(event.target.value)} /></div>
-                  <div className="mf-field"><div className="mf-label-row"><label htmlFor="repoFolder">Folder inside the repository</label><InfoTip label="the folder">Leave this empty and the workbench uses the folder it found the Forms files in. Example: legacy/forms</InfoTip><span className="mf-label-hint">Optional</span></div><input id="repoFolder" value={repoFolder} placeholder="legacy/forms" autoComplete="off" spellCheck={false} onChange={(event) => setRepoFolder(event.target.value)} /></div>
+                  <div className="mf-field"><div className="mf-label-row"><label htmlFor="repoUrl"><GitBranch aria-hidden="true" />Repository address</label><InfoTip label="the repository address">{help("field.repoUrl")}</InfoTip></div><p className="mf-sr-only" id="repoUrl-help">Example: https://github.com/contoso/orders</p><input id="repoUrl" value={repoUrl} placeholder="https://github.com/contoso/orders" autoComplete="off" spellCheck={false} aria-invalid={Boolean(sourceError)} aria-describedby={sourceError ? "source-error repoUrl-help" : "repoUrl-help"} onChange={(event) => { setRepoUrl(event.target.value); setSourceError(""); }} /></div>
+                  <div className="mf-field"><div className="mf-label-row"><label htmlFor="repoBranch">Branch</label><InfoTip label="the branch">{help("field.repoBranch")}</InfoTip><span className="mf-label-hint">Optional</span></div><input id="repoBranch" value={repoBranch} placeholder="main" autoComplete="off" spellCheck={false} onChange={(event) => setRepoBranch(event.target.value)} /></div>
+                  <div className="mf-field"><div className="mf-label-row"><label htmlFor="repoFolder">Folder inside the repository</label><InfoTip label="the folder">{help("field.repoFolder")}</InfoTip><span className="mf-label-hint">Optional</span></div><input id="repoFolder" value={repoFolder} placeholder="legacy/forms" autoComplete="off" spellCheck={false} onChange={(event) => setRepoFolder(event.target.value)} /></div>
                   {repository && !workspace && <p className="mf-detected"><CheckCircle2 />Recognised {repository.label}</p>}
-                  <button type="button" className="mf-secondary mf-acquire" disabled={acquiring || !repository} onClick={() => void acquire({ mode: "repo", repositoryUrl: repoUrl.trim(), branch: repoBranch.trim() || undefined })}>
+                  <button type="button" className="mf-secondary mf-acquire" disabled={acquiring || !repository || !projectId} onClick={() => void acquire({ mode: "repo", repositoryUrl: repoUrl.trim(), branch: repoBranch.trim() || undefined })}>
                     <GitBranch />{acquiring ? "Copying..." : workspace ? "Copy again" : "Copy this repository"}
                   </button>
+                  <InfoTip label="copying this repository">{help("action.copyRepository")}</InfoTip>
                 </>}
 
                 {value === "zip" && <div className="mf-drop">
-                  <FileArchive />
+                  <FileArchive aria-hidden="true" />
                   <div>
                     <label className="mf-file" htmlFor="zipFile">{acquiring ? "Uploading..." : workspace ? "Choose a different zip" : "Choose a zip file"}</label>
-                    <input id="zipFile" type="file" accept=".zip,application/zip" disabled={acquiring} aria-describedby={sourceError ? "source-error zipFile-help" : "zipFile-help"} onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void acquire({ mode: "zip", file }); }} />
-                    <p className="mf-help" id="zipFile-help">Export your repository as a zip, or zip the folder holding the Forms files. Up to 256 MB.</p>
+                    <input id="zipFile" type="file" accept=".zip,application/zip" disabled={acquiring || !projectId} aria-describedby={sourceError ? "source-error zipFile-help" : "zipFile-help"} onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void acquire({ mode: "zip", file }); }} />
+                    <p className="mf-help" id="zipFile-help">{help("field.zipFile")}</p>
                   </div>
                 </div>}
 
-                {value === "manual" && <div className="mf-field-grid"><Field id="sourceRoot" label="Where the Forms files live" hint="Folder path" help="The folder a developer would find the .fmb files in, written from the top of your code repository. Example: legacy/forms" placeholder="legacy/forms" value={fields.sourceRoot} error={errors.sourceRoot} onChange={(value) => updateField("sourceRoot", value)} /></div>}
+                {value === "manual" && <div className="mf-field-grid"><Field id="sourceRoot" label="Where the Forms files live" hint="Folder path" help={help("field.sourceRoot")} placeholder="legacy/forms" value={fields.sourceRoot} error={errors.sourceRoot} onChange={(value) => updateField("sourceRoot", value)} /></div>}
 
                 {sourceError && <p id="source-error" className="mf-error" role="alert">{sourceError}</p>}
 
@@ -1018,28 +1399,32 @@ export default function WizardApp() {
                   <p><strong>{workspace.fileCount} files copied ({formatBytes(workspace.byteCount)}).</strong> Locked read-only in your private workspace.</p>
                   {workspace.artifacts.length > 0
                     ? <ul>{workspace.artifacts.map((artifact) => <li key={artifact.kind}><span className="mf-tag">{artifact.count}</span><div><strong>{EVIDENCE_NAMES[artifact.kind] ?? humanize(artifact.kind)}</strong><small>{artifact.example}</small></div></li>)}</ul>
-                    : <p className="mf-help">Nothing recognisable was found, so nothing has been ticked for you. You can still continue and answer step 3 yourself.</p>}
+                    : <p className="mf-help">Nothing recognisable was found, so nothing has been ticked for you. You can still continue and fill in the source checklist yourself.</p>}
                   <div className="mf-workspace-actions">
                     <p className="mf-help">Detected folder: {workspace.sourceRoot} · deleted automatically {new Date(workspace.expiresUtc).toLocaleTimeString()}</p>
-                    <button type="button" className="mf-inline-link" onClick={() => setConsoleOpen(true)}>View activity log</button>
-                    <button type="button" className="mf-inline-link danger" onClick={discardWorkspace}><Trash2 />Delete this copy now</button>
+                    <button type="button" className="mf-inline-link" onClick={() => setConsoleOpen(true)}>View activity</button>
+                    <InfoTip label="view activity">{help("action.viewActivity")}</InfoTip>
+                    <button type="button" className="mf-inline-link danger" onClick={discardWorkspace}><Trash2 aria-hidden="true" />Delete this copy now</button>
+                    <InfoTip label="deleting this copy">{help("action.deleteCopy")}</InfoTip>
                   </div>
                 </div>}
               </>}
             />
 
             <div className="mf-field-grid">
-            <Field id="outputRoot" label="Where new code would go" hint="Folder path" help="The folder the generated Java, React and SQL would be written to when someone carries the plan out. Example: out/orders" placeholder="out/orders" value={fields.outputRoot} error={errors.outputRoot} onChange={(value) => updateField("outputRoot", value)} />
+            <Field id="outputRoot" label="Where new code would go" hint="Folder path" help={help("field.outputRoot")} placeholder="out/orders" value={fields.outputRoot} error={errors.outputRoot} onChange={(value) => updateField("outputRoot", value)} />
           </div>
             <div className="mf-field-grid">
-            <VersionSelect id="oracleFormsVersion" label="Oracle Forms release" options={FORMS_VERSIONS} value={fields.oracleFormsVersion} onChange={(value) => updateField("oracleFormsVersion", value)} help="The Forms release the application was built with, if you know it. Leave it as not established and the plan says so rather than guessing. Choosing a release never unlocks anything: .fmb, .mmb, .pll and .olb files are a proprietary binary, so a Forms XML export produced by your own Oracle tooling is still required before an application tier can be generated. Forms 6i additionally carries Oracle's recommendation to bridge through 10.1.2." />
-            <VersionSelect id="oracleDatabaseVersion" label="Oracle Database release" options={DATABASE_VERSIONS} value={fields.oracleDatabaseVersion} onChange={(value) => updateField("oracleDatabaseVersion", value)} help="The database release behind the SQL you supply. The workbench converts the SQL text either way; recording the release lets the conversion report state which release that text came from. It connects to no Oracle instance, so it can never confirm this for you." />
+            <VersionSelect id="oracleFormsVersion" label="Oracle Forms release" options={FORMS_VERSIONS} value={fields.oracleFormsVersion} onChange={(value) => updateField("oracleFormsVersion", value)} help={help("field.oracleFormsVersion")} />
+            <VersionSelect id="oracleDatabaseVersion" label="Oracle Database release" options={DATABASE_VERSIONS} value={fields.oracleDatabaseVersion} onChange={(value) => updateField("oracleDatabaseVersion", value)} help={help("field.oracleDatabaseVersion")} />
           </div></div>}
 
-          {step === 1 && <div className="mf-step"><p className="mf-kicker">Destination</p><h1 ref={heading} tabIndex={-1}>Where should it land?</h1><p className="mf-lead">Every plan targets a React front end and a Java Spring Boot back end. Choose the Azure database, and how far ahead you want the plan to reach.</p>
+          {step === 1 && <div className="mf-step"><p className="mf-kicker">{guide.name}</p><h1 ref={heading} tabIndex={-1}>{guide.heading}</h1>
+            <StepPurpose guide={guide} />
+            <div className="mf-assurance"><Info aria-hidden="true" /><div><strong>The application route is fixed</strong><p>Every plan targets a React front end and a Java Spring Boot back end, because those are the only converters implemented. Subscription, resource group and region are not offered here: no authorized Azure API is wired into this workbench, so choosing one would be a claim it could not keep.</p></div></div>
             <ChoiceCards
               legend="Azure database"
-              hint="Where the converted schema, data and PL/SQL would end up. Managed Instance keeps the most Oracle-like behaviour; PostgreSQL is the most portable."
+              hint={help("group.databaseTarget")}
               value={database}
               onChange={setDatabase}
               options={bootstrap.databaseTargets.map((option) => ({ value: option.target, name: option.name, description: option.guidance, glyph: <ServiceGlyph id={glyphForDatabase(option.target)} size={22} /> }))}
@@ -1049,14 +1434,14 @@ export default function WizardApp() {
                 const names = proposedResourceNames(fields.applicationName, value);
                 return <dl className="mf-detail-list">
                   <div><dt>Azure service</dt><dd>{option.service}</dd></div>
-                  <div><dt>{names.databaseHostLabel}</dt><dd><code>{names.databaseHost}</code></dd></div>
+                  <div><dt>{names.databaseHostLabel}</dt><dd><code>{names.databaseHost}</code> <span className="mf-help">Proposed name. Nothing is created.</span></dd></div>
                   {names.database !== names.databaseHost && <div><dt>Database</dt><dd><code>{names.database}</code></dd></div>}
                 </dl>;
               }}
             />
             <ChoiceCards
               legend="Planning depth"
-              hint="How far the plan looks ahead. Authorized conversion writes stay in the session workspace; separately approved sandbox phases may write to the host-configured PostgreSQL target."
+              hint={help("group.planningDepth")}
               value={mode}
               onChange={setMode}
               options={bootstrap.executionModes.map((option) => ({ value: option.mode, name: option.name, description: option.description }))}
@@ -1067,69 +1452,161 @@ export default function WizardApp() {
             />
           </div>}
 
-          {step === 2 && <div className="mf-step"><p className="mf-kicker">Evidence</p><h1 ref={heading} tabIndex={-1}>What do you already have?</h1><p className="mf-lead">Tick each export or document you have produced and checked. Anything you leave unticked is listed as a blocker in the plan, so you can still generate a plan without them.</p>
-            <div className="mf-meter"><FileCheck2 /><div><strong>{readyGroups} of {groups.length} required inputs ready</strong><progress max={groups.length} value={readyGroups} /></div></div>
-            <fieldset className="mf-evidence-group"><legend>Needed to generate the plan</legend><div className="mf-evidence-list">{requiredEvidence.map((option) => <EvidenceChoice option={option} key={option.kind} />)}</div></fieldset>
-            <details className="mf-optional"><summary>More detail, if you have it <span>{optionalEvidence.filter((item) => evidence.includes(item.kind)).length} selected</span></summary><div className="mf-evidence-list">{optionalEvidence.map((option) => <EvidenceChoice option={option} key={option.kind} />)}</div></details>
+          {step === 2 && <div className="mf-step"><p className="mf-kicker">{guide.name}</p><h1 ref={heading} tabIndex={-1}>{guide.heading}</h1>
+            <StepPurpose guide={guide} />
+            <div className="mf-assurance"><Info aria-hidden="true" /><div><strong>These are your declarations, not verified facts</strong><p>Ticking an item records that you have it. The workbench opens no Oracle instance and checks nothing. Where a copied source was indexed, matching items are ticked for you and you can change any of them.</p></div></div>
+            <div className="mf-meter"><FileCheck2 aria-hidden="true" /><div><strong>{readyGroups} of {groups.length} required inputs ready<InfoTip label="required inputs ready">{help("metric.requirementsMet")}</InfoTip></strong><progress max={groups.length} value={readyGroups} /></div></div>
+            <fieldset className="mf-evidence-group" aria-labelledby="required-evidence-legend"><legend><span id="required-evidence-legend">Needed before code can be generated</span><InfoTip label="required source material">{help("group.requiredEvidence")}</InfoTip></legend><div className="mf-evidence-list">{requiredEvidence.map((option) => <EvidenceChoice option={option} key={option.kind} />)}</div></fieldset>
+            <details className="mf-optional"><summary>Extra context, if you have it <span>{optionalEvidence.filter((item) => evidence.includes(item.kind)).length} selected</span></summary><p className="mf-help">{help("group.optionalEvidence")}</p><div className="mf-evidence-list">{optionalEvidence.map((option) => <EvidenceChoice option={option} key={option.kind} />)}</div></details>
           </div>}
 
-          {step === 3 && <div className="mf-step"><p className="mf-kicker">Approvals</p><h1 ref={heading} tabIndex={-1}>Who signs off on changes?</h1><p className="mf-lead">Optional. If you know who would approve a test run or a production cutover, name them here. They are written into the plan only. Nobody is contacted, and these names are not saved in your browser.</p>
-            <div className="mf-assurance"><CheckCircle2 /><div><strong>Separate sign-offs</strong><p>Approving the plan never approves a test run, and neither one approves a production cutover.</p></div></div>
-            <div className="mf-field-grid"><Field id="executionApprover" label="Test environment approver" hint="Optional" help="The person who would authorize changes in a sandbox or test environment." placeholder="approver@contoso.com" value={fields.executionApprover} error={errors.executionApprover} onChange={(value) => updateField("executionApprover", value)} /><Field id="productionApprover" label="Production approver" hint="Optional" help="The person who would authorize the final production cutover. Must be a different person." placeholder="cab-chair@contoso.com" value={fields.productionApprover} error={errors.productionApprover} onChange={(value) => updateField("productionApprover", value)} /></div>
+          {step === 3 && <div className="mf-step"><p className="mf-kicker">{guide.name}</p><h1 ref={heading} tabIndex={-1}>{guide.heading}</h1>
+            <StepPurpose guide={guide} />
+            <div className="mf-boundary"><LockKeyhole aria-hidden="true" /><p><strong>A typed name is planning metadata. It authorizes nothing.</strong>These fields do not sign anyone in, do not check that the person exists, and do not grant permission to write anywhere. Sandbox writes need an execution approval this workbench cannot issue, and production release is not available here at all. Treat this as recording who you would ask.</p></div>
+            <div className="mf-assurance"><CheckCircle2 aria-hidden="true" /><div><strong>Sandbox and production stay separate</strong><p>Approving the plan never approves a sandbox run, and neither one approves a production release. The two names must be different people.</p></div></div>
+            <div className="mf-field-grid"><Field id="executionApprover" label="Sandbox approver" hint="Optional planning contact" help={help("field.executionApprover")} placeholder="approver@contoso.com" value={fields.executionApprover} error={errors.executionApprover} onChange={(value) => updateField("executionApprover", value)} /><Field id="productionApprover" label="Production approver" hint="Optional planning contact" help={help("field.productionApprover")} placeholder="cab-chair@contoso.com" value={fields.productionApprover} error={errors.productionApprover} onChange={(value) => updateField("productionApprover", value)} /></div>
+            <p className="mf-help">These names are sent as pending planning notes with plan and run requests. The server does not treat them as identity or authorization and does not persist them as approvals.</p>
           </div>}
 
-          {step === 4 && <form className="mf-step" onSubmit={generatePlan} noValidate><p className="mf-kicker">Review</p><h1 ref={heading} tabIndex={-1}>Check the migration setup</h1><p className="mf-lead">Read your answers back, then generate the plan. Generating a plan changes nothing; running it is a separate decision on the next screen.</p>
-            <section className="mf-review"><header><h2>Application</h2><button type="button" onClick={() => goToStep(0)}>Change</button></header><dl><ReviewRow label="Engagement" value={fields.engagementId} onEdit={() => goToStep(0)} /><ReviewRow label="Application" value={fields.applicationName} onEdit={() => goToStep(0)} /><ReviewRow label="Source" value={sourceLabel} onEdit={() => goToStep(0)} /><ReviewRow label="Output" value={fields.outputRoot} onEdit={() => goToStep(0)} /><ReviewRow label="Oracle Forms release" value={FORMS_VERSIONS.find((item) => item.value === fields.oracleFormsVersion)?.label ?? fields.oracleFormsVersion} onEdit={() => goToStep(0)} /><ReviewRow label="Oracle Database release" value={DATABASE_VERSIONS.find((item) => item.value === fields.oracleDatabaseVersion)?.label ?? fields.oracleDatabaseVersion} onEdit={() => goToStep(0)} /></dl></section>
-            <section className="mf-review"><header><h2>Destination</h2><button type="button" onClick={() => goToStep(1)}>Change</button></header><dl><ReviewRow label="Database" value={selectedDatabase?.name ?? database} onEdit={() => goToStep(1)} /><ReviewRow label="Planning depth" value={selectedMode?.name ?? mode} onEdit={() => goToStep(1)} /></dl></section>
-            <section className="mf-review"><header><h2>Evidence and approvals</h2><button type="button" onClick={() => goToStep(2)}>Change</button></header><dl><ReviewRow label="Verified evidence" value={`${evidence.length} artifact types (${readyGroups}/${groups.length} requirements)`} onEdit={() => goToStep(2)} /><ReviewRow label="Sandbox approver" value={fields.executionApprover} onEdit={() => goToStep(3)} /><ReviewRow label="Production approver" value={fields.productionApprover} onEdit={() => goToStep(3)} /></dl></section>
-            <div className="mf-boundary"><LockKeyhole /><p><strong>Generating the plan writes nothing.</strong>Running authorized conversion phases writes files into your private session workspace. With separate execution approval, sandbox phases may write to the host-configured PostgreSQL target. Production cutover is not available here.</p></div>
-            <button className="mf-primary mf-generate" type="submit" disabled={submitting}><Sparkles />{submitting ? "Generating plan..." : "Generate migration plan"}</button>
+          {step === 4 && <form className="mf-step" onSubmit={generatePlan} noValidate><p className="mf-kicker">{guide.name}</p><h1 ref={heading} tabIndex={-1}>{guide.heading}</h1>
+            <StepPurpose guide={guide} />
+            <section className="mf-review"><header><h2>Your application</h2><button type="button" onClick={() => goToStep(0)}>Change</button></header><dl><ReviewRow label="Reference" value={fields.engagementId} onEdit={() => goToStep(0)} /><ReviewRow label="Application" value={fields.applicationName} onEdit={() => goToStep(0)} /><ReviewRow label="Source" value={sourceLabel} onEdit={() => goToStep(0)} /><ReviewRow label="Output folder" value={fields.outputRoot} onEdit={() => goToStep(0)} /><ReviewRow label="Oracle Forms release" value={FORMS_VERSIONS.find((item) => item.value === fields.oracleFormsVersion)?.label ?? fields.oracleFormsVersion} onEdit={() => goToStep(0)} /><ReviewRow label="Oracle Database release" value={DATABASE_VERSIONS.find((item) => item.value === fields.oracleDatabaseVersion)?.label ?? fields.oracleDatabaseVersion} onEdit={() => goToStep(0)} /></dl></section>
+            <section className="mf-review"><header><h2>Azure destination</h2><button type="button" onClick={() => goToStep(1)}>Change</button></header><dl><ReviewRow label="Database" value={selectedDatabase?.name ?? database} onEdit={() => goToStep(1)} /><ReviewRow label="Planning depth" value={selectedMode?.name ?? mode} onEdit={() => goToStep(1)} /></dl></section>
+            <section className="mf-review"><header><h2>Checklist and permissions</h2><button type="button" onClick={() => goToStep(2)}>Change</button></header><dl><ReviewRow label="Declared source material" value={`${evidence.length} item types (${readyGroups} of ${groups.length} requirements met)`} onEdit={() => goToStep(2)} /><ReviewRow label="Sandbox approver" value={fields.executionApprover} onEdit={() => goToStep(3)} /><ReviewRow label="Production approver" value={fields.productionApprover} onEdit={() => goToStep(3)} /></dl></section>
+            {readyGroups < groups.length && <div className="mf-notice"><AlertTriangle aria-hidden="true" /><p><strong>{groups.length - readyGroups} requirement{groups.length - readyGroups === 1 ? "" : "s"} still unmet.</strong>You can still generate a plan. Each unmet requirement is listed as a blocker rather than stopping you here.</p></div>}
+            <details className="mf-optional"><summary>Technical names sent to the planner</summary><dl className="mf-detail-list">
+              <div><dt>requestedMode</dt><dd><code>{mode}</code></dd></div>
+              <div><dt>target.frontEnd</dt><dd><code>React</code></dd></div>
+              <div><dt>target.backEnd</dt><dd><code>JavaSpringBoot</code></dd></div>
+              <div><dt>target.database</dt><dd><code>{database}</code></dd></div>
+              <div><dt>evidence kinds</dt><dd><code>{evidence.join(", ") || "none"}</code></dd></div>
+            </dl></details>
+            <div className="mf-boundary"><LockKeyhole aria-hidden="true" /><p><strong>Generating the plan writes nothing.</strong>It creates no file, changes no repository, and touches no Azure resource. Running authorized conversion phases is a separate decision on the next screen, and writes only into your private session workspace. With separate execution approval, sandbox phases may write to the host-configured PostgreSQL target. Production release is not available here.</p></div>
+            <button className="mf-primary mf-generate" type="submit" disabled={submitting || !projectId}><Sparkles aria-hidden="true" />{submitting ? "Generating plan..." : "Generate migration plan"}</button>
           </form>}
 
           <div className="mf-actions">
-            <button type="button" className="mf-back" onClick={() => (step === 0 ? setStarted(false) : setStep((current) => current - 1))}><ArrowLeft />Back</button>
-            {step < STEPS.length - 1 && <button type="button" className="mf-primary" onClick={continueJourney}>Continue<ArrowRight /></button>}
+            <button type="button" className="mf-back" onClick={() => (step === 0 ? setView("overview") : setStep((current) => current - 1))}><ArrowLeft aria-hidden="true" />Back</button>
+            {step < STEPS.length - 1 && <button type="button" className="mf-primary" onClick={continueJourney}>Continue<ArrowRight aria-hidden="true" /></button>}
           </div>
-          <p className="mf-status" role="status" aria-live="polite">{status}</p>
         </section>
       </main> : <main className="mf-results" id="workspace">
-        <div className="mf-result-heading"><div><p className="mf-kicker">Your plan</p><h1 ref={heading} tabIndex={-1}>Migration plan for {plan.plan.applicationName}</h1><p>You asked for <strong>{humanize(plan.plan.requestedMode)}</strong>; the workbench authorized <strong>{humanize(plan.plan.authorizedMode)}</strong>.</p></div><button type="button" className="mf-secondary" onClick={() => setPlan(null)}><Pencil />Edit setup</button></div>
-        <section className="mf-metrics" aria-label="Plan summary"><article><span>Stages ready</span><strong>{plan.steps.filter((item) => item.state === "Ready" || item.state === "Current").length}/6</strong></article><article><span>Inputs provided</span><strong>{readyGroups}/{groups.length}</strong></article><article><span>Still missing</span><strong>{plan.plan.blockers.length}</strong></article><article><span>Azure services active</span><strong>{activeAzure}/{bootstrap.azureComponents.length}</strong></article></section>
-        {plan.plan.blockers.length > 0 && <section className="mf-alert"><h2><AlertTriangle />What is still missing</h2><ul>{plan.plan.blockers.map((item) => <li key={item}>{item}</li>)}</ul></section>}
-        <ArchitectureReveal applicationName={plan.plan.applicationName} database={database} databaseName={selectedDatabase?.name ?? database} />
-        <section className="mf-result-section"><p className="mf-kicker">Lifecycle</p><h2>Six-stage modernization path</h2><ol className="mf-lifecycle">{plan.steps.map((item) => <li key={item.step}><span>{item.order}</span><div><strong>{item.title}</strong><small>{item.phases.map(humanize).join(" · ")}</small></div><em className={item.state === "Blocked" ? "mf-pill danger" : "mf-pill success"}>{item.state === "Blocked" ? <XCircle /> : <CheckCircle2 />}{item.state}</em></li>)}</ol></section>
-        <section className="mf-result-section"><p className="mf-kicker">Phase detail</p><h2>Authorized work and blockers</h2><div className="mf-phases">{plan.plan.phases.map((phase) => <PhaseCard key={phase.phase} phase={phase} attribution={bootstrap.attribution?.phases.find((item) => item.phase === phase.phase)} />)}</div></section>
-        {bootstrap.attribution && <AttributionSection attribution={bootstrap.attribution} />}
-        {plan.azureFootprint && <AzureFootprintSection footprint={plan.azureFootprint} />}
-        <section className="mf-result-section"><p className="mf-kicker">Execution</p><h2>Run the authorized phases</h2>
-          <p className="mf-run-lead">This runs only the phases marked <strong>Planned</strong> above. Conversion artifacts stay in your private session workspace and your source repository is never modified. Separately approved sandbox phases may write schema and data to the host-configured PostgreSQL target; no caller can change that endpoint. Production resources are not changed.</p>
-          {!runnable && <p className="mf-help" id="run-hint">{runHint}</p>}
-          <button type="button" className="mf-primary mf-generate" disabled={!runnable || executing} aria-describedby={runnable ? undefined : "run-hint"} onClick={() => void runAuthorized()}>
-            <Play />{executing ? "Running..." : "Run authorized phases"}
-          </button>
-          <p className="mf-status" role="status" aria-live="polite">{executing ? "The fleet is working. The activity log shows each step as it happens." : execution ? "Run finished." : ""}</p>
-          {executionError && <p className="mf-error" role="alert">{executionError}</p>}
-          {execution && <ExecutionReport result={execution} onPreview={(path) => void openArtifact(path)} workspaceId={workspace?.workspaceId} />}
-          {execution && <button type="button" className="mf-inline-link" onClick={() => { setConsoleMode("execution"); setConsoleOpen(true); }}>View activity log</button>}
+        <div className="mf-result-heading"><div><p className="mf-kicker">Plan &amp; results</p><h1 ref={heading} tabIndex={-1}>Migration plan for {plan.plan.applicationName}</h1></div></div>
+
+        {/* 1. The short outcome. One state, one sentence, before any detail. */}
+        <section className={`mf-outcome ${outcome.tone}`} aria-labelledby="mf-outcome-title">
+          <outcome.icon aria-hidden="true" />
+          <div>
+            <h2 id="mf-outcome-title">{outcome.headline}</h2>
+            <p>{outcome.detail}</p>
+          </div>
         </section>
+
+        {/* 2. What is actually blocking, before anything that merely describes the plan. */}
+        {plan.plan.blockers.length > 0 && <section className="mf-alert" aria-labelledby="mf-blockers-title">
+          <h2 id="mf-blockers-title"><AlertTriangle aria-hidden="true" />What is blocking this migration</h2>
+          <ul>{plan.plan.blockers.slice(0, 3).map((item) => <li key={item}>{item}</li>)}</ul>
+          {plan.plan.blockers.length > 3 && <details className="mf-optional">
+            <summary>The remaining blockers <span>{plan.plan.blockers.length - 3}</span></summary>
+            <ul>{plan.plan.blockers.slice(3).map((item) => <li key={item}>{item}</li>)}</ul>
+          </details>}
+        </section>}
+
+        {/* 3. Exactly one primary action for the state the run is actually in. */}
+        <section className="mf-next-action" aria-labelledby="mf-next-title">
+          <h2 id="mf-next-title">Next available action</h2>
+          <p className="mf-run-lead">{primaryAction.explanation}</p>
+          {primaryAction.hint && <p className="mf-help" id="next-action-hint">{primaryAction.hint}</p>}
+          {primaryAction.kind === "download"
+            ? <a className="mf-primary mf-generate" href={primaryAction.href} download="migration-output.zip">
+              <FileArchive aria-hidden="true" />{primaryAction.label}
+            </a>
+            : <button
+              type="button"
+              className="mf-primary mf-generate"
+              disabled={primaryAction.disabled}
+              aria-describedby={primaryAction.hint ? "next-action-hint" : undefined}
+              onClick={primaryAction.run}
+            >
+              {primaryAction.kind === "run" ? <Play aria-hidden="true" /> : <Pencil aria-hidden="true" />}{primaryAction.label}
+            </button>}
+          <InfoTip label={primaryAction.label.toLowerCase()}>{primaryAction.help}</InfoTip>
+          <p className="mf-status" role="status" aria-live="polite">{executing ? "The fleet is working. Activity shows each line the server sends." : execution ? "Run finished." : ""}</p>
+          {executionError && <p className="mf-error" role="alert">{executionError}</p>}
+
+          {/* Write effects stay visible. They are the part an operator must not have to expand to find. */}
+          <div className="mf-boundary"><LockKeyhole aria-hidden="true" /><p><strong>What running actually writes.</strong>Conversion artifacts are written into your private session workspace and your source repository is never modified. Separately approved sandbox phases may write schema and data to the host-configured PostgreSQL target, and no caller can change that endpoint. Nothing is deployed, no Azure resource is created, and no production resource is touched.</p></div>
+          {(activityAvailable || executing) && <span className="mf-command-help"><button type="button" className="mf-inline-link" onClick={() => { setConsoleMode(execution || executing ? "execution" : "source"); setConsoleOpen(true); }}><Activity aria-hidden="true" />View activity</button><InfoTip label="view activity">{help("action.viewActivity")}</InfoTip></span>}
+        </section>
+
+        <ProjectApprovals
+          workspaceId={workspace?.workspaceId}
+          runRequest={runRequestBody()}
+          onProjectChange={setProjectId}
+        />
+
+        {/* 4. The run's own results, concise. */}
+        <section className="mf-result-section" aria-labelledby="mf-run-results-title">
+          <p className="mf-kicker">Run results</p>
+          <h2 id="mf-run-results-title">What this run produced, and what it did not</h2>
+          <div className="mf-metrics" role="group" aria-label="Plan summary">
+            <article><span>Stages ready<InfoTip label="stages ready">{help("metric.stagesReady")}</InfoTip></span><strong>{plan.steps.filter((item) => item.state === "Ready" || item.state === "Current").length}/6</strong></article>
+            <article><span>Inputs provided<InfoTip label="inputs provided">{help("metric.inputsProvided")}</InfoTip></span><strong>{readyGroups}/{groups.length}</strong></article>
+            <article><span>Still missing<InfoTip label="still missing">{help("metric.stillMissing")}</InfoTip></span><strong>{plan.plan.blockers.length}</strong></article>
+            <article><span>Phases that ran<InfoTip label="phases that ran">{help("metric.phasesExecuted")}</InfoTip></span><strong>{execution ? `${phasesExecuted}/${execution.phases.length}` : "0/0"}</strong></article>
+            <article><span>Files written<InfoTip label="files written">{help("metric.filesWritten")}</InfoTip></span><strong>{execution?.artifacts.length ?? 0}</strong></article>
+            <article><span>Azure services active<InfoTip label="active Azure services">{help("metric.azureActive")}</InfoTip></span><strong>{activeAzure}/{bootstrap.azureComponents.length}</strong></article>
+          </div>
+          <CapabilityStates execution={execution} />
+          {execution && <ExecutionReport result={execution} onPreview={(path) => void openArtifact(path)} workspaceId={workspace?.workspaceId} />}
+        </section>
+
+        {/* Everything below explains the plan rather than telling the operator what to do next. */}
+        <details className="mf-disclosure"><summary>Target architecture diagram</summary>
+          <ArchitectureReveal applicationName={plan.plan.applicationName} database={database} databaseName={selectedDatabase?.name ?? database} />
+        </details>
+
+        <details className="mf-disclosure"><summary>Six-stage modernization lifecycle</summary>
+          <ol className="mf-lifecycle">{plan.steps.map((item) => <li key={item.step}><span>{item.order}</span><div><strong>{item.title}</strong><small>{item.phases.map(humanize).join(" · ")}</small></div><em className={item.state === "Blocked" ? "mf-pill danger" : "mf-pill neutral"}>{item.state === "Blocked" ? <XCircle aria-hidden="true" /> : <Info aria-hidden="true" />}{item.state}</em></li>)}</ol>
+        </details>
+
+        <details className="mf-disclosure"><summary>Full phase detail: inputs, outputs, and blockers</summary>
+          <div className="mf-phases">{plan.plan.phases.map((phase) => <PhaseCard key={phase.phase} phase={phase} attribution={bootstrap.attribution?.phases.find((item) => item.phase === phase.phase)} />)}</div>
+        </details>
+
+        {bootstrap.attribution && <details className="mf-disclosure"><summary>Which model and which code runs each step</summary>
+          <AttributionSection attribution={bootstrap.attribution} />
+        </details>}
+
+        {plan.azureFootprint && <details className="mf-disclosure"><summary>Azure footprint this plan would need</summary>
+          <AzureFootprintSection footprint={plan.azureFootprint} />
+        </details>}
       </main>}
 
-      {dialog && <div className="mf-dialog-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setDialog(null)}><section className="mf-dialog" role="dialog" aria-modal="true" aria-labelledby="mf-dialog-title" ref={dialogBody}><header><div><p className="mf-kicker">{dialog === "agent" ? "Microsoft Foundry" : dialog === "artifact" ? "Generated artifact" : "Environment"}</p><h2 id="mf-dialog-title">{dialog === "agent" ? "Ask the migration fleet" : dialog === "artifact" ? artifact?.path ?? "Artifact" : "Azure readiness"}</h2></div><button type="button" onClick={() => setDialog(null)} aria-label="Close dialog"><X /></button></header>
-        {dialog === "agent" ? <><p>Ask about evidence, target choices, or blockers. Messages are sent once and are not stored.</p><form onSubmit={askAgent}><label htmlFor="agent-message">Your question</label><textarea id="agent-message" rows={6} maxLength={8000} value={agentMessage} disabled={asking} onChange={(event) => setAgentMessage(event.target.value)} /><div className="mf-agent-actions"><span>{agentMessage.length}/8,000</span><button className="mf-primary" type="submit" disabled={!agentMessage.trim() || asking}><Sparkles />{asking ? "Asking..." : "Send question"}</button></div></form><p role="status">{agentStatus}</p>{agentAnswer && <div className="mf-answer">{agentAnswer}</div>}</>
-          : dialog === "artifact" ? <><p className="mf-help">Read straight from your session workspace. At most 512 KB is shown.</p>{artifact?.error
+          <p className="mf-status mf-pane-status" role="status" aria-live="polite">{status}</p>
+        </div>
+      </div>
+
+      {dialog && <div className="mf-dialog-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setDialog(null)}><section className="mf-dialog" role="dialog" aria-modal="true" aria-labelledby="mf-dialog-title" ref={dialogBody}><header><div><p className="mf-kicker">{dialog === "agent" ? "Microsoft Foundry" : dialog === "artifact" ? "Generated artifact" : dialog === "glossary" ? "Help" : "Environment"}</p><h2 id="mf-dialog-title">{dialog === "agent" ? "Ask the migration fleet" : dialog === "artifact" ? artifact?.path ?? "Artifact" : dialog === "glossary" ? "What these words mean" : "Azure readiness"}</h2></div><button type="button" onClick={() => setDialog(null)} aria-label="Close dialog"><X aria-hidden="true" /></button></header>
+        {dialog === "agent" ? <><p>Ask about your checklist, target choices, or blockers. The message is sent once, is not stored, and executes no migration step.</p><form onSubmit={askAgent}><label htmlFor="agent-message">Your question</label><textarea id="agent-message" rows={6} maxLength={8000} value={agentMessage} disabled={asking} onChange={(event) => setAgentMessage(event.target.value)} /><div className="mf-agent-actions"><span>{agentMessage.length}/8,000</span><button className="mf-primary" type="submit" disabled={!agentMessage.trim() || asking}><Sparkles aria-hidden="true" />{asking ? "Asking..." : "Send question"}</button></div></form><p role="status">{agentStatus}</p>{agentAnswer && <div className="mf-answer">{agentAnswer}</div>}</>
+          : dialog === "artifact" ? <><p className="mf-help">Read straight from your session workspace. At most 512 KB is shown. Opening a file does not run or validate it.</p>{artifact?.error
             ? <p className="mf-error" role="alert">{artifact.error}</p>
             : artifact?.text
               ? <pre className="mf-artifact" tabIndex={0} aria-label={`Contents of ${artifact.path}`}>{artifact.text}</pre>
               : <p role="status" aria-live="polite">Loading the artifact...</p>}</>
-          : <><div className="mf-assurance"><Cloud /><div><strong>{activeAzure} of {bootstrap.azureComponents.length} components active</strong><p>Only runtime-proven services are marked active.</p></div></div><div className="mf-components">{bootstrap.azureComponents.map((component) => <article key={component.id}><span className={component.state === "Active" ? "active" : ""}><ServiceGlyph id={glyphForComponent(component.id)} size={22} /></span><div><h3>{component.name}<InfoTip label={component.name}>{component.evidence}</InfoTip></h3><p>{component.role}</p><small className={component.state === "Active" ? "mf-pill success" : "mf-pill"}>{component.state === "Active" ? <CheckCircle2 /> : <AlertTriangle />}{humanize(component.state)}</small></div></article>)}</div><div className="mf-boundary compact"><LockKeyhole /><p><strong>Gated execution</strong>Analysis, conversion, and build phases write into the session workspace. A configured PostgreSQL sandbox can receive writes only after separate execution approval. Differential testing and production cutover are not available.</p></div></>}
+          : dialog === "glossary" ? <><p>The words this workbench uses, in plain language. You do not need any of them to complete the setup.</p><dl className="mf-glossary">{GLOSSARY.map((entry) => <div key={entry.term}><dt>{entry.term}</dt><dd>{entry.body}</dd></div>)}</dl></>
+          : <><div className="mf-assurance"><Cloud aria-hidden="true" /><div><strong>{activeAzure} of {bootstrap.azureComponents.length} components active</strong><p>Only services this workbench has actually reached at runtime are marked active. The rest are configured intentions.</p></div></div><div className="mf-components">{bootstrap.azureComponents.map((component) => <article key={component.id}><span className={component.state === "Active" ? "active" : ""}><ServiceGlyph id={glyphForComponent(component.id)} size={22} /></span><div><h3>{component.name}<InfoTip label={component.name}>{component.evidence}</InfoTip></h3><p>{component.role}</p><small className={component.state === "Active" ? "mf-pill success" : "mf-pill neutral"}>{component.state === "Active" ? <CheckCircle2 aria-hidden="true" /> : <AlertTriangle aria-hidden="true" />}{humanize(component.state)}</small></div></article>)}</div><div className="mf-boundary compact"><LockKeyhole aria-hidden="true" /><p><strong>Gated execution</strong>Analysis, conversion, and build phases write into the session workspace. A configured PostgreSQL sandbox can receive writes only after separate execution approval. Differential testing and production release are not available.</p></div></>}
       </section></div>}
 
-      {consoleOpen && <MatrixConsole
-        title={consoleMode === "execution" ? "Running the authorized phases" : sourceMode === "repo" ? "Cloning your repository" : "Expanding your upload"}
-        subtitle="Live output from the server. Every line is something that actually happened."
+      {consoleOpen && <ActivityPane
+        title={consoleMode === "execution" ? "Running the authorized phases" : sourceMode === "repo" ? "Copying your repository" : "Expanding your upload"}
+        subtitle={consoleMode === "execution"
+          ? "The server is running the phases the planner authorized and writing into your session workspace."
+          : "The server is taking a private read-only copy of your source so the fleet has something to read."}
         lines={consoleLines}
         running={acquiring || executing}
-        onClose={() => setConsoleOpen(false)}
+        fallbackFocus={activityButton}
+        onClose={closeActivity}
       />}
     </>
   );

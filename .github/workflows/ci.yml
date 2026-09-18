@@ -73,3 +73,46 @@ jobs:
       - name: Build Forms replica image
         working-directory: src/oracle-forms-demo
         run: docker build -f Dockerfile -t oracle-forms-demo:ci .
+
+  guided-ui:
+    name: Guided UI browser checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: src/oracle-forms-migration-fleet/ClientApp/package-lock.json
+
+      - name: Install client dependencies
+        working-directory: src/oracle-forms-migration-fleet/ClientApp
+        run: npm ci
+
+      - name: Build client
+        working-directory: src/oracle-forms-migration-fleet/ClientApp
+        run: npm run build
+
+      - name: Install Chromium
+        working-directory: src/oracle-forms-migration-fleet/ClientApp
+        run: npx playwright install --with-deps chromium
+
+      - name: Run guided UI checks
+        working-directory: src/oracle-forms-migration-fleet/ClientApp
+        run: npm run test:e2e
+
+      - name: Upload browser reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: guided-ui-playwright-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            src/oracle-forms-migration-fleet/ClientApp/playwright-report/
+            src/oracle-forms-migration-fleet/ClientApp/test-results/

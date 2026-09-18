@@ -1,5 +1,7 @@
 // Copyright (c) Microsoft. All rights reserved.
 
+using System.Text;
+using System.Text.RegularExpressions;
 using System.Xml.Linq;
 
 namespace OracleFormsMigrationFleet.Fleet.Execution;
@@ -14,7 +16,17 @@ public sealed record FormsItem(
     bool Visible,
     int? MaxLength);
 
-public sealed record FormsTrigger(string Name, string Scope);
+public enum FormsTriggerBodyEncoding
+{
+    Attribute,
+    Element,
+}
+
+public sealed record FormsTrigger(
+    string Name,
+    string Scope,
+    string? Body = null,
+    FormsTriggerBodyEncoding? BodyEncoding = null);
 
 public sealed record FormsBlock(
     string Name,
@@ -50,14 +62,48 @@ public sealed record FormsModuleParse(
     IReadOnlyList<FormsModule> Modules,
     IReadOnlyList<ConversionFinding> Findings);
 
+internal static class FormsModuleIdentity
+{
+    private static readonly Regex s_loadOrderPrefix = new(
+        @"^\d+[-_. ]+", RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(250));
+
+    public static string Normalize(string name)
+    {
+        string trimmed = s_loadOrderPrefix.Replace(name.Trim(), string.Empty);
+        StringBuilder identity = new(trimmed.Length);
+
+        foreach (char character in trimmed.ToUpperInvariant())
+        {
+            char mapped = character is '-' or ' ' or '.' ? '_' : character;
+
+            if (mapped == '_' && (identity.Length == 0 || identity[^1] == '_'))
+            {
+                continue;
+            }
+
+            identity.Append(mapped);
+        }
+
+        return identity.ToString().TrimEnd('_');
+    }
+
+    public static string Qualified(string sourcePath, string name) =>
+        $"{WorkspacePath.Folder(sourcePath).ToUpperInvariant()}|{Normalize(name)}";
+
+    public static bool MatchesFile(string sourcePath, string name) =>
+        string.Equals(
+            Normalize(Path.GetFileNameWithoutExtension(sourcePath)),
+            Normalize(name),
+            StringComparison.Ordinal);
+}
+
 /// <summary>
 /// Reads an Oracle Forms XML export, the text interchange format produced by the frmf2xml converter.
 ///
 /// A .fmb is a proprietary binary this build cannot open, so the XML export is the only Forms source it
 /// can honestly claim to have read. What it recovers is structure: blocks, their base tables, items with
-/// their prompts, order, and required flags. It recovers no behaviour. Trigger bodies are PL/SQL that
-/// this converter does not translate, and a trigger is reported by name so the work stays visible rather
-/// than looking absent.
+/// their prompts, order, and required flags. Trigger bodies are retained as untrusted source text so
+/// changed behaviour remains distinguishable, but this parser does not translate or execute that PL/SQL.
 ///
 /// Which documents count as an export is decided by <see cref="FormsXmlDocument"/>, so this parser and
 /// <see cref="FormsXmlVersionReader"/> cannot reach different conclusions about the same file.
@@ -111,8 +157,26 @@ public static class FormsModuleParser
             return new FormsModuleParse(modules, findings);
         }
 
+        if (load.FormModules.Count > FormsIntermediateReader.MaxModules)
+        {
+            findings.Add(LimitFinding(
+                "Forms export",
+                "module",
+                load.FormModules.Count,
+                FormsIntermediateReader.MaxModules));
+
+            return new FormsModuleParse(modules, findings);
+        }
+
+        HashSet<string> moduleNames = new(StringComparer.OrdinalIgnoreCase);
         foreach (XElement module in load.FormModules)
         {
+            string moduleName = Attribute(module, "Name") ?? "UNNAMED";
+            if (!moduleNames.Add(moduleName))
+            {
+                findings.Add(DuplicateFinding("Forms export", "module", moduleName));
+            }
+
             modules.Add(ReadModule(module, findings));
         }
 
@@ -123,10 +187,24 @@ public static class FormsModuleParser
     {
         string name = Attribute(module, "Name") ?? "UNNAMED";
         List<FormsBlock> blocks = [];
+        List<XElement> declaredBlocks = [.. Descendants(module, "Block")];
 
-        foreach (XElement block in Descendants(module, "Block"))
+        if (declaredBlocks.Count > FormsIntermediateReader.MaxChildren)
+        {
+            findings.Add(LimitFinding(name, "block", declaredBlocks.Count, FormsIntermediateReader.MaxChildren));
+            return new FormsModule(name, Attribute(module, "Title"), blocks, [], [], []);
+        }
+
+        HashSet<string> blockNames = new(StringComparer.OrdinalIgnoreCase);
+
+        foreach (XElement block in declaredBlocks)
         {
             string blockName = Attribute(block, "Name") ?? "UNNAMED";
+
+            if (!blockNames.Add(blockName))
+            {
+                findings.Add(DuplicateFinding(name, "block", blockName));
+            }
 
             // Exports qualify the table with its owner; the converted schema is not owner-qualified.
             string? baseTable = Attribute(block, "QueryDataSourceName") ?? Attribute(block, "DMLDataTargetName");
@@ -136,9 +214,23 @@ public static class FormsModuleParser
             }
 
             List<FormsItem> items = [];
-            foreach (XElement item in Descendants(block, "Item"))
+            List<XElement> declaredItems = [.. Descendants(block, "Item")];
+            if (declaredItems.Count > FormsIntermediateReader.MaxChildren)
+            {
+                findings.Add(LimitFinding($"{name}.{blockName}", "item", declaredItems.Count, FormsIntermediateReader.MaxChildren));
+                declaredItems = [];
+            }
+
+            HashSet<string> itemNames = new(StringComparer.OrdinalIgnoreCase);
+            foreach (XElement item in declaredItems)
             {
                 string itemName = Attribute(item, "Name") ?? "UNNAMED";
+
+                if (!itemNames.Add(itemName))
+                {
+                    findings.Add(DuplicateFinding($"{name}.{blockName}", "item", itemName));
+                }
+
                 string itemType = Attribute(item, "ItemType") ?? "Text Item";
 
                 // Only a database item maps to a column; the rest are populated by Forms logic.
@@ -157,8 +249,19 @@ public static class FormsModuleParser
             }
 
             List<FormsTrigger> triggers =
-                [.. Descendants(block, "Trigger").Select(trigger => new FormsTrigger(
-                    Attribute(trigger, "Name") ?? "UNNAMED", blockName))];
+                [.. block.Elements(s_forms + "Trigger").Select(trigger => ReadTrigger(trigger, blockName))];
+
+            foreach (XElement item in Descendants(block, "Item"))
+            {
+                string itemScope = $"{blockName}.{Attribute(item, "Name") ?? "UNNAMED"}";
+                triggers.AddRange(item.Elements(s_forms + "Trigger").Select(trigger => ReadTrigger(trigger, itemScope)));
+            }
+
+            if (triggers.Count > FormsIntermediateReader.MaxChildren)
+            {
+                findings.Add(LimitFinding($"{name}.{blockName}", "trigger", triggers.Count, FormsIntermediateReader.MaxChildren));
+                triggers.Clear();
+            }
 
             if (baseTable is null)
             {
@@ -181,7 +284,13 @@ public static class FormsModuleParser
         // Triggers directly on the module, not inside a block.
         List<FormsTrigger> moduleTriggers =
             [.. module.Elements().Where(child => child.Name == s_forms + "Trigger")
-                .Select(trigger => new FormsTrigger(Attribute(trigger, "Name") ?? "UNNAMED", name))];
+                .Select(trigger => ReadTrigger(trigger, name))];
+
+        if (moduleTriggers.Count > FormsIntermediateReader.MaxChildren)
+        {
+            findings.Add(LimitFinding(name, "module trigger", moduleTriggers.Count, FormsIntermediateReader.MaxChildren));
+            moduleTriggers.Clear();
+        }
 
         List<string> programUnits =
             [.. Descendants(module, "ProgramUnit").Select(unit => Attribute(unit, "Name") ?? "UNNAMED")];
@@ -189,10 +298,57 @@ public static class FormsModuleParser
         List<string> lovs =
             [.. Descendants(module, "LOV").Select(lov => Attribute(lov, "Name") ?? "UNNAMED")];
 
+        if (programUnits.Count > FormsIntermediateReader.MaxChildren)
+        {
+            findings.Add(LimitFinding(name, "program unit", programUnits.Count, FormsIntermediateReader.MaxChildren));
+            programUnits.Clear();
+        }
+
+        if (lovs.Count > FormsIntermediateReader.MaxChildren)
+        {
+            findings.Add(LimitFinding(name, "LOV", lovs.Count, FormsIntermediateReader.MaxChildren));
+            lovs.Clear();
+        }
+
+        ReportDuplicateTriggers(name, moduleTriggers.Concat(blocks.SelectMany(block => block.Triggers)), findings);
+
         ReportBehaviour(name, blocks, moduleTriggers, programUnits, lovs, findings);
         ReportAttachments(name, module, findings);
 
         return new FormsModule(name, Attribute(module, "Title"), blocks, moduleTriggers, programUnits, lovs);
+    }
+
+    private static ConversionFinding DuplicateFinding(string scope, string kind, string name) => new(
+        ConversionSeverity.Unsupported,
+        "Forms module",
+        $"{scope}.{name}",
+        $"The export declares more than one {kind} named '{name}' in the same scope. The normalized IR requires unique identities, " +
+        "so normalization was refused rather than writing a representation its reader would later reject.");
+
+    private static ConversionFinding LimitFinding(string scope, string kind, int count, int limit) => new(
+        ConversionSeverity.Unsupported,
+        "Forms module",
+        scope,
+        $"The export declares {count} {kind} entries in this scope and this build retains at most {limit}. Normalization was refused " +
+        "rather than writing a representation its reader would later reject or reading the estate in part.");
+
+    private static void ReportDuplicateTriggers(
+        string module,
+        IEnumerable<FormsTrigger> triggers,
+        List<ConversionFinding> findings)
+    {
+        foreach (IGrouping<(string Scope, string Name), FormsTrigger> duplicate in triggers
+            .GroupBy(trigger => (trigger.Scope.ToUpperInvariant(), trigger.Name.ToUpperInvariant()))
+            .Where(group => group.Skip(1).Any()))
+        {
+            FormsTrigger trigger = duplicate.First();
+            findings.Add(new ConversionFinding(
+                ConversionSeverity.Unsupported,
+                "Forms module",
+                $"{module}.{trigger.Scope}.{trigger.Name}",
+                "The export declares more than one trigger with this scope and name. Their bodies cannot be attributed to a unique " +
+                "source event, so normalization was refused rather than carrying ambiguous behavior forward."));
+        }
     }
 
     private static void ReportBehaviour(
@@ -274,6 +430,29 @@ public static class FormsModuleParser
             && string.Equals(attribute.Name.LocalName, name, StringComparison.OrdinalIgnoreCase))?.Value is { Length: > 0 } value
             ? value
             : null;
+
+    private static FormsTrigger ReadTrigger(XElement trigger, string scope)
+    {
+        if (trigger.Attribute("TriggerText")?.Value is { } attributeBody)
+        {
+            return new FormsTrigger(
+                Attribute(trigger, "Name") ?? "UNNAMED",
+                scope,
+                string.IsNullOrWhiteSpace(attributeBody) ? null : attributeBody,
+                string.IsNullOrWhiteSpace(attributeBody) ? null : FormsTriggerBodyEncoding.Attribute);
+        }
+
+        XElement? bodyElement = trigger.Element(s_forms + "TriggerText");
+        string? body = bodyElement is null
+            ? null
+            : string.Concat(bodyElement.Nodes().OfType<XText>().Select(text => text.Value));
+
+        return new FormsTrigger(
+            Attribute(trigger, "Name") ?? "UNNAMED",
+            scope,
+            string.IsNullOrWhiteSpace(body) ? null : body,
+            string.IsNullOrWhiteSpace(body) ? null : FormsTriggerBodyEncoding.Element);
+    }
 
     /// <summary>Exports write booleans as Yes/No, not true/false.</summary>
     private static bool Flag(XElement element, string name, bool @default) => Attribute(element, name) switch

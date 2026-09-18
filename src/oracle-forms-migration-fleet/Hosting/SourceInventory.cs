@@ -1,5 +1,7 @@
 // Copyright (c) Microsoft. All rights reserved.
 
+using OracleFormsMigrationFleet.Fleet;
+
 namespace OracleFormsMigrationFleet.Hosting;
 
 /// <summary>
@@ -58,6 +60,15 @@ public sealed record SourceInventory(
 
         foreach (string file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
         {
+            string relative = Path.GetFullPath(file).StartsWith(prefix, StringComparison.Ordinal)
+                ? Path.GetFullPath(file)[prefix.Length..].Replace('\\', '/')
+                : Path.GetFileName(file);
+
+            if (WorkspacePath.IsWithin(WorkbenchExecution.OutputRoot, relative))
+            {
+                continue;
+            }
+
             if (fileCount >= maxFiles || byteCount >= maxBytes)
             {
                 truncated = true;
@@ -73,10 +84,6 @@ public sealed record SourceInventory(
             {
                 continue;
             }
-
-            string relative = Path.GetFullPath(file).StartsWith(prefix, StringComparison.Ordinal)
-                ? Path.GetFullPath(file)[prefix.Length..].Replace('\\', '/')
-                : Path.GetFileName(file);
 
             if (Classify(relative) is not string kind)
             {

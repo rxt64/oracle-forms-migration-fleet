@@ -19,6 +19,12 @@ TestResults/
 **/*.tsbuildinfo
 **/.build-stamp
 
+# Playwright run output. The reports and screenshots are CI artifacts, not source; the config and the
+# specs under ClientApp/tests are committed.
+src/oracle-forms-migration-fleet/ClientApp/playwright-report/
+src/oracle-forms-migration-fleet/ClientApp/test-results/
+**/.playwright-browsers/
+
 # Generated client bundle. Rebuilt by the csproj BuildClient target and by the Docker client stage,
 # so committing it would only produce minified merge conflicts on every pull request.
 src/oracle-forms-migration-fleet/wwwroot/

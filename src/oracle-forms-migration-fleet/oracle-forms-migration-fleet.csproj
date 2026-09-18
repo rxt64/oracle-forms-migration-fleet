@@ -27,7 +27,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ClientAppSource Include="ClientApp\src\**\*;ClientApp\index.html;ClientApp\package.json;ClientApp\package-lock.json;ClientApp\tsconfig*.json;ClientApp\vite.config.ts" />
+    <ClientAppSource Include="ClientApp\src\**\*;ClientApp\tests\**\*;ClientApp\index.html;ClientApp\package.json;ClientApp\package-lock.json;ClientApp\tsconfig*.json;ClientApp\vite.config.ts;ClientApp\playwright.config.ts" />
   </ItemGroup>
 
   <ItemGroup>

@@ -3,7 +3,7 @@
 * text=auto eol=lf
 
 # Vendored lock files and binaries must never be line-ending normalized.
-package-lock.json -text
+package-lock.json -text whitespace=cr-at-eol
 *.png binary
 *.ico binary
 *.woff2 binary

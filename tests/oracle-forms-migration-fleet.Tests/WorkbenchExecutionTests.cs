@@ -180,6 +180,26 @@ public class WorkbenchExecutionTests : IDisposable
     }
 
     [Fact]
+    public async Task Artifact_preview_rejects_normalized_trigger_source()
+    {
+        (SourceWorkspaceService service, string workspaceId) = await SeedAsync();
+        using SourceWorkspaceService owned = service;
+
+        WriteArtifact(service, workspaceId, "intermediate/forms-ir.json", "{\"modules\":[]}");
+
+        Assert.False(WorkbenchExecution.TryResolveArtifact(
+            service,
+            Owner,
+            workspaceId,
+            $"{WorkbenchExecution.OutputRoot}/intermediate/forms-ir.json",
+            out _,
+            out int status,
+            out _));
+
+        Assert.Equal(415, status);
+    }
+
+    [Fact]
     public async Task Artifact_preview_serves_a_generated_text_artifact_and_reports_truncation()
     {
         (SourceWorkspaceService service, string workspaceId) = await SeedAsync();

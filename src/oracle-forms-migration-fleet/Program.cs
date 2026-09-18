@@ -45,6 +45,9 @@ using DotNetEnv;
 using Microsoft.Agents.AI;
 using Microsoft.Agents.AI.Foundry.Hosting;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using OracleFormsMigrationFleet.Fleet;
 using OracleFormsMigrationFleet.Fleet.Agents;
 using OracleFormsMigrationFleet.Fleet.Execution;
@@ -68,10 +71,25 @@ bool modelConfigured =
     !string.IsNullOrWhiteSpace(deployment);
 string? managedIdentityClientId = Environment.GetEnvironmentVariable("AZURE_CLIENT_ID");
 bool managedIdentityConfigured = !string.IsNullOrWhiteSpace(managedIdentityClientId);
-bool entraAuthenticationConfigured = string.Equals(
-    Environment.GetEnvironmentVariable("WORKBENCH_ENTRA_AUTH_ENABLED"),
-    "true",
-    StringComparison.OrdinalIgnoreCase);
+
+// Authentication is named, not inferred. The environment is read the same way ASP.NET resolves it, and
+// the host re-checks the answer against IHostEnvironment during startup before it serves anything.
+string environmentName =
+    Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT")
+    ?? Environment.GetEnvironmentVariable("DOTNET_ENVIRONMENT")
+    ?? "Production";
+bool isDevelopmentEnvironment = string.Equals(environmentName, "Development", StringComparison.OrdinalIgnoreCase);
+
+WorkbenchAuthenticationOptions authenticationOptions =
+    WorkbenchAuthenticationOptions.Resolve(isDevelopmentEnvironment, Environment.GetEnvironmentVariable);
+
+IWorkbenchIdentityProvider identityProvider = authenticationOptions.Mode switch
+{
+    WorkbenchAuthenticationMode.ContainerApps => new ContainerAppsIdentityProvider(authenticationOptions),
+    _ => new DevelopmentIdentityProvider(authenticationOptions.DefaultDevelopmentObjectId),
+};
+
+Console.WriteLine($"[INFO] Workbench authentication mode: {authenticationOptions.Mode}.");
 
 FoundryAgentClient? remoteAgentClient = null;
 if (FoundryAgentClient.TryParseEndpoint(
@@ -171,12 +189,13 @@ SourceWorkspaceService sourceWorkspaces = new(Environment.GetEnvironmentVariable
 // migration but cannot choose where the rows land.
 string? sandboxHost = Environment.GetEnvironmentVariable("SANDBOX_PGHOST");
 string? sandboxUser = Environment.GetEnvironmentVariable("SANDBOX_PGUSER");
+string sandboxDatabase = Environment.GetEnvironmentVariable("SANDBOX_PGDATABASE") ?? "postgres";
 bool sandboxDatabaseConfigured = !string.IsNullOrWhiteSpace(sandboxHost) && !string.IsNullOrWhiteSpace(sandboxUser);
 if (sandboxDatabaseConfigured)
 {
     builder.Services.AddSingleton<IDataMigrationGateway>(new PostgresDataMigrationGateway(
         sandboxHost!,
-        Environment.GetEnvironmentVariable("SANDBOX_PGDATABASE") ?? "postgres",
+        sandboxDatabase,
         sandboxUser!,
         string.IsNullOrWhiteSpace(managedIdentityClientId)
             ? new AzureDeveloperCliCredential(new AzureDeveloperCliCredentialOptions { ProcessTimeout = TimeSpan.FromSeconds(30) })
@@ -184,6 +203,69 @@ if (sandboxDatabaseConfigured)
 
     Console.WriteLine($"[INFO] Sandbox data migration target: {sandboxHost}. Authentication is Entra only.");
 }
+
+// The identity of the target, separated from the ability to write to it. A persisted target profile is
+// compared against this before any grant is honoured, so an approval cannot name a database this process
+// is not actually wired to.
+ISandboxTargetBinding? sandboxBinding = sandboxDatabaseConfigured
+    ? new ConfiguredSandboxTargetBinding(sandboxHost!, sandboxDatabase, sandboxUser!, CanWrite: true)
+    : DevelopmentSandboxTarget();
+
+if (sandboxBinding is not null)
+{
+    builder.Services.AddSingleton(sandboxBinding);
+}
+
+builder.Services.AddSingleton(
+    PlatformTargetProfileEnvironment.Read(
+        Environment.GetEnvironmentVariable,
+        environmentName,
+        requireSandboxCoordinates: sandboxBinding is not null));
+
+// Platform state: PostgreSQL in a deployment, a durable local file in explicit Development mode.
+// Production must not fall back to the file adapter — a per-replica file is not a shared record of who
+// approved what, and treating it as one would make an approval disappear on the next revision.
+IPlatformStateStore? platformStore = null;
+bool migratePlatformStore = false;
+
+if (PlatformDatabaseOptions.TryRead(Environment.GetEnvironmentVariable, out PlatformDatabaseOptions? platformDatabase, out string platformError))
+{
+    platformStore = new PostgresPlatformStateStore(
+        platformDatabase!,
+        string.IsNullOrWhiteSpace(managedIdentityClientId)
+            ? new AzureDeveloperCliCredential(new AzureDeveloperCliCredentialOptions { ProcessTimeout = TimeSpan.FromSeconds(30) })
+            : new ManagedIdentityCredential(ManagedIdentityId.FromUserAssignedClientId(managedIdentityClientId)));
+    migratePlatformStore = true;
+
+    Console.WriteLine($"[INFO] Platform state store: PostgreSQL schema '{platformDatabase!.Schema}' on {platformDatabase.Host}.");
+}
+else if (authenticationOptions.Mode == WorkbenchAuthenticationMode.Development)
+{
+    string statePath = Environment.GetEnvironmentVariable("PLATFORM_STATE_FILE")
+        ?? Path.Combine(Path.GetTempPath(), "ofm-platform-development", "platform-state.json");
+
+    platformStore = new FilePlatformStateStore(statePath);
+    Console.WriteLine($"[INFO] Platform state store: durable development file at {statePath}.");
+}
+else
+{
+    throw new InvalidOperationException(
+        $"A deployed workbench requires a platform state store. {platformError}");
+}
+
+builder.Services.AddSingleton(platformStore);
+builder.Services.AddSingleton(new PlatformAccessService(platformStore, sandboxBinding));
+builder.Services.AddSingleton(new WorkbenchAuthorizationService(
+    new PlatformAuthorizationStore(platformStore, sandboxBinding)));
+
+bool migrate = migratePlatformStore;
+IPlatformStateStore startupStore = platformStore;
+builder.Services.AddSingleton<IHostedService>(provider => new PlatformStartupService(
+    provider.GetRequiredService<IHostEnvironment>(),
+    authenticationOptions,
+    provider.GetRequiredService<ILogger<PlatformStartupService>>(),
+    startupStore,
+    migrate));
 
 builder.RegisterProtocol("responses", endpoints =>
 {
@@ -204,10 +286,37 @@ builder.RegisterProtocol("responses", endpoints =>
         modelConfigured,
         remoteAgentClient,
         managedIdentityConfigured,
-        entraAuthenticationConfigured,
+        identityProvider,
         sandboxDatabaseConfigured,
         sourceWorkspaces);
 });
 
 var app = builder.Build();
 app.Run();
+
+/// <summary>
+/// A declared development target, used only to exercise the approval chain offline.
+///
+/// It is opt-in through one environment variable that no deployment sets, it exists only in Development
+/// mode, and it registers no gateway, so an approval made against it opens the gate and the adapter then
+/// reports that there is nothing to write to. That is the honest shape: the authorization path is real
+/// and the write capability is absent.
+/// </summary>
+ISandboxTargetBinding? DevelopmentSandboxTarget()
+{
+    if (!isDevelopmentEnvironment || authenticationOptions.Mode != WorkbenchAuthenticationMode.Development)
+    {
+        return null;
+    }
+
+    string? declared = Environment.GetEnvironmentVariable("WORKBENCH_DEV_SANDBOX_TARGET");
+    if (string.IsNullOrWhiteSpace(declared))
+    {
+        return null;
+    }
+
+    string[] parts = declared.Split('|', StringSplitOptions.TrimEntries);
+    return parts.Length == 3 && parts.All(part => part.Length > 0)
+        ? new ConfiguredSandboxTargetBinding(parts[0], parts[1], parts[2], CanWrite: false)
+        : null;
+}

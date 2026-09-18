@@ -9,7 +9,7 @@ namespace OracleFormsMigrationFleet.Hosting;
 
 internal sealed record WorkbenchAgentRequest(string Message);
 
-internal sealed record WorkbenchCloneRequest(string? RepositoryUrl, string? Branch);
+internal sealed record WorkbenchCloneRequest(string? RepositoryUrl, string? Branch, string? ProjectId);
 
 internal sealed record WorkbenchAgentResponse(string? ResponseId, string Text);
 

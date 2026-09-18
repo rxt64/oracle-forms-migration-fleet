@@ -1,0 +1,742 @@
+// Copyright (c) Microsoft. All rights reserved.
+
+using OracleFormsMigrationFleet.Fleet;
+
+namespace OracleFormsMigrationFleet.Hosting;
+
+/// <summary>
+/// The identity of the sandbox database this process is actually configured to write to.
+///
+/// It exists so a persisted target profile can be compared against reality before a grant is honoured.
+/// Everything on it is a non-secret coordinate the browser may see; the credential the gateway uses is
+/// not represented here and never leaves the process.
+/// </summary>
+public interface ISandboxTargetBinding
+{
+    string EndpointHost { get; }
+
+    string DatabaseName { get; }
+
+    string ExecutionIdentity { get; }
+
+    /// <summary>True when a data migration gateway backed by this binding is registered.</summary>
+    bool CanWrite { get; }
+}
+
+/// <summary>A binding read from host configuration. The caller never supplies any part of it.</summary>
+public sealed record ConfiguredSandboxTargetBinding(
+    string EndpointHost,
+    string DatabaseName,
+    string ExecutionIdentity,
+    bool CanWrite) : ISandboxTargetBinding;
+
+/// <summary>Outcome of a platform operation, shaped so an endpoint can answer without exceptions.</summary>
+public sealed record PlatformResult<T>(bool Succeeded, T? Value, int Status, string Error)
+{
+    public static PlatformResult<T> Ok(T value) => new(true, value, 200, string.Empty);
+
+    public static PlatformResult<T> Fail(int status, string error) => new(false, default, status, error);
+}
+
+/// <summary>What a caller asks for when requesting an approval. Every binding is derived, not supplied.</summary>
+public sealed record PlatformApprovalRequestInput(
+    string ProjectId,
+    string TargetProfileId,
+    WorkbenchMutationScope Scope,
+    string EngagementId,
+    string SourceSnapshotHash,
+    string PlanInputHash,
+    TimeSpan Lifetime,
+    string? Notes);
+
+/// <summary>
+/// Projects persisted approvals into the grants the trust boundary understands.
+///
+/// A grant is not stored. It is computed from an approval that is currently approved, unexpired, and
+/// unrevoked, whose target profile still exists at the version it was approved against, and whose target
+/// profile still matches the sandbox this process is actually wired to. Any of those ceasing to be true
+/// makes the grant disappear at the next check, which is what makes revocation and drift effective
+/// without a second store to keep in step.
+/// </summary>
+public sealed class PlatformAuthorizationStore(
+    IPlatformStateStore store,
+    ISandboxTargetBinding? sandbox,
+    Func<DateTimeOffset>? clock = null) : IWorkbenchAuthorizationStore
+{
+    private readonly Func<DateTimeOffset> _clock = clock ?? (() => DateTimeOffset.UtcNow);
+
+    public async Task<IReadOnlyList<WorkbenchAuthorizationRecord>> ForOwnerAsync(
+        string ownerId,
+        CancellationToken cancellationToken)
+    {
+        if (!PlatformIdentity.TrySplitOwner(ownerId, out string tenantId, out string objectId))
+        {
+            return [];
+        }
+
+        DateTimeOffset now = _clock();
+        IReadOnlyList<PlatformApproval> approvals =
+            await store.ApprovalsForRequesterAsync(tenantId, objectId, cancellationToken).ConfigureAwait(false);
+
+        List<WorkbenchAuthorizationRecord> grants = [];
+        foreach (PlatformApproval approval in approvals)
+        {
+            if (!approval.IsEffective(now) || approval.Scope != WorkbenchMutationScope.SandboxDatabaseWrite)
+            {
+                continue;
+            }
+
+            PlatformMembership? membership = await store
+                .GetMembershipAsync(tenantId, approval.ProjectId, objectId, cancellationToken)
+                .ConfigureAwait(false);
+
+            // Membership removed after approval revokes the grant without anyone touching the approval.
+            if (membership is null || !membership.HasRole(approval.RequiredRole))
+            {
+                continue;
+            }
+
+            PlatformTargetProfile? profile = await store
+                .GetTargetProfileAsync(tenantId, approval.ProjectId, approval.TargetProfileId, approval.TargetProfileVersion, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (profile is null ||
+                !string.Equals(profile.CanonicalHash, approval.TargetProfileHash, StringComparison.Ordinal) ||
+                !MatchesConfiguredSandbox(profile))
+            {
+                continue;
+            }
+
+            grants.Add(new WorkbenchAuthorizationRecord
+            {
+                AuthorizationId = approval.ApprovalId,
+                OwnerId = ownerId,
+                RequiredRole = approval.RequiredRole,
+                EngagementId = approval.EngagementId,
+                SourceSnapshotHash = approval.SourceSnapshotHash,
+                PlanInputHash = approval.PlanInputHash,
+                TargetHash = approval.TargetProfileHash,
+                Scope = approval.Scope,
+                ExpiresUtc = approval.ExpiresUtc,
+                TenantId = tenantId,
+                ProjectId = approval.ProjectId,
+                TargetProfileId = approval.TargetProfileId,
+                TargetProfileVersion = approval.TargetProfileVersion,
+                ApprovedByObjectId = approval.DecidedByObjectId ?? string.Empty,
+                IsRevoked = false,
+            });
+        }
+
+        return grants;
+    }
+
+    /// <summary>
+    /// A profile authorizes nothing unless it names the database this process is wired to. Without a
+    /// configured sandbox there is no target, so there is nothing a grant could authorize.
+    /// </summary>
+    public bool MatchesConfiguredSandbox(PlatformTargetProfile profile)
+    {
+        ArgumentNullException.ThrowIfNull(profile);
+
+        return sandbox is not null &&
+            string.Equals(profile.EndpointHost, sandbox.EndpointHost, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(profile.DatabaseName, sandbox.DatabaseName, StringComparison.Ordinal) &&
+            string.Equals(profile.ExecutionIdentity, sandbox.ExecutionIdentity, StringComparison.OrdinalIgnoreCase);
+    }
+}
+
+/// <summary>Owner identifiers are tenant-qualified; this is the one place that knows the shape.</summary>
+public static class PlatformIdentity
+{
+    public static string WorkspaceOwner(WorkbenchActor actor, string projectId)
+    {
+        ArgumentNullException.ThrowIfNull(actor);
+        ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
+        return $"{actor.OwnerId}/{projectId}";
+    }
+
+    public static bool TrySplitOwner(string? ownerId, out string tenantId, out string objectId)
+    {
+        tenantId = string.Empty;
+        objectId = string.Empty;
+
+        if (string.IsNullOrWhiteSpace(ownerId))
+        {
+            return false;
+        }
+
+        int separator = ownerId.IndexOf(':', StringComparison.Ordinal);
+        if (separator <= 0 || separator == ownerId.Length - 1)
+        {
+            return false;
+        }
+
+        tenantId = ownerId[..separator];
+        objectId = ownerId[(separator + 1)..];
+        return true;
+    }
+}
+
+/// <summary>
+/// The approval state machine and the project reads behind the authenticated APIs.
+///
+/// Nothing here trusts a caller beyond an identifier. Membership is looked up, the target profile is
+/// looked up, the bindings come from the server's own view of the source and the sanitized plan, and
+/// the decision path refuses the requester by identity rather than by asking them not to.
+/// </summary>
+public sealed class PlatformAccessService(
+    IPlatformStateStore store,
+    ISandboxTargetBinding? sandbox,
+    Func<DateTimeOffset>? clock = null)
+{
+    /// <summary>Shortest and longest life an approval may be granted for.</summary>
+    public static readonly TimeSpan MinimumLifetime = TimeSpan.FromMinutes(5);
+
+    public static readonly TimeSpan MaximumLifetime = TimeSpan.FromHours(24);
+
+    private readonly Func<DateTimeOffset> _clock = clock ?? (() => DateTimeOffset.UtcNow);
+
+    public IPlatformStateStore Store => store;
+
+    public ISandboxTargetBinding? Sandbox => sandbox;
+
+    public async Task<PlatformResult<PlatformProject>> CreateProjectAsync(
+        WorkbenchActor actor,
+        string? name,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(actor);
+
+        if (actor.TenantId.Length == 0 || actor.ObjectId.Length == 0)
+        {
+            return PlatformResult<PlatformProject>.Fail(401, "The caller has no tenant-scoped identity.");
+        }
+
+        string projectName = (name ?? string.Empty).Trim();
+        if (projectName.Length is < 1 or > 120)
+        {
+            return PlatformResult<PlatformProject>.Fail(400, "A project name must contain between 1 and 120 characters.");
+        }
+
+        if (FleetGuardrails.ContainsPotentialSecret(projectName))
+        {
+            return PlatformResult<PlatformProject>.Fail(400, "That project name looked like credential material.");
+        }
+
+        PlatformOrganization organization = await store
+            .EnsureOrganizationAsync(actor.TenantId, actor.TenantId, cancellationToken)
+            .ConfigureAwait(false);
+
+        DateTimeOffset now = _clock();
+        PlatformProject project = new()
+        {
+            ProjectId = $"prj-{Guid.NewGuid():N}",
+            OrganizationId = organization.OrganizationId,
+            TenantId = actor.TenantId,
+            Name = projectName,
+            CreatedUtc = now,
+        };
+
+        // The founder is a member and an approver. Separation of duty is enforced by identity on each
+        // decision, not by withholding the role, so a second member can approve the founder's request.
+        PlatformMembership founder = new()
+        {
+            ProjectId = project.ProjectId,
+            TenantId = actor.TenantId,
+            ObjectId = actor.ObjectId,
+            Roles = [WorkbenchRoles.MigrationOperator, WorkbenchRoles.SandboxApprover],
+            CreatedUtc = now,
+        };
+
+        await store.CreateProjectAsync(project, founder, cancellationToken).ConfigureAwait(false);
+        return PlatformResult<PlatformProject>.Ok(project);
+    }
+
+    public Task<IReadOnlyList<PlatformProject>> ProjectsAsync(WorkbenchActor actor, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(actor);
+        return store.ProjectsForActorAsync(actor.TenantId, actor.ObjectId, cancellationToken);
+    }
+
+    /// <summary>
+    /// Adds or updates a member of a project.
+    ///
+    /// Without this, a project founder could request an approval that nobody is able to decide, because
+    /// separation of duty refuses the requester and there is no second member. Roles are drawn from a
+    /// fixed list that does not include production approval: no API path in this build grants it.
+    /// </summary>
+    public async Task<PlatformResult<PlatformMembership>> AddMemberAsync(
+        WorkbenchActor actor,
+        string projectId,
+        string? objectId,
+        IReadOnlyList<string>? roles,
+        CancellationToken cancellationToken)
+    {
+        PlatformResult<PlatformMembership> access =
+            await RequireMembershipAsync(actor, projectId, WorkbenchRoles.SandboxApprover, cancellationToken).ConfigureAwait(false);
+
+        if (!access.Succeeded)
+        {
+            return access;
+        }
+
+        string member = (objectId ?? string.Empty).Trim();
+        if (member.Length is 0 or > 128 || member.Any(character => char.IsControl(character) || character == ':'))
+        {
+            return PlatformResult<PlatformMembership>.Fail(400, "A member is named by a directory object identifier.");
+        }
+
+        if (!string.Equals(
+                actor.TenantId,
+                WorkbenchAuthenticationOptions.DevelopmentTenantId,
+                StringComparison.Ordinal))
+        {
+            if (!Guid.TryParse(member, out Guid directoryObjectId))
+            {
+                return PlatformResult<PlatformMembership>.Fail(400, "A deployed project member must be named by an Entra object ID.");
+            }
+
+            member = directoryObjectId.ToString("D");
+        }
+
+        string[] allowed = [WorkbenchRoles.MigrationOperator, WorkbenchRoles.SandboxApprover];
+        string[] requested = [.. (roles ?? allowed)
+            .Select(role => allowed.FirstOrDefault(known => string.Equals(known, role, StringComparison.OrdinalIgnoreCase)))
+            .OfType<string>()
+            .Distinct(StringComparer.Ordinal)];
+
+        if (requested.Length == 0)
+        {
+            return PlatformResult<PlatformMembership>.Fail(
+                400, $"A member holds {WorkbenchRoles.MigrationOperator}, {WorkbenchRoles.SandboxApprover}, or both.");
+        }
+
+        PlatformMembership? existing =
+            await store.GetMembershipAsync(actor.TenantId, projectId, member, cancellationToken).ConfigureAwait(false);
+
+        PlatformMembership? written = await store.UpsertMembershipAsync(
+            new PlatformMembership
+            {
+                ProjectId = projectId,
+                TenantId = actor.TenantId,
+                ObjectId = member,
+                Roles = requested,
+                CreatedUtc = existing?.CreatedUtc ?? _clock(),
+                RemovedUtc = null,
+            },
+            existing?.Version,
+            cancellationToken).ConfigureAwait(false);
+
+        return written is null
+            ? PlatformResult<PlatformMembership>.Fail(409, "That membership changed since it was read.")
+            : PlatformResult<PlatformMembership>.Ok(written);
+    }
+
+    /// <summary>
+    /// Records the target this process is configured for as an immutable profile of the project.
+    ///
+    /// The caller chooses nothing. Without a configured sandbox there is no target identity to describe,
+    /// and inventing one would produce a profile that authorizes a database that does not exist.
+    /// </summary>
+    public async Task<PlatformResult<PlatformTargetProfile>> EnsureConfiguredTargetProfileAsync(
+        WorkbenchActor actor,
+        string projectId,
+        PlatformTargetProfileEnvironment environment,
+        CancellationToken cancellationToken)
+    {
+        PlatformResult<PlatformMembership> access =
+            await RequireMembershipAsync(actor, projectId, WorkbenchRoles.MigrationOperator, cancellationToken).ConfigureAwait(false);
+
+        if (!access.Succeeded)
+        {
+            return PlatformResult<PlatformTargetProfile>.Fail(access.Status, access.Error);
+        }
+
+        if (sandbox is null)
+        {
+            return PlatformResult<PlatformTargetProfile>.Fail(
+                409,
+                "No sandbox database is configured on this server, so there is no target identity to record.");
+        }
+
+        PlatformTargetProfile candidate = new()
+        {
+            TargetProfileId = "sandbox",
+            ProjectId = projectId,
+            TenantId = actor.TenantId,
+            Version = 1,
+            AzureTenantId = environment.AzureTenantId,
+            SubscriptionId = environment.SubscriptionId,
+            ResourceGroup = environment.ResourceGroup,
+            ResourceId = environment.ResourceId,
+            Region = environment.Region,
+            EndpointHost = sandbox.EndpointHost,
+            DatabaseName = sandbox.DatabaseName,
+            SchemaName = environment.SchemaName,
+            ExecutionIdentity = sandbox.ExecutionIdentity,
+            EnvironmentName = environment.EnvironmentName,
+            StackDatabase = nameof(DatabaseTarget.PostgreSql),
+            StackFrontEnd = nameof(FrontEndStack.React),
+            StackBackEnd = nameof(BackEndStack.JavaSpringBoot),
+            CanonicalHash = string.Empty,
+            CreatedUtc = _clock(),
+        };
+
+        candidate = candidate with { CanonicalHash = PlatformTargetProfiles.Hash(candidate) };
+
+        if (!PlatformTargetProfiles.TryValidate(candidate, out PlatformTargetProfileRejection? rejection))
+        {
+            return PlatformResult<PlatformTargetProfile>.Fail(400, rejection.Reason);
+        }
+
+        PlatformTargetProfile? existing = await store
+            .GetTargetProfileAsync(actor.TenantId, projectId, candidate.TargetProfileId, version: null, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (existing is not null)
+        {
+            // Same target, same profile. A different target is a new immutable version, never an edit.
+            if (string.Equals(existing.CanonicalHash, candidate.CanonicalHash, StringComparison.Ordinal))
+            {
+                return PlatformResult<PlatformTargetProfile>.Ok(existing);
+            }
+
+            candidate = candidate with { Version = existing.Version + 1 };
+            candidate = candidate with { CanonicalHash = PlatformTargetProfiles.Hash(candidate) };
+        }
+
+        PlatformTargetProfile? stored = await store.CreateTargetProfileAsync(candidate, cancellationToken).ConfigureAwait(false);
+        return stored is null
+            ? PlatformResult<PlatformTargetProfile>.Fail(409, "That target profile version already exists and is immutable.")
+            : PlatformResult<PlatformTargetProfile>.Ok(stored);
+    }
+
+    public async Task<PlatformResult<IReadOnlyList<PlatformApproval>>> ApprovalsAsync(
+        WorkbenchActor actor,
+        string projectId,
+        CancellationToken cancellationToken)
+    {
+        PlatformResult<PlatformMembership> access =
+            await RequireMembershipAsync(actor, projectId, null, cancellationToken).ConfigureAwait(false);
+
+        if (!access.Succeeded)
+        {
+            return PlatformResult<IReadOnlyList<PlatformApproval>>.Fail(access.Status, access.Error);
+        }
+
+        return PlatformResult<IReadOnlyList<PlatformApproval>>.Ok(
+            await store.ApprovalsForProjectAsync(actor.TenantId, projectId, cancellationToken).ConfigureAwait(false));
+    }
+
+    public async Task<PlatformResult<PlatformApproval>> RequestAsync(
+        WorkbenchActor actor,
+        PlatformApprovalRequestInput input,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+
+        if (input.Scope == WorkbenchMutationScope.ProductionWrite)
+        {
+            return PlatformResult<PlatformApproval>.Fail(
+                409,
+                "Production approval is not available in this increment. No path in this build issues a production grant.");
+        }
+
+        PlatformResult<PlatformMembership> access =
+            await RequireMembershipAsync(actor, input.ProjectId, WorkbenchRoles.MigrationOperator, cancellationToken).ConfigureAwait(false);
+
+        if (!access.Succeeded)
+        {
+            return PlatformResult<PlatformApproval>.Fail(access.Status, access.Error);
+        }
+
+        PlatformTargetProfile? profile = await store
+            .GetTargetProfileAsync(actor.TenantId, input.ProjectId, input.TargetProfileId, version: null, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (profile is null)
+        {
+            return PlatformResult<PlatformApproval>.Fail(404, "That project has no target profile with that identifier.");
+        }
+
+        if (sandbox is null)
+        {
+            return PlatformResult<PlatformApproval>.Fail(
+                409,
+                "No sandbox database is configured on this server, so a sandbox write could not be authorized even if approved.");
+        }
+
+        if (!new PlatformAuthorizationStore(store, sandbox, () => _clock()).MatchesConfiguredSandbox(profile))
+        {
+            return PlatformResult<PlatformApproval>.Fail(
+                409,
+                "The stored target profile does not describe the database this server is configured to write to.");
+        }
+
+        if (input.SourceSnapshotHash.Length == 0 ||
+            string.Equals(input.SourceSnapshotHash, WorkbenchTrustBoundary.NoSourceHash, StringComparison.Ordinal))
+        {
+            return PlatformResult<PlatformApproval>.Fail(
+                400,
+                "An approval binds to a source copy this server indexed. Acquire the source first.");
+        }
+
+        TimeSpan lifetime = input.Lifetime < MinimumLifetime ? MinimumLifetime
+            : input.Lifetime > MaximumLifetime ? MaximumLifetime
+            : input.Lifetime;
+
+        string? notes = (input.Notes ?? string.Empty).Trim();
+        if (notes.Length == 0)
+        {
+            notes = null;
+        }
+        else if (notes.Length > 2_000 || FleetGuardrails.ContainsPotentialSecret(notes))
+        {
+            return PlatformResult<PlatformApproval>.Fail(400, "That note was rejected before it was stored.");
+        }
+
+        DateTimeOffset now = _clock();
+        PlatformApproval approval = new()
+        {
+            ApprovalId = $"apr-{Guid.NewGuid():N}",
+            ProjectId = input.ProjectId,
+            TenantId = actor.TenantId,
+            RequestedByObjectId = actor.ObjectId,
+            RequestedUtc = now,
+            State = PlatformApprovalState.Requested,
+            Scope = input.Scope,
+            RequiredRole = WorkbenchRoles.MigrationOperator,
+            EngagementId = input.EngagementId,
+            SourceSnapshotHash = input.SourceSnapshotHash,
+            PlanInputHash = input.PlanInputHash,
+            TargetProfileId = profile.TargetProfileId,
+            TargetProfileVersion = profile.Version,
+            TargetProfileHash = profile.CanonicalHash,
+            ExpiresUtc = now.Add(lifetime),
+            RequestNotes = notes,
+        };
+
+        return PlatformResult<PlatformApproval>.Ok(
+            await store.CreateApprovalAsync(approval, cancellationToken).ConfigureAwait(false));
+    }
+
+    public async Task<PlatformResult<PlatformApproval>> DecideAsync(
+        WorkbenchActor actor,
+        string approvalId,
+        bool approve,
+        int expectedVersion,
+        string? notes,
+        CancellationToken cancellationToken)
+    {
+        PlatformApproval? approval = await store.GetApprovalAsync(actor.TenantId, approvalId, cancellationToken).ConfigureAwait(false);
+        if (approval is null)
+        {
+            return PlatformResult<PlatformApproval>.Fail(404, "No approval with that identifier exists for this tenant.");
+        }
+
+        PlatformResult<PlatformMembership> access =
+            await RequireMembershipAsync(actor, approval.ProjectId, WorkbenchRoles.SandboxApprover, cancellationToken).ConfigureAwait(false);
+
+        if (!access.Succeeded)
+        {
+            return PlatformResult<PlatformApproval>.Fail(access.Status, access.Error);
+        }
+
+        if (string.Equals(approval.RequestedByObjectId, actor.ObjectId, StringComparison.OrdinalIgnoreCase))
+        {
+            return PlatformResult<PlatformApproval>.Fail(
+                403, "The requester cannot decide their own request. Another project approver must.");
+        }
+
+        if (approval.State != PlatformApprovalState.Requested)
+        {
+            return PlatformResult<PlatformApproval>.Fail(
+                409, $"That request was already {approval.State.ToString().ToLowerInvariant()}.");
+        }
+
+        if (approval.ExpiresUtc <= _clock())
+        {
+            return PlatformResult<PlatformApproval>.Fail(409, "That request expired before it was decided.");
+        }
+
+        string? decisionNotes = Sanitize(notes);
+        if (decisionNotes is { Length: > 2_000 })
+        {
+            return PlatformResult<PlatformApproval>.Fail(400, "That note was rejected before it was stored.");
+        }
+
+        PlatformApproval decided = approval with
+        {
+            State = approve ? PlatformApprovalState.Approved : PlatformApprovalState.Rejected,
+            DecidedByObjectId = actor.ObjectId,
+            DecidedUtc = _clock(),
+            DecisionNotes = decisionNotes,
+        };
+
+        PlatformApproval? written = await store.UpdateApprovalAsync(decided, expectedVersion, cancellationToken).ConfigureAwait(false);
+        return written is null
+            ? PlatformResult<PlatformApproval>.Fail(409, "That approval changed since it was read. Re-read it and decide again.")
+            : PlatformResult<PlatformApproval>.Ok(written);
+    }
+
+    public async Task<PlatformResult<PlatformApproval>> RevokeAsync(
+        WorkbenchActor actor,
+        string approvalId,
+        int expectedVersion,
+        string? notes,
+        CancellationToken cancellationToken)
+    {
+        PlatformApproval? approval = await store.GetApprovalAsync(actor.TenantId, approvalId, cancellationToken).ConfigureAwait(false);
+        if (approval is null)
+        {
+            return PlatformResult<PlatformApproval>.Fail(404, "No approval with that identifier exists for this tenant.");
+        }
+
+        PlatformResult<PlatformMembership> access =
+            await RequireMembershipAsync(actor, approval.ProjectId, null, cancellationToken).ConfigureAwait(false);
+
+        if (!access.Succeeded)
+        {
+            return PlatformResult<PlatformApproval>.Fail(access.Status, access.Error);
+        }
+
+        bool isRequester = string.Equals(approval.RequestedByObjectId, actor.ObjectId, StringComparison.OrdinalIgnoreCase);
+        if (!isRequester && !access.Value!.HasRole(WorkbenchRoles.SandboxApprover))
+        {
+            return PlatformResult<PlatformApproval>.Fail(
+                403, "Only the requester or a project approver can revoke this authorization.");
+        }
+
+        if (approval.State is PlatformApprovalState.Revoked or PlatformApprovalState.Rejected)
+        {
+            return PlatformResult<PlatformApproval>.Fail(
+                409, $"That request is already {approval.State.ToString().ToLowerInvariant()}.");
+        }
+
+        PlatformApproval revoked = approval with
+        {
+            State = PlatformApprovalState.Revoked,
+            RevokedByObjectId = actor.ObjectId,
+            RevokedUtc = _clock(),
+            RevocationNotes = Sanitize(notes),
+        };
+
+        PlatformApproval? written = await store.UpdateApprovalAsync(revoked, expectedVersion, cancellationToken).ConfigureAwait(false);
+        return written is null
+            ? PlatformResult<PlatformApproval>.Fail(409, "That approval changed since it was read. Re-read it and revoke again.")
+            : PlatformResult<PlatformApproval>.Ok(written);
+    }
+
+    /// <summary>
+    /// Membership is the gate for every project-scoped read and write. An object identifier without an
+    /// active membership in this tenant's project reaches nothing, and the answer is the same 404 a
+    /// non-existent project gets so project identifiers cannot be enumerated.
+    /// </summary>
+    public async Task<PlatformResult<PlatformMembership>> RequireMembershipAsync(
+        WorkbenchActor actor,
+        string projectId,
+        string? requiredRole,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(actor);
+
+        if (actor.TenantId.Length == 0 || actor.ObjectId.Length == 0)
+        {
+            return PlatformResult<PlatformMembership>.Fail(401, "The caller has no tenant-scoped identity.");
+        }
+
+        if (string.IsNullOrWhiteSpace(projectId))
+        {
+            return PlatformResult<PlatformMembership>.Fail(400, "A project identifier is required.");
+        }
+
+        PlatformMembership? membership =
+            await store.GetMembershipAsync(actor.TenantId, projectId, actor.ObjectId, cancellationToken).ConfigureAwait(false);
+
+        if (membership is null || !membership.IsActive)
+        {
+            return PlatformResult<PlatformMembership>.Fail(404, "No such project is available to this caller.");
+        }
+
+        if (requiredRole is not null && !membership.HasRole(requiredRole))
+        {
+            return PlatformResult<PlatformMembership>.Fail(
+                403, $"This action requires the {requiredRole} role in this project.");
+        }
+
+        return PlatformResult<PlatformMembership>.Ok(membership);
+    }
+
+    private static string? Sanitize(string? notes)
+    {
+        string value = (notes ?? string.Empty).Trim();
+        return value.Length == 0 || FleetGuardrails.ContainsPotentialSecret(value) ? null : value;
+    }
+}
+
+/// <summary>
+/// The Azure coordinates the host was deployed with, used to complete a target profile.
+///
+/// These are deployment facts injected as environment values, not caller input. When a deployment does
+/// not declare them the profile records the placeholder string it was actually given, so a reader can
+/// see that the coordinate is undeclared rather than being shown an invented one.
+/// </summary>
+public sealed record PlatformTargetProfileEnvironment
+{
+    public const string Undeclared = "undeclared";
+
+    public required string AzureTenantId { get; init; }
+
+    public required string SubscriptionId { get; init; }
+
+    public required string ResourceGroup { get; init; }
+
+    public required string ResourceId { get; init; }
+
+    public required string Region { get; init; }
+
+    public required string SchemaName { get; init; }
+
+    public required string EnvironmentName { get; init; }
+
+    public static PlatformTargetProfileEnvironment Read(
+        WorkbenchConfigurationLookup configuration,
+        string environmentName,
+        bool requireSandboxCoordinates = true)
+    {
+        ArgumentNullException.ThrowIfNull(configuration);
+
+        PlatformTargetProfileEnvironment environment = new()
+        {
+            AzureTenantId = Value(configuration, "SANDBOX_AZURE_TENANT_ID"),
+            SubscriptionId = Value(configuration, "SANDBOX_AZURE_SUBSCRIPTION_ID"),
+            ResourceGroup = Value(configuration, "SANDBOX_AZURE_RESOURCE_GROUP"),
+            ResourceId = Value(configuration, "SANDBOX_AZURE_RESOURCE_ID"),
+            Region = Value(configuration, "SANDBOX_AZURE_REGION"),
+            SchemaName = Value(configuration, "SANDBOX_PGSCHEMA", "public"),
+            EnvironmentName = environmentName,
+        };
+
+        if (requireSandboxCoordinates &&
+            !string.Equals(environmentName, "Development", StringComparison.OrdinalIgnoreCase))
+        {
+            List<string> missing = [];
+            if (environment.AzureTenantId == Undeclared) missing.Add("SANDBOX_AZURE_TENANT_ID");
+            if (environment.SubscriptionId == Undeclared) missing.Add("SANDBOX_AZURE_SUBSCRIPTION_ID");
+            if (environment.ResourceGroup == Undeclared) missing.Add("SANDBOX_AZURE_RESOURCE_GROUP");
+            if (environment.ResourceId == Undeclared) missing.Add("SANDBOX_AZURE_RESOURCE_ID");
+            if (environment.Region == Undeclared) missing.Add("SANDBOX_AZURE_REGION");
+
+            if (missing.Count > 0)
+            {
+                throw new InvalidOperationException(
+                    $"A deployed sandbox target requires complete Azure coordinates. Missing: {string.Join(", ", missing)}.");
+            }
+        }
+
+        return environment;
+    }
+
+    private static string Value(WorkbenchConfigurationLookup configuration, string name, string fallback = Undeclared) =>
+        configuration(name) is { Length: > 0 } value ? value.Trim() : fallback;
+}
