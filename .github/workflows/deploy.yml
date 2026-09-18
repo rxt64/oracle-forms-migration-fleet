@@ -29,6 +29,10 @@ env:
   SANDBOX_PGHOST: pg-ofmfleet-dev-ykbpnrpd.postgres.database.azure.com
   SANDBOX_PGUSER: id-ofmfleet-web-dev-ykbpnrpd
   SANDBOX_PGDATABASE: postgres
+  PLATFORM_PGHOST: pg-ofmfleet-dev-ykbpnrpd.postgres.database.azure.com
+  PLATFORM_PGUSER: id-ofmfleet-web-dev-ykbpnrpd
+  PLATFORM_PGDATABASE: ofm_platform
+  WORKBENCH_AUTH_CLIENT_ID: 0ff0fa49-fce8-4801-ab93-e862a62fd6ab
   # Without these the reviewer and repair agents are never registered, and the fleet silently degrades
   # to single-pass deterministic conversion with no critique round.
   AZURE_OPENAI_ENDPOINT: https://cog-czusrhcg4gpm2.openai.azure.com/
@@ -77,8 +81,17 @@ jobs:
           echo "TAG=$TAG" >> "$GITHUB_ENV"
 
       - name: Configure the sandbox database target
-        if: ${{ github.event_name == 'push' || (inputs.deploy-app && inputs.migrate-data) }}
+        if: ${{ github.event_name == 'push' || inputs.deploy-app }}
         run: |
+          if [[ -z "$PLATFORM_PGHOST" || -z "$PLATFORM_PGDATABASE" || -z "$PLATFORM_PGUSER" || \
+                -z "$SANDBOX_PGHOST" || -z "$SANDBOX_PGDATABASE" || -z "$SANDBOX_PGUSER" ]]; then
+            echo "Platform and sandbox PostgreSQL coordinates are required." >&2
+            exit 1
+          fi
+          if [[ "$PLATFORM_PGHOST" == "$SANDBOX_PGHOST" && "$PLATFORM_PGDATABASE" == "$SANDBOX_PGDATABASE" ]]; then
+            echo "Platform authorization state and sandbox migration must use different PostgreSQL databases." >&2
+            exit 1
+          fi
           az containerapp update \
             --name "$CONTAINER_APP" \
             --resource-group "$RESOURCE_GROUP" \
@@ -86,6 +99,21 @@ jobs:
               "SANDBOX_PGHOST=$SANDBOX_PGHOST" \
               "SANDBOX_PGUSER=$SANDBOX_PGUSER" \
               "SANDBOX_PGDATABASE=$SANDBOX_PGDATABASE" \
+              "SANDBOX_PGSCHEMA=public" \
+              "SANDBOX_AZURE_TENANT_ID=${{ vars.AZURE_TENANT_ID }}" \
+              "SANDBOX_AZURE_SUBSCRIPTION_ID=${{ vars.AZURE_SUBSCRIPTION_ID }}" \
+              "SANDBOX_AZURE_RESOURCE_GROUP=$RESOURCE_GROUP" \
+              "SANDBOX_AZURE_RESOURCE_ID=/subscriptions/${{ vars.AZURE_SUBSCRIPTION_ID }}/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.DBforPostgreSQL/flexibleServers/pg-ofmfleet-dev-ykbpnrpd" \
+              "SANDBOX_AZURE_REGION=eastus2" \
+              "WORKBENCH_AUTH_MODE=ContainerApps" \
+              "WORKBENCH_AUTH_TENANT_ID=${{ vars.AZURE_TENANT_ID }}" \
+              "WORKBENCH_AUTH_CLIENT_ID=$WORKBENCH_AUTH_CLIENT_ID" \
+              "WORKBENCH_AUTH_AUDIENCE=$WORKBENCH_AUTH_CLIENT_ID,api://$WORKBENCH_AUTH_CLIENT_ID" \
+              "WORKBENCH_AUTH_ISSUER=https://login.microsoftonline.com/${{ vars.AZURE_TENANT_ID }}/v2.0" \
+              "PLATFORM_PGHOST=$PLATFORM_PGHOST" \
+              "PLATFORM_PGUSER=$PLATFORM_PGUSER" \
+              "PLATFORM_PGDATABASE=$PLATFORM_PGDATABASE" \
+              "PLATFORM_PGSCHEMA=ofm_platform" \
             --output none
 
       - name: Configure the review and repair agents

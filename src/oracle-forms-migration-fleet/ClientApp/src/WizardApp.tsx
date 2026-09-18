@@ -61,6 +61,7 @@ import { ServiceGlyph, glyphForComponent, glyphForDatabase, glyphForHost } from 
 import { ActivityPane } from "./MatrixConsole";
 import { ArchitectureReveal } from "./ArchitectureReveal";
 import { InfoTip } from "./InfoTip";
+import { ProjectApprovals } from "./ProjectApprovals";
 import {
   EVIDENCE_HELP,
   EVIDENCE_NAMES,
@@ -600,6 +601,10 @@ export default function WizardApp() {
   const [repoBranch, setRepoBranch] = useState("");
   const [repoFolder, setRepoFolder] = useState("");
   const [workspace, setWorkspace] = useState<SourceWorkspace | null>(null);
+
+  // The project the operator is acting in. It travels as an identifier beside the run request; the
+  // server resolves the membership and the target profile behind it.
+  const [projectId, setProjectId] = useState<string | null>(null);
   const [consoleLines, setConsoleLines] = useState<ConsoleLine[]>([]);
   const [consoleOpen, setConsoleOpen] = useState(false);
   const [acquiring, setAcquiring] = useState(false);
@@ -727,8 +732,10 @@ export default function WizardApp() {
   // Execution reads a copy the server holds, so it needs a workspace and at least one phase the
   // planner actually authorized. Anything else is explained rather than silently disabled.
   const plannedPhases = plan?.plan.phases.filter((phase) => phase.status === "Planned").length ?? 0;
-  const runnable = Boolean(workspace) && sourceMode !== "manual" && plannedPhases > 0;
-  const runHint = sourceMode === "manual"
+  const runnable = Boolean(projectId) && Boolean(workspace) && sourceMode !== "manual" && plannedPhases > 0;
+  const runHint = !projectId
+    ? "Select or create a project before running. Project membership owns the source copy and every generated artifact."
+    : sourceMode === "manual"
     ? "A typed folder path only describes where the code lives. Copy a repository or upload a zip on Your application to give the fleet something to read."
     : !workspace
       ? "Copy a repository or upload a zip on Your application first. The fleet only reads the copy held for your session."
@@ -741,11 +748,16 @@ export default function WizardApp() {
    * console. The stream is the only source of truth for what happened.
    */
   async function acquire(request: { mode: "repo"; repositoryUrl: string; branch?: string } | { mode: "zip"; file: File }) {
+    if (!projectId) {
+      setSourceError("Select or create a project before copying source.");
+      return;
+    }
+
     acquisition.current?.abort();
     const controller = new AbortController();
     acquisition.current = controller;
 
-    if (workspace) void releaseSource(workspace.workspaceId).catch(() => undefined);
+    if (workspace) void releaseSource(workspace.workspaceId, projectId).catch(() => undefined);
     setWorkspace(null);
     // The outgoing copy's detected ticks describe a source that is being replaced, so they are
     // retired here. Whatever the operator ticked themselves survives.
@@ -759,10 +771,10 @@ export default function WizardApp() {
     setSourceError("");
 
     try {
-      for await (const event of acquireSource(request, controller.signal)) {
+      for await (const event of acquireSource(request, projectId, controller.signal)) {
         if (acquisition.current !== controller || controller.signal.aborted) {
           if (event.level === "done" && "workspace" in event) {
-            void releaseSource(event.workspace.workspaceId).catch(() => undefined);
+            void releaseSource(event.workspace.workspaceId, projectId).catch(() => undefined);
           }
           return;
         }
@@ -801,8 +813,8 @@ export default function WizardApp() {
   }
 
   function discardWorkspace() {
-    if (!workspace) return;
-    void releaseSource(workspace.workspaceId).catch(() => undefined);
+    if (!workspace || !projectId) return;
+    void releaseSource(workspace.workspaceId, projectId).catch(() => undefined);
     setWorkspace(null);
     // The source those ticks pointed at no longer exists, so the ticks go with it.
     setEvidence((current) => current.filter((kind) => !autoEvidence.includes(kind)));
@@ -822,7 +834,7 @@ export default function WizardApp() {
     const activeAcquisition = acquisition.current;
     acquisition.current = null;
     activeAcquisition?.abort();
-    if (workspace) void releaseSource(workspace.workspaceId).catch(() => undefined);
+    if (workspace && projectId) void releaseSource(workspace.workspaceId, projectId).catch(() => undefined);
     const manual = preserveManualEvidence ? evidence.filter((kind) => !autoEvidence.includes(kind)) : [];
     setWorkspace(null);
     setEvidence(manual);
@@ -952,6 +964,10 @@ export default function WizardApp() {
 
   async function generatePlan(event: FormEvent) {
     event.preventDefault();
+    if (!projectId) {
+      setStatus("Select or create a project before planning.");
+      return;
+    }
     if (!validateApplication() || !validateApprovals()) {
       setStatus("Review the highlighted fields before planning.");
       return;
@@ -966,7 +982,9 @@ export default function WizardApp() {
         headers: { "Content-Type": "application/json" },
         // The identifier lets the server derive source facts from the copy it took itself. Without a
         // copy it plans from declarations alone, and nothing in the plan is marked verified.
-        body: JSON.stringify(workspace ? { ...runRequestBody(), workspaceId: workspace.workspaceId } : runRequestBody()),
+        body: JSON.stringify(workspace
+          ? { ...runRequestBody(), workspaceId: workspace.workspaceId, projectId }
+          : { ...runRequestBody(), projectId }),
       });
       if (!response.ok) throw new Error(`Planner failed (${response.status}).`);
       const result = await response.json() as PlanResponse;
@@ -985,7 +1003,7 @@ export default function WizardApp() {
    * and never a path, and every line in the console is one the server emitted while working.
    */
   async function runAuthorized() {
-    if (!workspace || !plan) return;
+    if (!workspace || !plan || !projectId) return;
     run.current?.abort();
     const controller = new AbortController();
     run.current = controller;
@@ -999,7 +1017,13 @@ export default function WizardApp() {
     setStatus("Running the phases the planner authorized...");
 
     try {
-      for await (const event of executeRun({ ...runRequestBody(), workspaceId: workspace.workspaceId }, controller.signal)) {
+      for await (const event of executeRun({
+        ...runRequestBody(),
+        workspaceId: workspace.workspaceId,
+        // Identifiers only. The server resolves membership and the immutable target profile itself.
+        projectId,
+        targetProfileId: "sandbox",
+      }, controller.signal)) {
         if ("result" in event) {
           const result = event.result;
           const ran = result.phases.filter((phase) => phase.state === "Executed").length;
@@ -1030,11 +1054,11 @@ export default function WizardApp() {
   }
 
   async function openArtifact(path: string) {
-    if (!workspace) return;
+    if (!workspace || !projectId) return;
     setArtifact({ path, text: "", error: "" });
     setDialog("artifact");
     try {
-      const text = await fetchArtifact(workspace.workspaceId, path);
+      const text = await fetchArtifact(workspace.workspaceId, path, projectId);
       setArtifact({ path, text, error: "" });
     } catch (error) {
       setArtifact({ path, text: "", error: error instanceof Error ? error.message : "The artifact could not be loaded." });
@@ -1166,7 +1190,7 @@ export default function WizardApp() {
       ? {
         kind: "download",
         label: "Download what this run generated",
-        href: `/api/workbench/export?workspaceId=${encodeURIComponent(workspace?.workspaceId ?? "")}`,
+        href: `/api/workbench/export?workspaceId=${encodeURIComponent(workspace?.workspaceId ?? "")}&projectId=${encodeURIComponent(projectId ?? "")}`,
         explanation: "The safest next step is to take the output off this host. Your session workspace is deleted four hours after the source was copied.",
         help: help("action.downloadOutput"),
       }
@@ -1269,7 +1293,7 @@ export default function WizardApp() {
           </nav>
 
           <div className="mf-commandbar" role="toolbar" aria-label="Commands">
-            {activeView !== "setup" && <button type="button" className="mf-command accent" onClick={() => beginSetup()}><Plus aria-hidden="true" />New migration</button>}
+            {activeView !== "setup" && <button type="button" className="mf-command accent" disabled={!projectId} onClick={() => beginSetup()}><Plus aria-hidden="true" />New migration</button>}
             {activeView === "results" && <button type="button" className="mf-command" onClick={() => goToStep(0)}><Pencil aria-hidden="true" />Edit setup</button>}
             <button type="button" ref={activityButton} className="mf-command" disabled={!activityAvailable} aria-describedby={activityAvailable ? undefined : "cmd-activity-note"} onClick={() => setConsoleOpen(true)}><Activity aria-hidden="true" />Activity</button>
             <InfoTip label="activity">{help("action.viewActivity")}</InfoTip>
@@ -1303,12 +1327,15 @@ export default function WizardApp() {
           </p>
         </div>
 
+        <ProjectApprovals onProjectChange={setProjectId} />
+
         <div className="mf-intro-actions">
-          <button type="button" className="mf-primary" onClick={() => beginSetup()}><Play aria-hidden="true" />New migration</button>
-          <button type="button" className="mf-secondary" onClick={() => beginSetup(exampleFields)}>Load example values</button>
+          <button type="button" className="mf-primary" disabled={!projectId} onClick={() => beginSetup()}><Play aria-hidden="true" />New migration</button>
+          <button type="button" className="mf-secondary" disabled={!projectId} onClick={() => beginSetup(exampleFields)}>Load example values</button>
           <p className="mf-help">
-            The example fills the text fields with sample values so you can see the shape of the setup. It describes no real
-            application, copies no code, and connects to nothing.
+            {projectId
+              ? "The example fills the text fields with sample values so you can see the shape of the setup. It describes no real application, copies no code, and connects to nothing."
+              : "Create or select a project above first. Project membership owns every source copy, plan, run, and generated artifact."}
           </p>
         </div>
       </main> : activeView === "setup" || !plan ? <main className="mf-journey" id="workspace">
@@ -1323,6 +1350,7 @@ export default function WizardApp() {
         </nav>
 
         <section className="mf-page">
+          {step === 0 && <ProjectApprovals onProjectChange={setProjectId} />}
           <div className="mf-progress"><span aria-hidden="true">Step {step + 1} of {STEPS.length}</span><progress max={STEPS.length} value={step + 1} /></div>
           <p className="mf-visually-hidden" aria-live="polite">{`Step ${step + 1} of ${STEPS.length}: ${STEPS[step]}`}</p>
 
@@ -1348,7 +1376,7 @@ export default function WizardApp() {
                   <div className="mf-field"><div className="mf-label-row"><label htmlFor="repoBranch">Branch</label><InfoTip label="the branch">{help("field.repoBranch")}</InfoTip><span className="mf-label-hint">Optional</span></div><input id="repoBranch" value={repoBranch} placeholder="main" autoComplete="off" spellCheck={false} onChange={(event) => setRepoBranch(event.target.value)} /></div>
                   <div className="mf-field"><div className="mf-label-row"><label htmlFor="repoFolder">Folder inside the repository</label><InfoTip label="the folder">{help("field.repoFolder")}</InfoTip><span className="mf-label-hint">Optional</span></div><input id="repoFolder" value={repoFolder} placeholder="legacy/forms" autoComplete="off" spellCheck={false} onChange={(event) => setRepoFolder(event.target.value)} /></div>
                   {repository && !workspace && <p className="mf-detected"><CheckCircle2 />Recognised {repository.label}</p>}
-                  <button type="button" className="mf-secondary mf-acquire" disabled={acquiring || !repository} onClick={() => void acquire({ mode: "repo", repositoryUrl: repoUrl.trim(), branch: repoBranch.trim() || undefined })}>
+                  <button type="button" className="mf-secondary mf-acquire" disabled={acquiring || !repository || !projectId} onClick={() => void acquire({ mode: "repo", repositoryUrl: repoUrl.trim(), branch: repoBranch.trim() || undefined })}>
                     <GitBranch />{acquiring ? "Copying..." : workspace ? "Copy again" : "Copy this repository"}
                   </button>
                   <InfoTip label="copying this repository">{help("action.copyRepository")}</InfoTip>
@@ -1358,7 +1386,7 @@ export default function WizardApp() {
                   <FileArchive aria-hidden="true" />
                   <div>
                     <label className="mf-file" htmlFor="zipFile">{acquiring ? "Uploading..." : workspace ? "Choose a different zip" : "Choose a zip file"}</label>
-                    <input id="zipFile" type="file" accept=".zip,application/zip" disabled={acquiring} aria-describedby={sourceError ? "source-error zipFile-help" : "zipFile-help"} onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void acquire({ mode: "zip", file }); }} />
+                    <input id="zipFile" type="file" accept=".zip,application/zip" disabled={acquiring || !projectId} aria-describedby={sourceError ? "source-error zipFile-help" : "zipFile-help"} onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void acquire({ mode: "zip", file }); }} />
                     <p className="mf-help" id="zipFile-help">{help("field.zipFile")}</p>
                   </div>
                 </div>}
@@ -1454,7 +1482,7 @@ export default function WizardApp() {
               <div><dt>evidence kinds</dt><dd><code>{evidence.join(", ") || "none"}</code></dd></div>
             </dl></details>
             <div className="mf-boundary"><LockKeyhole aria-hidden="true" /><p><strong>Generating the plan writes nothing.</strong>It creates no file, changes no repository, and touches no Azure resource. Running authorized conversion phases is a separate decision on the next screen, and writes only into your private session workspace. With separate execution approval, sandbox phases may write to the host-configured PostgreSQL target. Production release is not available here.</p></div>
-            <button className="mf-primary mf-generate" type="submit" disabled={submitting}><Sparkles aria-hidden="true" />{submitting ? "Generating plan..." : "Generate migration plan"}</button>
+            <button className="mf-primary mf-generate" type="submit" disabled={submitting || !projectId}><Sparkles aria-hidden="true" />{submitting ? "Generating plan..." : "Generate migration plan"}</button>
           </form>}
 
           <div className="mf-actions">
@@ -1510,6 +1538,12 @@ export default function WizardApp() {
           <div className="mf-boundary"><LockKeyhole aria-hidden="true" /><p><strong>What running actually writes.</strong>Conversion artifacts are written into your private session workspace and your source repository is never modified. Separately approved sandbox phases may write schema and data to the host-configured PostgreSQL target, and no caller can change that endpoint. Nothing is deployed, no Azure resource is created, and no production resource is touched.</p></div>
           {(activityAvailable || executing) && <span className="mf-command-help"><button type="button" className="mf-inline-link" onClick={() => { setConsoleMode(execution || executing ? "execution" : "source"); setConsoleOpen(true); }}><Activity aria-hidden="true" />View activity</button><InfoTip label="view activity">{help("action.viewActivity")}</InfoTip></span>}
         </section>
+
+        <ProjectApprovals
+          workspaceId={workspace?.workspaceId}
+          runRequest={runRequestBody()}
+          onProjectChange={setProjectId}
+        />
 
         {/* 4. The run's own results, concise. */}
         <section className="mf-result-section" aria-labelledby="mf-run-results-title">

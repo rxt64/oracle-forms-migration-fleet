@@ -1,5 +1,6 @@
 import { defineConfig, devices } from "@playwright/test";
 import { existsSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -7,6 +8,11 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const projectDirectory = path.resolve(here, "..");
 const port = Number(process.env.WORKBENCH_PORT ?? 8088);
 const baseURL = `http://127.0.0.1:${port}`;
+
+/** A fresh durable platform store per run. Reused within the run so restart behaviour is observable. */
+const platformStateFile =
+  process.env.PLATFORM_STATE_FILE ??
+  path.join(os.tmpdir(), `ofm-playwright-platform-${Date.now()}`, "platform-state.json");
 
 /**
  * `dotnet` is not on PATH on every machine this runs on, so the location is resolved rather than
@@ -77,7 +83,21 @@ export default defineConfig({
       PORT: String(port),
       ASPNETCORE_ENVIRONMENT: "Development",
       DOTNET_NOLOGO: "1",
-      WORKBENCH_ENTRA_AUTH_ENABLED: "true",
+
+      // Development mode is named rather than inferred, and it names no default actor, so a request
+      // that carries no principal header is unauthenticated here exactly as it would be in Azure.
+      WORKBENCH_AUTH_MODE: "Development",
+
+      // A durable platform store in a fresh file per run, so approvals persist across a restart within
+      // the run and never leak between runs.
+      PLATFORM_STATE_FILE: platformStateFile,
+
+      // A declared development target so the approval chain can be exercised end to end. No data
+      // migration gateway is registered without SANDBOX_PGHOST, so an approved run still writes nothing
+      // to any database — the gate opens and the adapter reports it has nothing to write to.
+      WORKBENCH_DEV_SANDBOX_TARGET: "pg-sandbox.postgres.database.azure.com|ofm_sandbox|id-ofmfleet-web-dev",
+      SANDBOX_AZURE_RESOURCE_GROUP: "rg-oracle-forms-migration-fleet-dev",
+      SANDBOX_AZURE_REGION: "eastus2",
     },
   },
 });

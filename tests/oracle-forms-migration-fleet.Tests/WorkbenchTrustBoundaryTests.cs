@@ -261,10 +261,10 @@ public class WorkbenchTrustBoundaryTests : IDisposable
             service, Operator, workspaceId, request, out _, out int planStatus, out _));
         Assert.Equal(400, planStatus);
 
-        Assert.False(WorkbenchExecution.TryPrepareRun(
-            service, Operator, workspaceId, request, new WorkbenchAuthorizationService(),
-            out _, out int executeStatus, out _));
-        Assert.Equal(400, executeStatus);
+        WorkbenchExecution.WorkbenchRunPreparationResult execute = await WorkbenchExecution.PrepareRunAsync(
+            service, Operator, workspaceId, request, new WorkbenchAuthorizationService());
+        Assert.False(execute.Succeeded);
+        Assert.Equal(400, execute.Status);
     }
 
     [Fact]
@@ -332,12 +332,12 @@ public class WorkbenchTrustBoundaryTests : IDisposable
         (SourceWorkspaceService service, string workspaceId) = await SeedAsync();
         using SourceWorkspaceService owned = service;
 
-        Assert.True(WorkbenchExecution.TryPrepareRun(
-            service, Operator, workspaceId, ForgedRequest(), new WorkbenchAuthorizationService(),
-            out WorkbenchExecution.WorkbenchRunPreparation? preparation, out int status, out _));
+        WorkbenchExecution.WorkbenchRunPreparationResult result = await WorkbenchExecution.PrepareRunAsync(
+            service, Operator, workspaceId, ForgedRequest(), new WorkbenchAuthorizationService());
 
-        Assert.Equal(200, status);
-        MigrationRunRequest prepared = preparation!.Request;
+        Assert.True(result.Succeeded);
+        Assert.Equal(200, result.Status);
+        MigrationRunRequest prepared = result.Preparation!.Request;
 
         Assert.Equal(ApprovalDecision.Pending, prepared.PlanApproval.Decision);
         Assert.Equal(ApprovalDecision.Pending, prepared.ExecutionApproval.Decision);
@@ -354,13 +354,13 @@ public class WorkbenchTrustBoundaryTests : IDisposable
         (SourceWorkspaceService service, string workspaceId) = await SeedAsync();
         using SourceWorkspaceService owned = service;
 
-        Assert.False(WorkbenchExecution.TryPrepareRun(
+        WorkbenchExecution.WorkbenchRunPreparationResult result = await WorkbenchExecution.PrepareRunAsync(
             service, new WorkbenchActor(Intruder, [WorkbenchTrustBoundary.MigrationOperatorRole]),
-            workspaceId, ForgedRequest(), new WorkbenchAuthorizationService(),
-            out WorkbenchExecution.WorkbenchRunPreparation? preparation, out int status, out _));
+            workspaceId, ForgedRequest(), new WorkbenchAuthorizationService());
 
-        Assert.Equal(404, status);
-        Assert.Null(preparation);
+        Assert.False(result.Succeeded);
+        Assert.Equal(404, result.Status);
+        Assert.Null(result.Preparation);
     }
 
     [Fact]
@@ -369,14 +369,14 @@ public class WorkbenchTrustBoundaryTests : IDisposable
         (SourceWorkspaceService service, string workspaceId) = await SeedAsync();
         using SourceWorkspaceService owned = service;
 
-        Assert.True(WorkbenchExecution.TryPrepareRun(
-            service, Operator, workspaceId, ForgedRequest(), new WorkbenchAuthorizationService(),
-            out WorkbenchExecution.WorkbenchRunPreparation? preparation, out _, out _));
+        WorkbenchExecution.WorkbenchRunPreparation preparation = (await WorkbenchExecution.PrepareRunAsync(
+            service, Operator, workspaceId, ForgedRequest(), new WorkbenchAuthorizationService())).Preparation!;
 
         foreach (MutationClass mutation in new[] { MutationClass.SandboxDatabaseWrite, MutationClass.ProductionWrite })
         {
-            MutationAuthorizationResult decision = preparation!.MutationAuthorizer.Authorize(
-                new MutationAuthorizationRequest(MigrationPhase.SandboxDataMigration, mutation, preparation.Request, Owner));
+            MutationAuthorizationResult decision = await preparation.MutationAuthorizer.AuthorizeAsync(
+                new MutationAuthorizationRequest(MigrationPhase.SandboxDataMigration, mutation, preparation.Request, Owner),
+                CancellationToken.None);
 
             Assert.False(decision.IsAuthorized);
             Assert.NotEqual(string.Empty, decision.Reason);
@@ -392,38 +392,162 @@ public class WorkbenchTrustBoundaryTests : IDisposable
         StubAuthorizationStore store = new();
         WorkbenchAuthorizationService authorization = new(store);
 
-        Assert.True(WorkbenchExecution.TryPrepareRun(
-            service, Operator, workspaceId, ForgedRequest(), authorization,
-            out WorkbenchExecution.WorkbenchRunPreparation? preparation, out _, out _));
+        WorkbenchExecution.WorkbenchRunPreparation preparation = (await WorkbenchExecution.PrepareRunAsync(
+            service, Operator, workspaceId, ForgedRequest(), authorization)).Preparation!;
 
-        store.Records = [Grant(service, workspaceId, preparation!.Request)];
+        store.Records = [Grant(service, workspaceId, preparation.Request)];
 
-        MutationAuthorizationResult decision = preparation.MutationAuthorizer.Authorize(
+        MutationAuthorizationResult decision = await preparation.MutationAuthorizer.AuthorizeAsync(
             new MutationAuthorizationRequest(
-                MigrationPhase.SandboxDataMigration, MutationClass.SandboxDatabaseWrite, preparation.Request, Owner));
+                MigrationPhase.SandboxDataMigration, MutationClass.SandboxDatabaseWrite, preparation.Request, Owner),
+            CancellationToken.None);
 
         Assert.True(decision.IsAuthorized);
     }
 
+    /// <summary>
+    /// Spec 004 replaced the earlier behaviour. A persisted grant that matches the run in every binding
+    /// now materializes the internal execution approval, and it names the actor who approved it in the
+    /// store rather than anything the caller sent. A forged approval in the body is still discarded first,
+    /// so the only route to an approved gate is a record the server itself holds.
+    /// </summary>
     [Fact]
-    public async Task A_matching_store_record_does_not_materialize_a_planner_approval_in_this_deployment()
+    public async Task A_matching_store_record_materializes_the_internal_execution_approval()
     {
         (SourceWorkspaceService service, string workspaceId) = await SeedAsync();
         using SourceWorkspaceService owned = service;
 
         StubAuthorizationStore store = new();
         WorkbenchAuthorizationService authorization = new(store);
-        Assert.True(WorkbenchExecution.TryPrepareRun(
-            service, Operator, workspaceId, ForgedRequest(), authorization,
-            out WorkbenchExecution.WorkbenchRunPreparation? preparation, out _, out _));
 
-        store.Records = [Grant(service, workspaceId, preparation!.Request)];
-        MigrationRunPlan plan = MigrationRunPlanner.Plan(preparation.Request);
+        // The first pass establishes the bindings the grant has to match.
+        WorkbenchExecution.WorkbenchRunPreparation first = (await WorkbenchExecution.PrepareRunAsync(
+            service, Operator, workspaceId, ForgedRequest(), authorization)).Preparation!;
 
-        Assert.Equal(ApprovalDecision.Pending, preparation.Request.ExecutionApproval.Decision);
-        Assert.DoesNotContain(plan.Phases, phase =>
-            phase.Status == PhaseStatus.Planned &&
-            phase.Mutation is MutationClass.SandboxDatabaseWrite or MutationClass.ProductionWrite);
+        Assert.Equal(ApprovalDecision.Pending, first.Request.ExecutionApproval.Decision);
+
+        store.Records =
+        [
+            Grant(service, workspaceId, first.Request) with { ApprovedByObjectId = "approver-object-id" },
+        ];
+
+        WorkbenchExecution.WorkbenchRunPreparation second = (await WorkbenchExecution.PrepareRunAsync(
+            service, Operator, workspaceId, ForgedRequest(), authorization)).Preparation!;
+
+        Assert.Equal(ApprovalDecision.Approved, second.Request.ExecutionApproval.Decision);
+        Assert.Equal("approver-object-id", second.Request.ExecutionApproval.ApproverId);
+
+        // The forged approver the browser sent never appears, and production stays refused.
+        Assert.DoesNotContain("forged", second.Request.ExecutionApproval.ApproverId!, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(ApprovalDecision.Pending, second.Request.ProductionApproval.Decision);
+    }
+
+    [Fact]
+    public async Task A_persisted_approval_for_the_raw_browser_request_materializes_after_execution_normalization()
+    {
+        WorkbenchActor requester = WorkbenchActor.ForTenant(
+            WorkbenchAuthenticationOptions.DevelopmentTenantId,
+            "requester",
+            []);
+        WorkbenchActor approver = WorkbenchActor.ForTenant(
+            WorkbenchAuthenticationOptions.DevelopmentTenantId,
+            "approver",
+            []);
+        ConfiguredSandboxTargetBinding sandbox = new(
+            "pg-sandbox.postgres.database.azure.com",
+            "ofm_sandbox",
+            "id-ofmfleet-web-dev",
+            CanWrite: false);
+
+        FilePlatformStateStore store = new(Path.Combine(_root, "platform-state.json"));
+        await store.InitializeAsync(CancellationToken.None);
+        PlatformAccessService platform = new(store, sandbox);
+        PlatformProject project = (await platform.CreateProjectAsync(
+            requester, "Orders migration", CancellationToken.None)).Value!;
+        await platform.AddMemberAsync(
+            requester,
+            project.ProjectId,
+            approver.ObjectId,
+            [WorkbenchRoles.MigrationOperator, WorkbenchRoles.SandboxApprover],
+            CancellationToken.None);
+
+        PlatformTargetProfile profile = (await platform.EnsureConfiguredTargetProfileAsync(
+            requester,
+            project.ProjectId,
+            new PlatformTargetProfileEnvironment
+            {
+                AzureTenantId = "11111111-1111-1111-1111-111111111111",
+                SubscriptionId = "22222222-2222-2222-2222-222222222222",
+                ResourceGroup = "rg-ofm-dev",
+                ResourceId = "/subscriptions/22222222-2222-2222-2222-222222222222/resourceGroups/rg-ofm-dev/providers/Microsoft.DBforPostgreSQL/flexibleServers/pg-sandbox",
+                Region = "eastus2",
+                SchemaName = "public",
+                EnvironmentName = "Development",
+            },
+            CancellationToken.None)).Value!;
+
+        string workspaceOwner = PlatformIdentity.WorkspaceOwner(requester, project.ProjectId);
+        (SourceWorkspaceService service, string workspaceId) = await SeedAsync(owner: workspaceOwner);
+        using SourceWorkspaceService owned = service;
+        MigrationRunRequest raw = ForgedRequest(mode: ExecutionMode.SandboxMigration);
+
+        Assert.True(WorkbenchExecution.TryPrepareTrusted(
+            service,
+            workspaceOwner,
+            workspaceId,
+            raw,
+            out WorkbenchExecution.WorkbenchTrustedPreparation? trusted,
+            out _,
+            out _));
+
+        PlatformApproval requested = (await platform.RequestAsync(
+            requester,
+            new PlatformApprovalRequestInput(
+                project.ProjectId,
+                profile.TargetProfileId,
+                WorkbenchMutationScope.SandboxDatabaseWrite,
+                trusted!.Trusted.Request.EngagementId,
+                trusted.Trusted.SourceSnapshotHash,
+                trusted.Trusted.PlanInputHash,
+                TimeSpan.FromHours(1),
+                null),
+            CancellationToken.None)).Value!;
+        await platform.DecideAsync(
+            approver, requested.ApprovalId, approve: true, requested.Version, null, CancellationToken.None);
+
+        WorkbenchExecution.WorkbenchRunPreparationResult execution = await WorkbenchExecution.PrepareRunAsync(
+            service,
+            requester,
+            workspaceId,
+            raw,
+            new WorkbenchAuthorizationService(new PlatformAuthorizationStore(store, sandbox)),
+            new WorkbenchExecution.WorkbenchRunBinding(
+                project.ProjectId,
+                profile.TargetProfileId,
+                profile.Version,
+                profile.CanonicalHash,
+                workspaceOwner));
+
+        Assert.True(execution.Succeeded, execution.Error);
+        Assert.Equal(".fleet-run/out", execution.Preparation!.Request.OutputRoot);
+        Assert.Equal(ApprovalDecision.Approved, execution.Preparation.Request.ExecutionApproval.Decision);
+        Assert.Equal(approver.ObjectId, execution.Preparation.Request.ExecutionApproval.ApproverId);
+
+        WorkbenchExecution.WorkbenchRunPreparationResult changedTarget = await WorkbenchExecution.PrepareRunAsync(
+            service,
+            requester,
+            workspaceId,
+            raw with { Target = raw.Target with { Database = DatabaseTarget.AzureSqlDatabase } },
+            new WorkbenchAuthorizationService(new PlatformAuthorizationStore(store, sandbox)),
+            new WorkbenchExecution.WorkbenchRunBinding(
+                project.ProjectId,
+                profile.TargetProfileId,
+                profile.Version,
+                profile.CanonicalHash,
+                workspaceOwner));
+
+        Assert.True(changedTarget.Succeeded, changedTarget.Error);
+        Assert.Equal(ApprovalDecision.Pending, changedTarget.Preparation!.Request.ExecutionApproval.Decision);
     }
 
     [Fact]
@@ -434,18 +558,17 @@ public class WorkbenchTrustBoundaryTests : IDisposable
 
         StubAuthorizationStore store = new();
         WorkbenchAuthorizationService authorization = new(store);
-        Assert.True(WorkbenchExecution.TryPrepareRun(
-            service, Operator, workspaceId, ForgedRequest(), authorization,
-            out WorkbenchExecution.WorkbenchRunPreparation? preparation, out _, out _));
+        WorkbenchExecution.WorkbenchRunPreparation preparation = (await WorkbenchExecution.PrepareRunAsync(
+            service, Operator, workspaceId, ForgedRequest(), authorization)).Preparation!;
 
-        WorkbenchAuthorizationRecord valid = Grant(service, workspaceId, preparation!.Request);
+        WorkbenchAuthorizationRecord valid = Grant(service, workspaceId, preparation.Request);
         store.Records = [valid with { AuthorizationId = "AUTH-EXPIRED", ExpiresUtc = DateTimeOffset.UtcNow.AddMinutes(-1) }, valid];
 
-        Assert.True(preparation.MutationAuthorizer.Authorize(new MutationAuthorizationRequest(
+        Assert.True((await preparation.MutationAuthorizer.AuthorizeAsync(new MutationAuthorizationRequest(
             MigrationPhase.SandboxDataMigration,
             MutationClass.SandboxDatabaseWrite,
             preparation.Request,
-            Owner)).IsAuthorized);
+            Owner), CancellationToken.None)).IsAuthorized);
     }
 
     [Fact]
@@ -457,11 +580,10 @@ public class WorkbenchTrustBoundaryTests : IDisposable
         StubAuthorizationStore store = new();
         WorkbenchAuthorizationService authorization = new(store);
 
-        Assert.True(WorkbenchExecution.TryPrepareRun(
-            service, Operator, workspaceId, ForgedRequest(), authorization,
-            out WorkbenchExecution.WorkbenchRunPreparation? preparation, out _, out _));
+        WorkbenchExecution.WorkbenchRunPreparation preparation = (await WorkbenchExecution.PrepareRunAsync(
+            service, Operator, workspaceId, ForgedRequest(), authorization)).Preparation!;
 
-        WorkbenchAuthorizationRecord grant = Grant(service, workspaceId, preparation!.Request);
+        WorkbenchAuthorizationRecord grant = Grant(service, workspaceId, preparation.Request);
         store.Records = [grant];
 
         DateTimeOffset now = grant.ExpiresUtc.AddMinutes(-5);
@@ -476,12 +598,12 @@ public class WorkbenchTrustBoundaryTests : IDisposable
         MutationAuthorizationRequest attempt = new(
             MigrationPhase.SandboxDataMigration, MutationClass.SandboxDatabaseWrite, preparation.Request, Owner);
 
-        Assert.True(authorizer.Authorize(attempt).IsAuthorized);
+        Assert.True((await authorizer.AuthorizeAsync(attempt, CancellationToken.None)).IsAuthorized);
 
         // Time moves on between the first mutating phase and the second. The run has not changed; the
         // grant has, and the second attempt must not ride on the first answer.
         now = grant.ExpiresUtc.AddSeconds(1);
-        MutationAuthorizationResult second = authorizer.Authorize(attempt);
+        MutationAuthorizationResult second = await authorizer.AuthorizeAsync(attempt, CancellationToken.None);
 
         Assert.False(second.IsAuthorized);
         Assert.Contains("expired", second.Reason, StringComparison.OrdinalIgnoreCase);
@@ -490,7 +612,6 @@ public class WorkbenchTrustBoundaryTests : IDisposable
     [Theory]
     [InlineData("owner")]
     [InlineData("engagement")]
-    [InlineData("role")]
     [InlineData("scope")]
     [InlineData("source")]
     [InlineData("input")]
@@ -503,12 +624,10 @@ public class WorkbenchTrustBoundaryTests : IDisposable
         StubAuthorizationStore store = new();
         WorkbenchAuthorizationService authorization = new(store);
 
-        Assert.True(WorkbenchExecution.TryPrepareRun(
-            service, Operator, workspaceId, ForgedRequest(), authorization,
-            out WorkbenchExecution.WorkbenchRunPreparation? preparation, out _, out _));
+        WorkbenchExecution.WorkbenchRunPreparation preparation = (await WorkbenchExecution.PrepareRunAsync(
+            service, Operator, workspaceId, ForgedRequest(), authorization)).Preparation!;
 
-        WorkbenchAuthorizationRecord grant = Grant(service, workspaceId, preparation!.Request);
-        WorkbenchActor actor = Operator;
+        WorkbenchAuthorizationRecord grant = Grant(service, workspaceId, preparation.Request);
 
         switch (drift)
         {
@@ -517,9 +636,6 @@ public class WorkbenchTrustBoundaryTests : IDisposable
                 break;
             case "engagement":
                 grant = grant with { EngagementId = "ENG-OTHER" };
-                break;
-            case "role":
-                actor = new WorkbenchActor(Owner, ["Reader"]);
                 break;
             case "scope":
                 grant = grant with { Scope = WorkbenchMutationScope.ProductionWrite };
@@ -539,13 +655,14 @@ public class WorkbenchTrustBoundaryTests : IDisposable
 
         WorkbenchMutationAuthorizer authorizer = new(
             authorization,
-            actor,
+            Operator,
             service.Describe(Owner, workspaceId)!.SnapshotHash,
             WorkbenchTrustBoundary.PlanInputHash(preparation.Request),
             WorkbenchTrustBoundary.TargetHash(preparation.Request.Target));
 
-        MutationAuthorizationResult decision = authorizer.Authorize(new MutationAuthorizationRequest(
-            MigrationPhase.SandboxDataMigration, MutationClass.SandboxDatabaseWrite, preparation.Request, Owner));
+        MutationAuthorizationResult decision = await authorizer.AuthorizeAsync(new MutationAuthorizationRequest(
+            MigrationPhase.SandboxDataMigration, MutationClass.SandboxDatabaseWrite, preparation.Request, Owner),
+            CancellationToken.None);
 
         Assert.False(decision.IsAuthorized);
     }
@@ -582,6 +699,25 @@ public class WorkbenchTrustBoundaryTests : IDisposable
         Assert.NotEqual(
             WorkbenchTrustBoundary.PlanInputHash(request),
             WorkbenchTrustBoundary.PlanInputHash(request with { SourceRoot = "other" }));
+
+        Assert.NotEqual(
+            WorkbenchTrustBoundary.PlanInputHash(request),
+            WorkbenchTrustBoundary.PlanInputHash(request with
+            {
+                Target = request.Target with { Database = DatabaseTarget.AzureSqlDatabase },
+            }));
+        Assert.NotEqual(
+            WorkbenchTrustBoundary.PlanInputHash(request),
+            WorkbenchTrustBoundary.PlanInputHash(request with
+            {
+                Target = request.Target with { FrontEnd = (FrontEndStack)999 },
+            }));
+        Assert.NotEqual(
+            WorkbenchTrustBoundary.PlanInputHash(request),
+            WorkbenchTrustBoundary.PlanInputHash(request with
+            {
+                Target = request.Target with { BackEnd = (BackEndStack)999 },
+            }));
 
         Assert.NotEqual(
             WorkbenchTrustBoundary.TargetHash(request.Target),
@@ -693,13 +829,16 @@ public class WorkbenchTrustBoundaryTests : IDisposable
     {
         public IReadOnlyList<WorkbenchAuthorizationRecord> Records { get; set; } = [];
 
-        public IReadOnlyList<WorkbenchAuthorizationRecord> ForOwner(string ownerId) => Records;
+        public Task<IReadOnlyList<WorkbenchAuthorizationRecord>> ForOwnerAsync(string ownerId, CancellationToken cancellationToken) =>
+            Task.FromResult(Records);
     }
 
     private sealed class DenyingAuthorizer : IPhaseMutationAuthorizer
     {
-        public MutationAuthorizationResult Authorize(MutationAuthorizationRequest request) =>
-            MutationAuthorizationResult.Deny("No authorization exists for this run.");
+        public Task<MutationAuthorizationResult> AuthorizeAsync(
+            MutationAuthorizationRequest request,
+            CancellationToken cancellationToken) =>
+            Task.FromResult(MutationAuthorizationResult.Deny("No authorization exists for this run."));
     }
 
     private static WorkbenchPlanResponse Plan(

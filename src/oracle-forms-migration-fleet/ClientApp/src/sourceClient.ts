@@ -133,19 +133,20 @@ export const SessionExpired = "Your sign-in session expired. Reload the page to 
 
 export async function* acquireSource(
   request: { mode: "repo"; repositoryUrl: string; branch?: string } | { mode: "zip"; file: File },
+  projectId: string,
   signal: AbortSignal,
 ): AsyncGenerator<ConsoleLine | { level: "done"; workspace: SourceWorkspace }> {
   const send = () => request.mode === "repo"
     ? fetch("/api/workbench/source/clone", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ repositoryUrl: request.repositoryUrl, branch: request.branch || null }),
+      body: JSON.stringify({ repositoryUrl: request.repositoryUrl, branch: request.branch || null, projectId }),
       signal,
     })
     : (() => {
       const form = new FormData();
       form.append("archive", request.file, request.file.name);
-      return fetch("/api/workbench/source/upload", { method: "POST", body: form, signal });
+      return fetch(`/api/workbench/source/upload?projectId=${encodeURIComponent(projectId)}`, { method: "POST", body: form, signal });
     })();
 
   let response: Response;
@@ -192,8 +193,8 @@ export async function* executeRun(
   yield* readEvents<ConsoleLine & { level: "done" | "error"; result: ExecutionResult }>(response);
 }
 
-export async function fetchArtifact(workspaceId: string, path: string, signal?: AbortSignal) {
-  const query = `workspaceId=${encodeURIComponent(workspaceId)}&path=${encodeURIComponent(path)}`;
+export async function fetchArtifact(workspaceId: string, path: string, projectId: string, signal?: AbortSignal) {
+  const query = `workspaceId=${encodeURIComponent(workspaceId)}&path=${encodeURIComponent(path)}&projectId=${encodeURIComponent(projectId)}`;
   const response = await fetch(`/api/workbench/artifact?${query}`, { signal });
   if (!response.ok) {
     const payload = await response.json().catch(() => null) as { error?: string } | null;
@@ -202,8 +203,8 @@ export async function fetchArtifact(workspaceId: string, path: string, signal?: 
   return response.text();
 }
 
-export function releaseSource(workspaceId: string) {
-  return fetch(`/api/workbench/source/${encodeURIComponent(workspaceId)}`, { method: "DELETE" });
+export function releaseSource(workspaceId: string, projectId: string) {
+  return fetch(`/api/workbench/source/${encodeURIComponent(workspaceId)}?projectId=${encodeURIComponent(projectId)}`, { method: "DELETE" });
 }
 
 export function formatBytes(bytes: number) {

@@ -336,8 +336,9 @@ public sealed class MigrationExecutor
             if (phase.Mutation is MutationClass.SandboxDatabaseWrite or MutationClass.ProductionWrite &&
                 _mutationAuthorizer is not null)
             {
-                MutationAuthorizationResult decision = _mutationAuthorizer.Authorize(
-                    new MutationAuthorizationRequest(phase.Phase, phase.Mutation, request, operatorIdentity));
+                MutationAuthorizationResult decision = await _mutationAuthorizer.AuthorizeAsync(
+                    new MutationAuthorizationRequest(phase.Phase, phase.Mutation, request, operatorIdentity),
+                    cancellationToken).ConfigureAwait(false);
 
                 if (!decision.IsAuthorized)
                 {

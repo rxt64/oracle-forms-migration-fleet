@@ -9,15 +9,41 @@ using OracleFormsMigrationFleet.Fleet.Execution;
 
 namespace OracleFormsMigrationFleet.Hosting;
 
+/// <summary>Roles this workbench recognises. A role is held or it is not; there is no implied hierarchy.</summary>
+public static class WorkbenchRoles
+{
+    /// <summary>May request a run and may hold a grant for one.</summary>
+    public const string MigrationOperator = "MigrationOperator";
+
+    /// <summary>May approve someone else's sandbox request.</summary>
+    public const string SandboxApprover = "SandboxApprover";
+
+    /// <summary>May approve production writes. No path in this increment issues a production grant.</summary>
+    public const string ProductionApprover = "ProductionApprover";
+}
+
 /// <summary>
 /// The authenticated caller, as the host established it.
 ///
-/// Both fields come from the host's authentication boundary and from nowhere else. There is no
+/// Every field comes from the host's authentication boundary and from nowhere else. There is no
 /// constructor path that reads a request body, because a caller who can name their own roles has no
 /// roles at all.
+///
+/// <see cref="OwnerId"/> is the workspace and grant key. Built through <see cref="ForTenant"/> it is
+/// tenant-qualified, so the same object identifier presented under a different tenant is a different
+/// owner and reaches none of the first one's workspaces, projects, or grants.
 /// </summary>
 public sealed record WorkbenchActor(string OwnerId, IReadOnlyList<string> Roles)
 {
+    /// <summary>Tenant the principal was issued by. Empty only for actors built before identity was tenant-scoped.</summary>
+    public string TenantId { get; init; } = string.Empty;
+
+    /// <summary>Directory object identifier of the principal.</summary>
+    public string ObjectId { get; init; } = string.Empty;
+
+    public static WorkbenchActor ForTenant(string tenantId, string objectId, IReadOnlyList<string> roles) =>
+        new($"{tenantId}:{objectId}", roles) { TenantId = tenantId, ObjectId = objectId };
+
     public bool HasRole(string role) =>
         Roles.Any(held => string.Equals(held, role, StringComparison.OrdinalIgnoreCase));
 }
@@ -54,6 +80,23 @@ public sealed record WorkbenchAuthorizationRecord
     public required WorkbenchMutationScope Scope { get; init; }
 
     public required DateTimeOffset ExpiresUtc { get; init; }
+
+    /// <summary>Tenant the grant was issued under. Empty means an untenanted legacy grant.</summary>
+    public string TenantId { get; init; } = string.Empty;
+
+    /// <summary>Project the grant belongs to. Empty means no project scoping was recorded.</summary>
+    public string ProjectId { get; init; } = string.Empty;
+
+    /// <summary>Identity and version of the server-owned target profile the grant names.</summary>
+    public string TargetProfileId { get; init; } = string.Empty;
+
+    public int TargetProfileVersion { get; init; }
+
+    /// <summary>Identifier of the actor who approved it, carried so a materialized approval can cite them.</summary>
+    public string ApprovedByObjectId { get; init; } = string.Empty;
+
+    /// <summary>A revoked grant is kept for audit and never authorizes.</summary>
+    public bool IsRevoked { get; init; }
 }
 
 /// <summary>The facts a decision is made against, assembled by the server from server-owned inputs.</summary>
@@ -63,11 +106,18 @@ public sealed record WorkbenchAuthorizationQuery(
     string SourceSnapshotHash,
     string PlanInputHash,
     string TargetHash,
-    WorkbenchMutationScope Scope);
+    WorkbenchMutationScope Scope,
+    string TenantId = "",
+    string ProjectId = "",
+    string TargetProfileId = "",
+    int TargetProfileVersion = 0);
 
 /// <summary>A decision, and the reason a run report will carry. A denial is never silent.</summary>
 public sealed record WorkbenchAuthorizationDecision(bool IsAuthorized, string Reason, string? AuthorizationId = null)
 {
+    /// <summary>Who approved the grant this decision matched, so a materialized approval can name them.</summary>
+    public string ApprovedByObjectId { get; init; } = string.Empty;
+
     public static WorkbenchAuthorizationDecision Deny(string reason) => new(false, reason);
 }
 
@@ -75,27 +125,29 @@ public sealed record WorkbenchAuthorizationDecision(bool IsAuthorized, string Re
 /// Source of server-issued grants for one owner.
 ///
 /// A store is read-only by design. Nothing in the request path may create a grant, so a caller cannot
-/// turn an attempted side effect into permission for it.
+/// turn an attempted side effect into permission for it. The lookup is asynchronous because the store
+/// that actually holds grants is a database, and blocking a request thread on it would be the kind of
+/// sync-over-async that stops being a style question under load.
 /// </summary>
 public interface IWorkbenchAuthorizationStore
 {
-    IReadOnlyList<WorkbenchAuthorizationRecord> ForOwner(string ownerId);
+    Task<IReadOnlyList<WorkbenchAuthorizationRecord>> ForOwnerAsync(string ownerId, CancellationToken cancellationToken);
 }
 
 /// <summary>
-/// The store this deployment actually has.
+/// The store a deployment falls back to when no platform persistence is configured.
 ///
-/// There is no trusted identity and persistence service behind this workbench yet, so there is no
-/// honest way to hold a grant that survives a replica restart or to establish who issued it. Returning
-/// nothing is the accurate answer, and it means the default API path authorizes no sandbox or production
-/// mutation. Planning and artifact generation are unaffected: they write only inside the caller's own
-/// session workspace.
+/// Returning nothing is the accurate answer when there is nowhere to hold a grant that survives a
+/// replica restart, and it means the default API path authorizes no sandbox or production mutation.
+/// Planning and artifact generation are unaffected: they write only inside the caller's own session
+/// workspace.
 /// </summary>
 public sealed class NoWorkbenchAuthorizationStore : IWorkbenchAuthorizationStore
 {
     public static NoWorkbenchAuthorizationStore Instance { get; } = new();
 
-    public IReadOnlyList<WorkbenchAuthorizationRecord> ForOwner(string ownerId) => [];
+    public Task<IReadOnlyList<WorkbenchAuthorizationRecord>> ForOwnerAsync(string ownerId, CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<WorkbenchAuthorizationRecord>>([]);
 }
 
 /// <summary>
@@ -110,7 +162,10 @@ public sealed class WorkbenchAuthorizationService(IWorkbenchAuthorizationStore? 
 {
     private readonly IWorkbenchAuthorizationStore _store = store ?? NoWorkbenchAuthorizationStore.Instance;
 
-    public WorkbenchAuthorizationDecision Authorize(WorkbenchAuthorizationQuery query, DateTimeOffset nowUtc)
+    public async Task<WorkbenchAuthorizationDecision> AuthorizeAsync(
+        WorkbenchAuthorizationQuery query,
+        DateTimeOffset nowUtc,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(query);
 
@@ -119,11 +174,13 @@ public sealed class WorkbenchAuthorizationService(IWorkbenchAuthorizationStore? 
             return WorkbenchAuthorizationDecision.Deny("The caller was not authenticated.");
         }
 
-        IReadOnlyList<WorkbenchAuthorizationRecord> candidates = _store.ForOwner(query.Actor.OwnerId);
+        IReadOnlyList<WorkbenchAuthorizationRecord> candidates =
+            await _store.ForOwnerAsync(query.Actor.OwnerId, cancellationToken).ConfigureAwait(false);
+
         if (candidates.Count == 0)
         {
             return WorkbenchAuthorizationDecision.Deny(
-                "No server-issued authorization exists for this run, and this deployment has no service that can issue one.");
+                "No server-issued authorization exists for this run.");
         }
 
         string? matchingDenial = null;
@@ -136,15 +193,34 @@ public sealed class WorkbenchAuthorizationService(IWorkbenchAuthorizationStore? 
                 continue;
             }
 
+            if (record.IsRevoked)
+            {
+                matchingDenial ??= "The authorization for this run was revoked.";
+                continue;
+            }
+
             if (record.ExpiresUtc <= nowUtc)
             {
                 matchingDenial ??= "The authorization for this run has expired.";
                 continue;
             }
 
-            if (!query.Actor.HasRole(record.RequiredRole))
+            if (!string.Equals(record.TenantId, query.TenantId, StringComparison.OrdinalIgnoreCase))
             {
-                matchingDenial ??= "The signed-in caller does not hold the role this authorization requires.";
+                matchingDenial ??= "The authorization was issued under a different tenant.";
+                continue;
+            }
+
+            if (!string.Equals(record.ProjectId, query.ProjectId, StringComparison.Ordinal))
+            {
+                matchingDenial ??= "The authorization was issued for a different project.";
+                continue;
+            }
+
+            if (!string.Equals(record.TargetProfileId, query.TargetProfileId, StringComparison.Ordinal) ||
+                record.TargetProfileVersion != query.TargetProfileVersion)
+            {
+                matchingDenial ??= "The target profile changed after this authorization was issued.";
                 continue;
             }
 
@@ -166,7 +242,10 @@ public sealed class WorkbenchAuthorizationService(IWorkbenchAuthorizationStore? 
                 continue;
             }
 
-            return new WorkbenchAuthorizationDecision(true, "A server-issued authorization covers this run.", record.AuthorizationId);
+            return new WorkbenchAuthorizationDecision(true, "A server-issued authorization covers this run.", record.AuthorizationId)
+            {
+                ApprovedByObjectId = record.ApprovedByObjectId,
+            };
         }
 
         return WorkbenchAuthorizationDecision.Deny(
@@ -331,6 +410,9 @@ public static class WorkbenchTrustBoundary
             request.EngagementId,
             request.ApplicationName,
             request.RequestedMode.ToString(),
+            request.Target?.Database.ToString() ?? "none",
+            request.Target?.FrontEnd.ToString() ?? "none",
+            request.Target?.BackEnd.ToString() ?? "none",
             request.OracleFormsVersion,
             request.OracleDatabaseVersion,
             WorkspacePath.Normalize(request.SourceRoot),
@@ -361,6 +443,9 @@ public static class WorkbenchTrustBoundary
         string EngagementId,
         string ApplicationName,
         string RequestedMode,
+        string TargetDatabase,
+        string TargetFrontEnd,
+        string TargetBackEnd,
         string OracleFormsVersion,
         string OracleDatabaseVersion,
         string SourceRoot,
@@ -390,11 +475,31 @@ public sealed class WorkbenchMutationAuthorizer(
     string sourceSnapshotHash,
     string planInputHash,
     string targetHash,
-    Func<DateTimeOffset>? clock = null) : IPhaseMutationAuthorizer
+    Func<DateTimeOffset>? clock = null,
+    string projectId = "",
+    string targetProfileId = "",
+    int targetProfileVersion = 0) : IPhaseMutationAuthorizer
 {
     private readonly Func<DateTimeOffset> _clock = clock ?? (() => DateTimeOffset.UtcNow);
 
-    public MutationAuthorizationResult Authorize(MutationAuthorizationRequest request)
+    public Task<MutationAuthorizationResult> AuthorizeAsync(
+        MutationAuthorizationRequest request,
+        CancellationToken cancellationToken) =>
+        AuthorizeCoreAsync(request, cancellationToken);
+
+    /// <summary>
+    /// Re-asks the same question the phase gate asked, for use at a gateway call boundary where a
+    /// single phase may make several external calls over a long period.
+    /// </summary>
+    public Task<MutationAuthorizationResult> RecheckAsync(
+        MigrationRunRequest request,
+        WorkbenchMutationScope scope,
+        CancellationToken cancellationToken) =>
+        DecideAsync(request, scope, cancellationToken);
+
+    private async Task<MutationAuthorizationResult> AuthorizeCoreAsync(
+        MutationAuthorizationRequest request,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
 
@@ -411,18 +516,92 @@ public sealed class WorkbenchMutationAuthorizer(
                 "This phase was offered for authorization without a side effect that needs one.");
         }
 
-        WorkbenchAuthorizationDecision decision = service.Authorize(
+        return await DecideAsync(request.Request, scope.Value, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<MutationAuthorizationResult> DecideAsync(
+        MigrationRunRequest request,
+        WorkbenchMutationScope scope,
+        CancellationToken cancellationToken)
+    {
+        WorkbenchAuthorizationDecision decision = await service.AuthorizeAsync(
             new WorkbenchAuthorizationQuery(
                 actor,
-                request.Request.EngagementId,
+                request.EngagementId,
                 sourceSnapshotHash,
                 planInputHash,
                 targetHash,
-                scope.Value),
-            _clock());
+                scope,
+                actor.TenantId,
+                projectId,
+                targetProfileId,
+                targetProfileVersion),
+            _clock(),
+            cancellationToken).ConfigureAwait(false);
 
         return decision.IsAuthorized
             ? MutationAuthorizationResult.Allow(decision.Reason)
             : MutationAuthorizationResult.Deny(decision.Reason);
+    }
+}
+
+/// <summary>
+/// Re-checks the grant at the gateway call boundary.
+///
+/// The phase gate answers once per phase. A data migration phase can spend minutes inside one adapter
+/// making many external calls, so the grant is re-asked before each one. A revocation part way through
+/// therefore stops the next statement rather than the next run. Nothing here claims to undo a write that
+/// already committed: it stops at the next safe point and says so.
+/// </summary>
+public sealed class AuthorizingDataMigrationGateway(
+    IDataMigrationGateway inner,
+    WorkbenchMutationAuthorizer authorizer,
+    MigrationRunRequest request) : IDataMigrationGateway
+{
+    public async Task<SchemaDeploymentOutcome> PrepareAsync(
+        IReadOnlyList<string> statements,
+        CancellationToken cancellationToken)
+    {
+        await GuardAsync(cancellationToken).ConfigureAwait(false);
+        return await inner.PrepareAsync(statements, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<TableRowCount>> CountAsync(
+        IReadOnlyList<string> tables,
+        CancellationToken cancellationToken)
+    {
+        await GuardAsync(cancellationToken).ConfigureAwait(false);
+        return await inner.CountAsync(tables, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<IReadOnlyList<string?>>> FetchAsync(
+        string table,
+        IReadOnlyList<string> columns,
+        int maxRows,
+        CancellationToken cancellationToken)
+    {
+        await GuardAsync(cancellationToken).ConfigureAwait(false);
+        return await inner.FetchAsync(table, columns, maxRows, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<DataMigrationOutcome> ApplyAsync(
+        IReadOnlyList<DataMigrationStatement> statements,
+        IReadOnlyList<string> tables,
+        CancellationToken cancellationToken)
+    {
+        await GuardAsync(cancellationToken).ConfigureAwait(false);
+        return await inner.ApplyAsync(statements, tables, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task GuardAsync(CancellationToken cancellationToken)
+    {
+        MutationAuthorizationResult decision = await authorizer
+            .RecheckAsync(request, WorkbenchMutationScope.SandboxDatabaseWrite, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!decision.IsAuthorized)
+        {
+            throw new UnauthorizedAccessException(decision.Reason);
+        }
     }
 }

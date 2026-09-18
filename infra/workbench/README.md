@@ -33,6 +33,13 @@ gh workflow run deploy.yml --repo rxt64/oracle-forms-migration-fleet -f migrate-
 
 The GitHub runner builds a commit-addressed image, authenticates to Azure with OIDC, configures the host-owned sandbox target and model deployments, and updates the Container App. Pushes to `main` run the same path with sandbox configuration enabled. Deployable images are never built from a workstation.
 
+The existing PostgreSQL server must contain two distinct databases before an application revision is deployed:
+
+- `ofm_platform` stores organizations, projects, memberships, target profiles, and approvals in its `ofm_platform` schema.
+- `postgres` is the sandbox migration target where generated DDL and copied data may be applied.
+
+The deployment script refuses to use the same host/database pair for both purposes. PostgreSQL does not permit ordinary SQL statements to cross database boundaries, so sandbox DDL cannot address the authorization tables. The managed identity must be provisioned in both databases with only the permissions each role requires. This repository does not create either database or grant those database permissions.
+
 `Deploy-Workbench.ps1` is retained only for privileged first-time infrastructure and Entra bootstrap in an empty environment. It is not the application release path; routine releases must use the GitHub workflow. Bootstrap requires permission to create resource-group deployments and role assignments and to create an Entra application. It never logs in on the user's behalf.
 
 For a new environment, create the foundation, let GitHub build the image, and then consume that exact

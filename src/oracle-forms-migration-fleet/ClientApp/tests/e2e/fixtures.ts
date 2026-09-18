@@ -277,6 +277,15 @@ export async function installStreamStub(page: Page): Promise<StreamStub> {
 /** Skips the overview so a test starts on step 1 without clicking through it. */
 export async function startAtSetup(page: Page) {
   await page.addInitScript(() => window.localStorage.setItem("ofm-workbench-intro-v1", "1"));
+  const context = await page.request.get("/api/workbench/context");
+  expect(context.ok(), await context.text()).toBe(true);
+  const projects = (await context.json() as { projects: unknown[] }).projects;
+  if (projects.length === 0) {
+    const project = await page.request.post("/api/workbench/projects", {
+      data: { name: "Guided UI" },
+    });
+    expect(project.status(), await project.text()).toBe(201);
+  }
 }
 
 /**

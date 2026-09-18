@@ -135,59 +135,157 @@ public static class WorkbenchExecution
     public sealed record WorkbenchRunPreparation(
         string WorkspaceRoot,
         MigrationRunRequest Request,
-        IPhaseMutationAuthorizer MutationAuthorizer);
+        WorkbenchMutationAuthorizer MutationAuthorizer);
 
     /// <summary>
-    /// The exact entry point the execute endpoint uses.
-    ///
-    /// Path safety and ownership are settled first, then every claim of authority in the body is
-    /// discarded and re-derived from the owner-resolved source copy. The returned authorizer is bound to
-    /// the authenticated actor and to this run's source, input, and target, so a grant issued for some
-    /// other run cannot cover it.
+    /// The project and target profile the server resolved for this run, or null when the caller is
+    /// running outside a persisted project. Every field is server-owned: a caller names a project and a
+    /// profile by identifier and the server looks up the rest.
     /// </summary>
-    public static bool TryPrepareRun(
+    public sealed record WorkbenchRunBinding(
+        string ProjectId,
+        string TargetProfileId,
+        int TargetProfileVersion,
+        string TargetProfileHash,
+        string WorkspaceOwnerId);
+
+    /// <summary>Outcome of preparing a run, shaped so the endpoint can answer without out-parameters.</summary>
+    public sealed record WorkbenchRunPreparationResult(
+        bool Succeeded,
+        WorkbenchRunPreparation? Preparation,
+        int Status,
+        string Error);
+
+    public sealed record WorkbenchTrustedPreparation(
+        string WorkspaceRoot,
+        WorkbenchRequestPreparation Trusted);
+
+    public static bool TryPrepareTrusted(
         SourceWorkspaceService workspaces,
-        WorkbenchActor actor,
+        string workspaceOwner,
         string? workspaceId,
         MigrationRunRequest? request,
-        WorkbenchAuthorizationService authorization,
-        out WorkbenchRunPreparation? prepared,
+        out WorkbenchTrustedPreparation? preparation,
         out int status,
         out string error)
     {
-        ArgumentNullException.ThrowIfNull(workspaces);
-        ArgumentNullException.ThrowIfNull(actor);
-        ArgumentNullException.ThrowIfNull(authorization);
-
-        prepared = null;
-
-        if (!TryPrepare(workspaces, actor.OwnerId, workspaceId, request, out string root, out MigrationRunRequest? routed, out status, out error))
+        preparation = null;
+        if (!TryPrepare(
+            workspaces,
+            workspaceOwner,
+            workspaceId,
+            request,
+            out string root,
+            out MigrationRunRequest? routed,
+            out status,
+            out error))
         {
             return false;
         }
 
-        SourceWorkspaceFacts? facts = workspaces.Describe(actor.OwnerId, workspaceId!, routed!.SourceRoot);
+        SourceWorkspaceFacts? facts = workspaces.Describe(workspaceOwner, workspaceId!, routed!.SourceRoot);
         if (facts is null)
         {
             status = 404;
             error = "The selected source folder is not available in this workspace.";
             return false;
         }
-        WorkbenchRequestPreparation trusted = WorkbenchTrustBoundary.Prepare(routed!, facts);
 
-        prepared = new WorkbenchRunPreparation(
-            root,
-            trusted.Request,
-            new WorkbenchMutationAuthorizer(
-                authorization,
-                actor,
-                trusted.SourceSnapshotHash,
-                trusted.PlanInputHash,
-                trusted.TargetHash));
-
-        status = 200;
-        error = string.Empty;
+        preparation = new WorkbenchTrustedPreparation(root, WorkbenchTrustBoundary.Prepare(routed, facts));
         return true;
+    }
+
+    /// <summary>
+    /// The exact entry point the execute endpoint uses.
+    ///
+    /// Path safety and ownership are settled first, then every claim of authority in the body is
+    /// discarded and re-derived from the owner-resolved source copy. The returned authorizer is bound to
+    /// the authenticated actor and to this run's tenant, project, source, input, and target profile, so a
+    /// grant issued for some other run cannot cover it.
+    ///
+    /// When a persisted grant does cover the run, the internal execution approval is materialized here
+    /// and names the actor who actually approved it in the store. That is the only path by which
+    /// <see cref="MigrationRunRequest.ExecutionApproval"/> becomes anything other than pending.
+    /// </summary>
+    public static async Task<WorkbenchRunPreparationResult> PrepareRunAsync(
+        SourceWorkspaceService workspaces,
+        WorkbenchActor actor,
+        string? workspaceId,
+        MigrationRunRequest? request,
+        WorkbenchAuthorizationService authorization,
+        WorkbenchRunBinding? binding = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(workspaces);
+        ArgumentNullException.ThrowIfNull(actor);
+        ArgumentNullException.ThrowIfNull(authorization);
+
+        string workspaceOwner = binding?.WorkspaceOwnerId ?? actor.OwnerId;
+        if (!TryPrepareTrusted(
+            workspaces,
+            workspaceOwner,
+            workspaceId,
+            request,
+            out WorkbenchTrustedPreparation? preparation,
+            out int status,
+            out string error))
+        {
+            return new WorkbenchRunPreparationResult(false, null, status, error);
+        }
+
+        WorkbenchRequestPreparation trusted = preparation!.Trusted;
+
+        // A persisted target profile names the target, so the binding hash replaces the stack-enum one:
+        // two engagements pointed at different databases must not share a target identity because they
+        // both chose PostgreSQL.
+        string targetHash = binding?.TargetProfileHash ?? trusted.TargetHash;
+
+        WorkbenchMutationAuthorizer authorizer = new(
+            authorization,
+            actor,
+            trusted.SourceSnapshotHash,
+            WorkbenchTrustBoundary.PlanInputHash(trusted.Request),
+            targetHash,
+            clock: null,
+            projectId: binding?.ProjectId ?? string.Empty,
+            targetProfileId: binding?.TargetProfileId ?? string.Empty,
+            targetProfileVersion: binding?.TargetProfileVersion ?? 0);
+
+        MigrationRunRequest prepared = trusted.Request;
+
+        WorkbenchAuthorizationDecision sandbox = await authorization.AuthorizeAsync(
+            new WorkbenchAuthorizationQuery(
+                actor,
+                prepared.EngagementId,
+                trusted.SourceSnapshotHash,
+                WorkbenchTrustBoundary.PlanInputHash(prepared),
+                targetHash,
+                WorkbenchMutationScope.SandboxDatabaseWrite,
+                actor.TenantId,
+                binding?.ProjectId ?? string.Empty,
+                binding?.TargetProfileId ?? string.Empty,
+                binding?.TargetProfileVersion ?? 0),
+            DateTimeOffset.UtcNow,
+            cancellationToken).ConfigureAwait(false);
+
+        if (sandbox.IsAuthorized)
+        {
+            prepared = prepared with
+            {
+                ExecutionApproval = new HumanApproval
+                {
+                    Decision = ApprovalDecision.Approved,
+                    ApproverId = sandbox.ApprovedByObjectId.Length == 0 ? sandbox.AuthorizationId : sandbox.ApprovedByObjectId,
+                    Notes = $"Materialized from persisted authorization {sandbox.AuthorizationId}.",
+                },
+            };
+        }
+
+        return new WorkbenchRunPreparationResult(
+            true,
+            new WorkbenchRunPreparation(preparation.WorkspaceRoot, prepared, authorizer),
+            200,
+            string.Empty);
     }
 
     /// <summary>
@@ -205,7 +303,8 @@ public static class WorkbenchExecution
         MigrationRunRequest? request,
         out WorkbenchPlanResponse? response,
         out int status,
-        out string error)
+        out string error,
+        string? workspaceOwner = null)
     {
         ArgumentNullException.ThrowIfNull(actor);
 
@@ -231,14 +330,15 @@ public static class WorkbenchExecution
             return false;
         }
 
+        string owner = workspaceOwner ?? actor.OwnerId;
         SourceWorkspaceSummary? summary = workspaces is not null && !string.IsNullOrWhiteSpace(workspaceId)
-            ? workspaces.DescribeSummary(actor.OwnerId, workspaceId, request.SourceRoot)
+            ? workspaces.DescribeSummary(owner, workspaceId, request.SourceRoot)
             : null;
 
         if (!string.IsNullOrWhiteSpace(workspaceId) && summary is null)
         {
             status = 404;
-            error = workspaces?.Describe(actor.OwnerId, workspaceId) is null
+            error = workspaces?.Describe(owner, workspaceId) is null
                 ? UnknownWorkspace
                 : "The selected source folder is not available in this workspace.";
             return false;

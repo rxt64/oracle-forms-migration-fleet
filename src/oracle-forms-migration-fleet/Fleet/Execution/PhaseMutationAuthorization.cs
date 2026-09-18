@@ -31,5 +31,7 @@ public sealed record MutationAuthorizationResult(bool IsAuthorized, string Reaso
 /// </summary>
 public interface IPhaseMutationAuthorizer
 {
-    MutationAuthorizationResult Authorize(MutationAuthorizationRequest request);
+    Task<MutationAuthorizationResult> AuthorizeAsync(
+        MutationAuthorizationRequest request,
+        CancellationToken cancellationToken);
 }

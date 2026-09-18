@@ -91,6 +91,25 @@ try {
         throw 'Local Bicep parameter compilation failed.'
     }
 
+    $deploymentParameters = Get-Content -LiteralPath $compiledParameterFile -Raw | ConvertFrom-Json -Depth 100
+    foreach ($requiredParameter in @(
+        'platformDatabaseHost',
+        'platformDatabaseName',
+        'platformDatabaseUser',
+        'sandboxDatabaseHost',
+        'sandboxDatabaseName',
+        'sandboxDatabaseUser'
+    )) {
+        $configured = $deploymentParameters.parameters.$requiredParameter.value
+        if ([string]::IsNullOrWhiteSpace([string]$configured)) {
+            throw "The deployment parameter '$requiredParameter' is required when deploying the workbench."
+        }
+    }
+    if ($deploymentParameters.parameters.platformDatabaseName.value -eq $deploymentParameters.parameters.sandboxDatabaseName.value -and
+        $deploymentParameters.parameters.platformDatabaseHost.value -eq $deploymentParameters.parameters.sandboxDatabaseHost.value) {
+        throw 'The platform authorization store and sandbox migration target must use different PostgreSQL databases.'
+    }
+
     Write-Output 'Deploying Container Apps foundation...'
     $foundation = Invoke-AzJson -Arguments @(
         'deployment', 'group', 'create',
@@ -190,7 +209,6 @@ try {
         throw 'Creating the workbench authentication credential failed.'
     }
 
-    $deploymentParameters = Get-Content -LiteralPath $compiledParameterFile -Raw | ConvertFrom-Json -Depth 100
     Set-ArmParameter -Document $deploymentParameters -Name 'deployWorkbench' -Value $true
     Set-ArmParameter -Document $deploymentParameters -Name 'containerImage' -Value $image
     Set-ArmParameter -Document $deploymentParameters -Name 'foundryAgentEndpoint' -Value $FoundryAgentEndpoint

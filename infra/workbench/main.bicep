@@ -42,6 +42,32 @@ param operatorPrincipalObjectIds array
 @description('Entra application credential consumed only by the Container Apps authentication provider.')
 param entraClientSecret string = ''
 
+// The workbench persists organizations, projects, memberships, target profiles, and approvals in an
+// isolated schema on an EXISTING PostgreSQL flexible server. This template creates no database server:
+// it only tells the container where that schema is. The identity below must already have been granted
+// login and CREATE on the schema, and the server firewall must already admit the container app --
+// neither is expressible here, and both are preconditions documented in infra/workbench/README.md.
+@description('Host name of the existing PostgreSQL flexible server holding the platform schema. Required when deployWorkbench is true.')
+param platformDatabaseHost string = ''
+
+@description('Database on that server holding the platform schema.')
+param platformDatabaseName string = 'postgres'
+
+@description('Entra principal name the workbench authenticates to the platform database as. Never a password.')
+param platformDatabaseUser string = ''
+
+@description('Isolated schema for platform state. Kept separate from any migration target schema.')
+param platformDatabaseSchema string = 'ofm_platform'
+
+@description('Host name of the sandbox PostgreSQL server. The sandbox database must differ from the platform database.')
+param sandboxDatabaseHost string = ''
+
+@description('Sandbox database that generated migration DDL may modify.')
+param sandboxDatabaseName string = 'postgres'
+
+@description('Entra principal name used for sandbox migration writes. Never a password.')
+param sandboxDatabaseUser string = ''
+
 var uniqueSuffix = take(uniqueString(resourceGroup().id), 8)
 var environmentToken = take(environmentName, 3)
 var compactToken = take(workloadToken, 7)
@@ -52,6 +78,7 @@ var insightsName = 'appi-${workloadToken}-web-${environmentName}-${uniqueSuffix}
 var managedEnvironmentName = 'cae-${workloadToken}-${environmentName}-${uniqueSuffix}'
 var workbenchName = 'ca-${workloadToken}-${environmentName}-${uniqueSuffix}'
 var imageRepository = 'migration-fleet-workbench'
+var sandboxServerName = split(sandboxDatabaseHost, '.')[0]
 var authSecretName = 'microsoft-provider-authentication-secret'
 var acrPullRoleId = '7f951dda-4ed3-4680-a7ca-43fe172d538d'
 var foundryAgentConsumerRoleId = 'eed3b665-ab3a-47b6-8f48-c9382fb1dad6'
@@ -222,8 +249,77 @@ resource workbench 'Microsoft.App/containerApps@2025-01-01' = if (deployWorkbenc
               value: applicationInsights.properties.ConnectionString
             }
             {
-              name: 'WORKBENCH_ENTRA_AUTH_ENABLED'
-              value: 'true'
+              name: 'WORKBENCH_AUTH_MODE'
+              value: 'ContainerApps'
+            }
+            {
+              name: 'WORKBENCH_AUTH_TENANT_ID'
+              value: tenant().tenantId
+            }
+            {
+              name: 'WORKBENCH_AUTH_CLIENT_ID'
+              value: entraClientId
+            }
+            {
+              // Both forms the platform may present, matching allowedAudiences below exactly.
+              name: 'WORKBENCH_AUTH_AUDIENCE'
+              value: '${entraClientId},api://${entraClientId}'
+            }
+            {
+              name: 'WORKBENCH_AUTH_ISSUER'
+              value: '${environment().authentication.loginEndpoint}${tenant().tenantId}/v2.0'
+            }
+            {
+              name: 'PLATFORM_PGHOST'
+              value: platformDatabaseHost
+            }
+            {
+              name: 'PLATFORM_PGDATABASE'
+              value: platformDatabaseName
+            }
+            {
+              name: 'PLATFORM_PGUSER'
+              value: platformDatabaseUser
+            }
+            {
+              name: 'PLATFORM_PGSCHEMA'
+              value: platformDatabaseSchema
+            }
+            {
+              name: 'SANDBOX_PGHOST'
+              value: sandboxDatabaseHost
+            }
+            {
+              name: 'SANDBOX_PGDATABASE'
+              value: sandboxDatabaseName
+            }
+            {
+              name: 'SANDBOX_PGUSER'
+              value: sandboxDatabaseUser
+            }
+            {
+              name: 'SANDBOX_PGSCHEMA'
+              value: 'public'
+            }
+            {
+              name: 'SANDBOX_AZURE_TENANT_ID'
+              value: tenant().tenantId
+            }
+            {
+              name: 'SANDBOX_AZURE_SUBSCRIPTION_ID'
+              value: subscription().subscriptionId
+            }
+            {
+              name: 'SANDBOX_AZURE_RESOURCE_GROUP'
+              value: resourceGroup().name
+            }
+            {
+              name: 'SANDBOX_AZURE_RESOURCE_ID'
+              value: resourceId('Microsoft.DBforPostgreSQL/flexibleServers', sandboxServerName)
+            }
+            {
+              name: 'SANDBOX_AZURE_REGION'
+              value: location
             }
           ]
           probes: [
