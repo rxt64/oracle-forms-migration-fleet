@@ -6,6 +6,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -63,13 +64,36 @@ def managed_identity_token(client_id: str, resource: str) -> str:
     query = urllib.parse.urlencode(
         {"api-version": "2019-08-01", "resource": resource, "client_id": client_id}
     )
-    response = http_request(
-        "GET",
-        f"http://169.254.169.254/metadata/identity/oauth2/token?{query}",
-        headers={"Metadata": "true"},
-    )
+    response = HttpResponse(500, b"", {})
+    for attempt in range(5):
+        response = http_request(
+            "GET",
+            f"http://169.254.169.254/metadata/identity/oauth2/token?{query}",
+            headers={"Metadata": "true"},
+        )
+        if response.status == 200:
+            break
+        if response.status not in {404, 410, 429} and response.status < 500:
+            break
+        if attempt < 4:
+            time.sleep(2**attempt)
+
     if response.status != 200:
-        raise RuntimeError(f"Managed identity token request failed with HTTP {response.status}.")
+        identifier = "unknown"
+        description = ""
+        try:
+            error = response.json()
+            if isinstance(error, dict):
+                if isinstance(error.get("error"), str):
+                    identifier = error["error"][:64]
+                if isinstance(error.get("error_description"), str):
+                    description = " ".join(error["error_description"].split())[:240]
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            pass
+        detail = f" ({identifier}: {description})" if description else f" ({identifier})"
+        raise RuntimeError(
+            f"Managed identity token request failed with HTTP {response.status}{detail}."
+        )
 
     token = response.json().get("access_token")
     if not isinstance(token, str) or not token:
