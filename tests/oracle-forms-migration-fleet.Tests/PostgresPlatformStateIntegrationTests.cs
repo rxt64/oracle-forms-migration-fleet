@@ -50,7 +50,10 @@ public sealed class PostgresPlatformStateIntegrationTests : IAsyncLifetime
         await store.InitializeAsync(CancellationToken.None);
         ConfiguredSandboxTargetBinding sandbox = new(
             "pg-sandbox.postgres.database.azure.com", "ofm_sandbox", "id-ofmfleet-web-dev", CanWrite: true);
-        PlatformAccessService platform = new(store, sandbox);
+        PlatformAccessService platform = new(
+            store,
+            sandbox,
+            sandboxProjects: new PostgresSandboxProjectBindingStore(Options(), OpenAsync));
         WorkbenchActor requester = Actor(Requester);
         WorkbenchActor approver = Actor(Approver);
 
@@ -103,6 +106,36 @@ public sealed class PostgresPlatformStateIntegrationTests : IAsyncLifetime
             ["Requested", "Approved", "Revoked"],
             await ApprovalEventsAsync(approved.ApprovalId));
 
+        PlatformProject otherProject = (await platform.CreateProjectAsync(
+            requester, "Other PostgreSQL project", CancellationToken.None)).Value!;
+        Assert.True((await platform.EnsureConfiguredTargetProfileAsync(
+            requester, otherProject.ProjectId, TargetEnvironment(), CancellationToken.None)).Succeeded);
+        PlatformResult<PlatformApproval> denied = await platform.RequestAsync(
+            requester,
+            new PlatformApprovalRequestInput(
+                otherProject.ProjectId,
+                "sandbox",
+                WorkbenchMutationScope.SandboxDatabaseWrite,
+                "ENG-OTHER",
+                "other-source",
+                "other-plan",
+                TimeSpan.FromHours(1),
+                null),
+            CancellationToken.None);
+        Assert.Equal(409, denied.Status);
+        Assert.True((await platform.RequestAsync(
+            requester,
+            new PlatformApprovalRequestInput(
+                otherProject.ProjectId,
+                "sandbox",
+                WorkbenchMutationScope.ValidationOnly,
+                "ENG-VALIDATION",
+                "validation-source",
+                "validation-plan",
+                TimeSpan.FromMinutes(5),
+                null),
+            CancellationToken.None)).Succeeded);
+
         await using PostgresPlatformStateStore restarted = CreateStore()!;
         await restarted.InitializeAsync(CancellationToken.None);
         PlatformApproval? persisted = await restarted.GetApprovalAsync(Tenant, approved.ApprovalId, CancellationToken.None);
@@ -142,6 +175,70 @@ public sealed class PostgresPlatformStateIntegrationTests : IAsyncLifetime
         Assert.Equal(Enumerable.Range(1, PlatformSchema.CurrentVersion), versions);
     }
 
+    [Fact]
+    [Trait("Category", "PostgresIntegration")]
+    public async Task Concurrent_projects_cannot_both_bind_the_shared_postgresql_sandbox()
+    {
+        PostgresPlatformStateStore? configured = CreateStore();
+        if (configured is null)
+        {
+            RequireConfiguredConnection();
+            return;
+        }
+        await using PostgresPlatformStateStore store = configured;
+        await store.InitializeAsync(CancellationToken.None);
+        ConfiguredSandboxTargetBinding sandbox = new(
+            "pg-sandbox.postgres.database.azure.com", "ofm_sandbox", "id-ofmfleet-web-dev", CanWrite: true);
+        PlatformAccessService platform = new(
+            store,
+            sandbox,
+            sandboxProjects: new PostgresSandboxProjectBindingStore(Options(), OpenAsync));
+        WorkbenchActor requester = Actor(Requester);
+        PlatformProject first = await CreateProjectWithProfileAsync(platform, requester, "Concurrent first");
+        PlatformProject second = await CreateProjectWithProfileAsync(platform, requester, "Concurrent second");
+
+        PlatformResult<PlatformApproval>[] results = await Task.WhenAll(
+            platform.RequestAsync(requester, ApprovalInput(first.ProjectId, "ENG-FIRST"), CancellationToken.None),
+            platform.RequestAsync(requester, ApprovalInput(second.ProjectId, "ENG-SECOND"), CancellationToken.None));
+
+        Assert.Single(results, result => result.Succeeded);
+        Assert.Single(results, result => !result.Succeeded && result.Status == 409);
+    }
+
+    [Fact]
+    [Trait("Category", "PostgresIntegration")]
+    public async Task Version_two_migration_binds_the_earliest_legacy_sandbox_request()
+    {
+        PostgresPlatformStateStore? configured = CreateStore();
+        if (configured is null)
+        {
+            RequireConfiguredConnection();
+            return;
+        }
+        await using PostgresPlatformStateStore store = configured;
+        await InitializeVersionOneAsync();
+        PlatformAccessService platform = new(store, sandbox: null);
+        WorkbenchActor requester = Actor(Requester);
+        PlatformProject first = (await platform.CreateProjectAsync(
+            requester, "Legacy first", CancellationToken.None)).Value!;
+        PlatformProject second = (await platform.CreateProjectAsync(
+            requester, "Legacy second", CancellationToken.None)).Value!;
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        await store.CreateApprovalAsync(LegacyApproval(first.ProjectId, "ENG-EARLY", now), CancellationToken.None);
+        await store.CreateApprovalAsync(
+            LegacyApproval(second.ProjectId, "ENG-LATE", now.AddMinutes(1)) with
+            {
+                State = PlatformApprovalState.Approved,
+                DecidedByObjectId = Approver,
+                DecidedUtc = now.AddMinutes(2),
+            },
+            CancellationToken.None);
+
+        await store.InitializeAsync(CancellationToken.None);
+        PostgresSandboxProjectBindingStore binding = new(Options(), OpenAsync);
+        Assert.Equal(first.ProjectId, await binding.GetSandboxProjectAsync(Tenant, CancellationToken.None));
+    }
+
     private PostgresPlatformStateStore? CreateStore()
     {
         if (_connectionString is null)
@@ -149,7 +246,12 @@ public sealed class PostgresPlatformStateIntegrationTests : IAsyncLifetime
             return null;
         }
 
-        NpgsqlConnectionStringBuilder builder = new(_connectionString);
+        return new PostgresPlatformStateStore(Options(), OpenAsync);
+    }
+
+    private PlatformDatabaseOptions Options()
+    {
+        NpgsqlConnectionStringBuilder builder = new(_connectionString!);
         if (string.IsNullOrWhiteSpace(builder.Host) ||
             string.IsNullOrWhiteSpace(builder.Database) ||
             string.IsNullOrWhiteSpace(builder.Username))
@@ -157,15 +259,13 @@ public sealed class PostgresPlatformStateIntegrationTests : IAsyncLifetime
             throw new InvalidOperationException("The PostgreSQL integration connection must name a host, database, and user.");
         }
 
-        return new PostgresPlatformStateStore(
-            new PlatformDatabaseOptions
-            {
-                Host = builder.Host!,
-                Database = builder.Database,
-                User = builder.Username,
-                Schema = _schema,
-            },
-            OpenAsync);
+        return new PlatformDatabaseOptions
+        {
+            Host = builder.Host!,
+            Database = builder.Database,
+            User = builder.Username,
+            Schema = _schema,
+        };
     }
 
     private async Task<NpgsqlConnection> OpenAsync(CancellationToken cancellationToken)
@@ -190,6 +290,70 @@ public sealed class PostgresPlatformStateIntegrationTests : IAsyncLifetime
 
         return actions;
     }
+
+    private async Task InitializeVersionOneAsync()
+    {
+        await using NpgsqlConnection connection = await OpenAsync(CancellationToken.None);
+        await using (NpgsqlCommand ledger = new(PlatformSchema.LedgerStatement(_schema), connection))
+        {
+            await ledger.ExecuteNonQueryAsync();
+        }
+
+        PlatformSchema.Migration migration = PlatformSchema.Migrations(_schema)[0];
+        foreach (string statement in migration.Statements)
+        {
+            await using NpgsqlCommand command = new(statement, connection);
+            await command.ExecuteNonQueryAsync();
+        }
+
+        await using NpgsqlCommand record = new(PlatformSchema.RecordVersionStatement(_schema), connection);
+        record.Parameters.AddWithValue("version", migration.Version);
+        record.Parameters.AddWithValue("name", migration.Name);
+        await record.ExecuteNonQueryAsync();
+    }
+
+    private static async Task<PlatformProject> CreateProjectWithProfileAsync(
+        PlatformAccessService platform,
+        WorkbenchActor requester,
+        string name)
+    {
+        PlatformProject project = (await platform.CreateProjectAsync(
+            requester, name, CancellationToken.None)).Value!;
+        Assert.True((await platform.EnsureConfiguredTargetProfileAsync(
+            requester, project.ProjectId, TargetEnvironment(), CancellationToken.None)).Succeeded);
+        return project;
+    }
+
+    private static PlatformApprovalRequestInput ApprovalInput(string projectId, string engagementId) =>
+        new(
+            projectId,
+            "sandbox",
+            WorkbenchMutationScope.SandboxDatabaseWrite,
+            engagementId,
+            $"source-{engagementId}",
+            $"plan-{engagementId}",
+            TimeSpan.FromHours(1),
+            null);
+
+    private static PlatformApproval LegacyApproval(
+        string projectId, string engagementId, DateTimeOffset requestedUtc) => new()
+    {
+        ApprovalId = $"apr-{Guid.NewGuid():N}",
+        ProjectId = projectId,
+        TenantId = Tenant,
+        RequestedByObjectId = Requester,
+        RequestedUtc = requestedUtc,
+        State = PlatformApprovalState.Requested,
+        Scope = WorkbenchMutationScope.SandboxDatabaseWrite,
+        RequiredRole = WorkbenchRoles.MigrationOperator,
+        EngagementId = engagementId,
+        SourceSnapshotHash = $"source-{engagementId}",
+        PlanInputHash = $"plan-{engagementId}",
+        TargetProfileId = "sandbox",
+        TargetProfileVersion = 1,
+        TargetProfileHash = new string('a', 64),
+        ExpiresUtc = requestedUtc.AddHours(1),
+    };
 
     private static void RequireConfiguredConnection()
     {

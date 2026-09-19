@@ -41,6 +41,14 @@ The runner authenticates with OIDC, builds and pushes the commit-addressed image
 host-owned PostgreSQL sandbox and model deployments, and updates the Container App. Do not run
 `az acr build` or `docker build` from a workstation for a deployable image.
 
+One deployment has one shared mutable sandbox. Its first `SandboxDatabaseWrite` request permanently
+binds that tenant's sandbox to the requesting project. Other projects remain available for planning and
+`ValidationOnly`, but require a separate deployment/database/identity boundary before they can request
+sandbox writes.
+
+This binding is an intentional reservation, not an approval side effect. Once a validated request claims
+the sandbox, a later approval-storage failure does not release it; retry the request in the same project.
+
 The Foundry endpoint configured by infrastructure must use the canonical hosted-agent form:
 
 ```

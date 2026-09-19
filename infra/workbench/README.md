@@ -45,6 +45,17 @@ The existing PostgreSQL server must contain two distinct databases before an app
 
 The deployment script refuses to use the same host/database pair for both purposes. PostgreSQL does not permit ordinary SQL statements to cross database boundaries, so sandbox DDL cannot address the authorization tables. The managed identity must be provisioned in both databases with only the permissions each role requires. This repository does not create either database or grant those database permissions.
 
+This stack exposes one shared sandbox database, so it deliberately supports sandbox mutation for one
+project per tenant. The first project that requests `SandboxDatabaseWrite` is persisted as the owner;
+another project receives a conflict and cannot reassign that boundary. Other projects may still plan and
+use `ValidationOnly`. Run a separate workbench deployment with a separate database or identity when
+multiple projects need independently mutable sandboxes.
+
+The ownership reservation is written after the request passes membership, target, source, and note
+validation but before the approval record. It is not rolled back if approval persistence later fails:
+the project-to-sandbox assignment is a durable deployment boundary, while an approval is a separate
+human decision that may be requested again within that owner project.
+
 `Deploy-Workbench.ps1` is retained only for privileged first-time infrastructure and Entra bootstrap in an empty environment. It is not the application release path; routine releases must use the GitHub workflow. Bootstrap requires permission to create resource-group deployments and role assignments and to create or update an Entra application. It exposes that dedicated application as `api://<application-client-id>` and requests v2 access tokens so managed identities receive tokens from the same issuer the workbench validates. It never logs in on the user's behalf.
 
 For the existing development environment, routine releases use the validated workflow above.

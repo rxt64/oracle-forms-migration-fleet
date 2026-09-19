@@ -237,6 +237,109 @@ public class PlatformStateTests : IDisposable
     }
 
     [Fact]
+    public async Task One_shared_sandbox_accepts_database_write_requests_from_only_one_project()
+    {
+        (IPlatformStateStore store, PlatformAccessService service, string firstProject, _) = await SeedAsync();
+        PlatformResult<PlatformApproval> first = await service.RequestAsync(
+            Actor(Requester), RequestInput(firstProject), CancellationToken.None);
+        Assert.True(first.Succeeded, first.Error);
+
+        PlatformProject secondProject = (await service.CreateProjectAsync(
+            Actor(Requester), "Second migration", CancellationToken.None)).Value!;
+        Assert.True((await service.EnsureConfiguredTargetProfileAsync(
+            Actor(Requester), secondProject.ProjectId, Environment, CancellationToken.None)).Succeeded);
+
+        PlatformResult<PlatformApproval> denied = await service.RequestAsync(
+            Actor(Requester), RequestInput(secondProject.ProjectId), CancellationToken.None);
+        Assert.False(denied.Succeeded);
+        Assert.Equal(409, denied.Status);
+        Assert.Contains("one shared sandbox database", denied.Error, StringComparison.OrdinalIgnoreCase);
+
+        PlatformResult<PlatformApproval> validation = await service.RequestAsync(
+            Actor(Requester),
+            RequestInput(secondProject.ProjectId, scope: WorkbenchMutationScope.ValidationOnly),
+            CancellationToken.None);
+        Assert.True(validation.Succeeded, validation.Error);
+
+        PlatformAccessService restarted = Service(new FilePlatformStateStore(StatePath()));
+        PlatformResult<PlatformApproval> stillDenied = await restarted.RequestAsync(
+            Actor(Requester), RequestInput(secondProject.ProjectId), CancellationToken.None);
+        Assert.False(stillDenied.Succeeded);
+        Assert.Equal(409, stillDenied.Status);
+    }
+
+    [Fact]
+    public async Task Concurrent_projects_cannot_both_claim_the_shared_sandbox()
+    {
+        (IPlatformStateStore store, PlatformAccessService service, string firstProject, _) = await SeedAsync();
+        PlatformProject secondProject = (await service.CreateProjectAsync(
+            Actor(Requester), "Second migration", CancellationToken.None)).Value!;
+        Assert.True((await service.EnsureConfiguredTargetProfileAsync(
+            Actor(Requester), secondProject.ProjectId, Environment, CancellationToken.None)).Succeeded);
+
+        PlatformResult<PlatformApproval>[] results = await Task.WhenAll(
+            service.RequestAsync(Actor(Requester), RequestInput(firstProject), CancellationToken.None),
+            service.RequestAsync(Actor(Requester), RequestInput(secondProject.ProjectId), CancellationToken.None));
+
+        Assert.Single(results, result => result.Succeeded);
+        Assert.Single(results, result => !result.Succeeded && result.Status == 409);
+        Assert.Single(await store.ApprovalsForRequesterAsync(Tenant, Requester, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Legacy_approvals_from_a_non_owner_project_cannot_be_decided_or_projected_as_grants()
+    {
+        (IPlatformStateStore store, PlatformAccessService service, string ownerProject, _) = await SeedAsync();
+        PlatformApproval ownerApproval = (await service.RequestAsync(
+            Actor(Requester), RequestInput(ownerProject), CancellationToken.None)).Value!;
+        ownerApproval = (await service.DecideAsync(
+            Actor(Approver), ownerApproval.ApprovalId, true, ownerApproval.Version, null, CancellationToken.None)).Value!;
+
+        PlatformProject otherProject = (await service.CreateProjectAsync(
+            Actor(Requester), "Legacy other project", CancellationToken.None)).Value!;
+        PlatformTargetProfile otherProfile = (await service.EnsureConfiguredTargetProfileAsync(
+            Actor(Requester), otherProject.ProjectId, Environment, CancellationToken.None)).Value!;
+        Assert.True((await service.AddMemberAsync(
+            Actor(Requester),
+            otherProject.ProjectId,
+            Approver,
+            [WorkbenchRoles.MigrationOperator, WorkbenchRoles.SandboxApprover],
+            CancellationToken.None)).Succeeded);
+        PlatformApproval legacyPending = ownerApproval with
+        {
+            ApprovalId = $"apr-{Guid.NewGuid():N}",
+            ProjectId = otherProject.ProjectId,
+            State = PlatformApprovalState.Requested,
+            TargetProfileVersion = otherProfile.Version,
+            TargetProfileHash = otherProfile.CanonicalHash,
+            RequestedUtc = ownerApproval.RequestedUtc.AddMinutes(1),
+            DecidedByObjectId = null,
+            DecidedUtc = null,
+            Version = 1,
+        };
+        await store.CreateApprovalAsync(legacyPending, CancellationToken.None);
+
+        PlatformResult<PlatformApproval> denied = await service.DecideAsync(
+            Actor(Approver), legacyPending.ApprovalId, true, legacyPending.Version, null, CancellationToken.None);
+        Assert.False(denied.Succeeded);
+        Assert.Equal(409, denied.Status);
+
+        PlatformApproval legacyApproved = legacyPending with
+        {
+            ApprovalId = $"apr-{Guid.NewGuid():N}",
+            State = PlatformApprovalState.Approved,
+            DecidedByObjectId = Approver,
+            DecidedUtc = DateTimeOffset.UtcNow,
+        };
+        await store.CreateApprovalAsync(legacyApproved, CancellationToken.None);
+
+        WorkbenchAuthorizationRecord grant = Assert.Single(
+            await new PlatformAuthorizationStore(store, Sandbox)
+                .ForOwnerAsync(Actor(Requester).OwnerId, CancellationToken.None));
+        Assert.Equal(ownerApproval.ApprovalId, grant.AuthorizationId);
+    }
+
+    [Fact]
     public async Task Repeated_configuration_changes_create_only_one_version_per_distinct_target()
     {
         (IPlatformStateStore store, PlatformAccessService original, string projectId, PlatformTargetProfile first) =

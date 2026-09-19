@@ -19,7 +19,7 @@ namespace OracleFormsMigrationFleet.Hosting;
 /// The replacement itself is a <see cref="File.Move(string, string, bool)"/> of a fully written
 /// temporary file, so a crash mid-write leaves the previous document intact rather than a truncated one.
 /// </summary>
-public sealed class FilePlatformStateStore : IPlatformStateStore
+public sealed class FilePlatformStateStore : IPlatformStateStore, ISandboxProjectBindingStore
 {
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> s_locks = new(StringComparer.OrdinalIgnoreCase);
 
@@ -53,6 +53,19 @@ public sealed class FilePlatformStateStore : IPlatformStateStore
             Directory.CreateDirectory(System.IO.Path.GetDirectoryName(_path)!);
             Document document = Read();
             PlatformSchema.ValidateAppliedVersions([document.SchemaVersion]);
+            if (document.SchemaVersion < 2)
+            {
+                foreach (IGrouping<string, PlatformApproval> tenant in document.Approvals
+                    .Where(approval => approval.Scope == WorkbenchMutationScope.SandboxDatabaseWrite)
+                    .GroupBy(approval => approval.TenantId, StringComparer.OrdinalIgnoreCase))
+                {
+                    PlatformApproval binding = tenant
+                        .OrderBy(approval => approval.RequestedUtc)
+                        .ThenBy(approval => approval.ApprovalId, StringComparer.Ordinal)
+                        .First();
+                    document.SandboxProjectBindings.TryAdd(binding.TenantId, binding.ProjectId);
+                }
+            }
             document.SchemaVersion = PlatformSchema.CurrentVersion;
             await WriteAsync(document, cancellationToken).ConfigureAwait(false);
         }
@@ -193,6 +206,22 @@ public sealed class FilePlatformStateStore : IPlatformStateStore
             .Select(group => group.OrderByDescending(profile => profile.Version).First())
             .OrderBy(profile => profile.CreatedUtc)], cancellationToken);
 
+    public Task<string> BindSandboxProjectAsync(
+        string tenantId, string projectId, CancellationToken cancellationToken) =>
+        MutateAsync(document =>
+        {
+            if (document.SandboxProjectBindings.TryGetValue(tenantId, out string? bound))
+            {
+                return bound;
+            }
+
+            document.SandboxProjectBindings[tenantId] = projectId;
+            return projectId;
+        }, cancellationToken);
+
+    public Task<string?> GetSandboxProjectAsync(string tenantId, CancellationToken cancellationToken) =>
+        ReadAsync(document => document.SandboxProjectBindings.GetValueOrDefault(tenantId), cancellationToken);
+
     public Task<PlatformApproval> CreateApprovalAsync(PlatformApproval approval, CancellationToken cancellationToken) =>
         MutateAsync(document =>
         {
@@ -332,6 +361,9 @@ public sealed class FilePlatformStateStore : IPlatformStateStore
         public List<PlatformMembership> Memberships { get; set; } = [];
 
         public List<PlatformTargetProfile> TargetProfiles { get; set; } = [];
+
+        public Dictionary<string, string> SandboxProjectBindings { get; set; } =
+            new(StringComparer.OrdinalIgnoreCase);
 
         public List<PlatformApproval> Approvals { get; set; } = [];
     }
