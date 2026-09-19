@@ -357,3 +357,11 @@ public interface IPlatformStateStore
     /// <summary>Returns null when the stored version is not the one the caller read.</summary>
     Task<PlatformApproval?> UpdateApprovalAsync(PlatformApproval approval, int expectedVersion, CancellationToken cancellationToken);
 }
+
+public interface ISandboxProjectBindingStore
+{
+    /// <summary>Atomically returns the one project this tenant may use for sandbox database writes.</summary>
+    Task<string> BindSandboxProjectAsync(string tenantId, string projectId, CancellationToken cancellationToken);
+
+    Task<string?> GetSandboxProjectAsync(string tenantId, CancellationToken cancellationToken);
+}

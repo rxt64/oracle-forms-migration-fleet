@@ -61,9 +61,12 @@ public sealed record PlatformApprovalRequestInput(
 public sealed class PlatformAuthorizationStore(
     IPlatformStateStore store,
     ISandboxTargetBinding? sandbox,
-    Func<DateTimeOffset>? clock = null) : IWorkbenchAuthorizationStore
+    Func<DateTimeOffset>? clock = null,
+    ISandboxProjectBindingStore? sandboxProjects = null) : IWorkbenchAuthorizationStore
 {
     private readonly Func<DateTimeOffset> _clock = clock ?? (() => DateTimeOffset.UtcNow);
+    private readonly ISandboxProjectBindingStore? _sandboxProjects =
+        sandboxProjects ?? store as ISandboxProjectBindingStore;
 
     public async Task<IReadOnlyList<WorkbenchAuthorizationRecord>> ForOwnerAsync(
         string ownerId,
@@ -77,11 +80,19 @@ public sealed class PlatformAuthorizationStore(
         DateTimeOffset now = _clock();
         IReadOnlyList<PlatformApproval> approvals =
             await store.ApprovalsForRequesterAsync(tenantId, objectId, cancellationToken).ConfigureAwait(false);
+        string? sandboxProject = _sandboxProjects is null
+            ? null
+            : await _sandboxProjects.GetSandboxProjectAsync(tenantId, cancellationToken).ConfigureAwait(false);
 
         List<WorkbenchAuthorizationRecord> grants = [];
         foreach (PlatformApproval approval in approvals)
         {
             if (!approval.IsEffective(now) || approval.Scope != WorkbenchMutationScope.SandboxDatabaseWrite)
+            {
+                continue;
+            }
+
+            if (!string.Equals(sandboxProject, approval.ProjectId, StringComparison.Ordinal))
             {
                 continue;
             }
@@ -188,7 +199,8 @@ public static class PlatformIdentity
 public sealed class PlatformAccessService(
     IPlatformStateStore store,
     ISandboxTargetBinding? sandbox,
-    Func<DateTimeOffset>? clock = null)
+    Func<DateTimeOffset>? clock = null,
+    ISandboxProjectBindingStore? sandboxProjects = null)
 {
     /// <summary>Shortest and longest life an approval may be granted for.</summary>
     public static readonly TimeSpan MinimumLifetime = TimeSpan.FromMinutes(5);
@@ -196,6 +208,9 @@ public sealed class PlatformAccessService(
     public static readonly TimeSpan MaximumLifetime = TimeSpan.FromHours(24);
 
     private readonly Func<DateTimeOffset> _clock = clock ?? (() => DateTimeOffset.UtcNow);
+
+    private readonly ISandboxProjectBindingStore? _sandboxProjects =
+        sandboxProjects ?? store as ISandboxProjectBindingStore;
 
     public IPlatformStateStore Store => store;
 
@@ -515,6 +530,25 @@ public sealed class PlatformAccessService(
             return PlatformResult<PlatformApproval>.Fail(400, "That note was rejected before it was stored.");
         }
 
+        if (input.Scope == WorkbenchMutationScope.SandboxDatabaseWrite)
+        {
+            if (_sandboxProjects is null)
+            {
+                return PlatformResult<PlatformApproval>.Fail(
+                    409, "This deployment has no durable sandbox-project boundary, so it cannot authorize database writes.");
+            }
+
+            string boundProject = await _sandboxProjects
+                .BindSandboxProjectAsync(actor.TenantId, input.ProjectId, cancellationToken)
+                .ConfigureAwait(false);
+            if (!string.Equals(boundProject, input.ProjectId, StringComparison.Ordinal))
+            {
+                return PlatformResult<PlatformApproval>.Fail(
+                    409,
+                    "This deployment has one shared sandbox database. A different project already owns its database-write boundary; use that project or deploy a separate isolated workbench.");
+            }
+        }
+
         DateTimeOffset now = _clock();
         PlatformApproval approval = new()
         {
@@ -577,6 +611,18 @@ public sealed class PlatformAccessService(
         if (approval.ExpiresUtc <= _clock())
         {
             return PlatformResult<PlatformApproval>.Fail(409, "That request expired before it was decided.");
+        }
+
+        if (approve && approval.Scope == WorkbenchMutationScope.SandboxDatabaseWrite)
+        {
+            string? boundProject = _sandboxProjects is null
+                ? null
+                : await _sandboxProjects.GetSandboxProjectAsync(actor.TenantId, cancellationToken).ConfigureAwait(false);
+            if (!string.Equals(boundProject, approval.ProjectId, StringComparison.Ordinal))
+            {
+                return PlatformResult<PlatformApproval>.Fail(
+                    409, "This approval belongs to a project that does not own the shared sandbox database.");
+            }
         }
 
         string? decisionNotes = Sanitize(notes);

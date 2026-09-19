@@ -109,6 +109,28 @@ public class PlatformPostgresContractTests
         }
     }
 
+    [Fact]
+    public void Version_two_adds_and_seeds_the_single_sandbox_project_boundary()
+    {
+        string migration = string.Join("\n", PlatformSchema.Migrations(Schema)[1].Statements);
+
+        Assert.Contains($"create table if not exists {Schema}.sandbox_project_binding", migration, StringComparison.Ordinal);
+        Assert.Contains("tenant_id text primary key", migration, StringComparison.Ordinal);
+        Assert.Contains("where scope = 'SandboxDatabaseWrite'", migration, StringComparison.Ordinal);
+        Assert.Contains("order by tenant_id, requested_utc, approval_id", migration, StringComparison.Ordinal);
+        Assert.Contains("on conflict (tenant_id) do nothing", migration, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Sandbox_project_binding_is_atomic_and_never_reassigns_an_owner()
+    {
+        string sql = PostgresSandboxProjectBindingStore.InsertSql(Schema);
+
+        Assert.Contains("on conflict (tenant_id) do nothing", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("do update", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("delete", sql, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Theory]
     [InlineData("ofm_platform")]
     [InlineData("ofm_platform_dev")]

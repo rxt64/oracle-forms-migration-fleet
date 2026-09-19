@@ -226,15 +226,16 @@ builder.Services.AddSingleton(
 // Production must not fall back to the file adapter — a per-replica file is not a shared record of who
 // approved what, and treating it as one would make an approval disappear on the next revision.
 IPlatformStateStore? platformStore = null;
+ISandboxProjectBindingStore? sandboxProjects = null;
 bool migratePlatformStore = false;
 
 if (PlatformDatabaseOptions.TryRead(Environment.GetEnvironmentVariable, out PlatformDatabaseOptions? platformDatabase, out string platformError))
 {
-    platformStore = new PostgresPlatformStateStore(
-        platformDatabase!,
-        string.IsNullOrWhiteSpace(managedIdentityClientId)
-            ? new AzureDeveloperCliCredential(new AzureDeveloperCliCredentialOptions { ProcessTimeout = TimeSpan.FromSeconds(30) })
-            : new ManagedIdentityCredential(ManagedIdentityId.FromUserAssignedClientId(managedIdentityClientId)));
+    TokenCredential platformCredential = string.IsNullOrWhiteSpace(managedIdentityClientId)
+        ? new AzureDeveloperCliCredential(new AzureDeveloperCliCredentialOptions { ProcessTimeout = TimeSpan.FromSeconds(30) })
+        : new ManagedIdentityCredential(ManagedIdentityId.FromUserAssignedClientId(managedIdentityClientId));
+    platformStore = new PostgresPlatformStateStore(platformDatabase!, platformCredential);
+    sandboxProjects = new PostgresSandboxProjectBindingStore(platformDatabase!, platformCredential);
     migratePlatformStore = true;
 
     Console.WriteLine($"[INFO] Platform state store: PostgreSQL schema '{platformDatabase!.Schema}' on {platformDatabase.Host}.");
@@ -254,9 +255,10 @@ else
 }
 
 builder.Services.AddSingleton(platformStore);
-builder.Services.AddSingleton(new PlatformAccessService(platformStore, sandboxBinding));
+builder.Services.AddSingleton(new PlatformAccessService(
+    platformStore, sandboxBinding, sandboxProjects: sandboxProjects));
 builder.Services.AddSingleton(new WorkbenchAuthorizationService(
-    new PlatformAuthorizationStore(platformStore, sandboxBinding)));
+    new PlatformAuthorizationStore(platformStore, sandboxBinding, sandboxProjects: sandboxProjects)));
 
 bool migrate = migratePlatformStore;
 IPlatformStateStore startupStore = platformStore;

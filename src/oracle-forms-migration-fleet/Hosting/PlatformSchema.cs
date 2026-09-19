@@ -20,7 +20,7 @@ public static partial class PlatformSchema
 {
     public const string DefaultSchema = "ofm_platform";
 
-    public const int CurrentVersion = 1;
+    public const int CurrentVersion = 2;
 
     /// <summary>
     /// Lock key for <c>pg_advisory_lock</c>. Two replicas starting together must not both run V001;
@@ -183,6 +183,24 @@ public static partial class PlatformSchema
                 $"create index if not exists ix_membership_actor on {schema}.membership (tenant_id, object_id)",
                 $"create index if not exists ix_approval_project on {schema}.approval (tenant_id, project_id)",
                 $"create index if not exists ix_approval_requester on {schema}.approval (tenant_id, requested_by_object_id)",
+            ]),
+            new Migration(2, "single-sandbox-project-boundary",
+            [
+                $"""
+                create table if not exists {schema}.sandbox_project_binding (
+                    tenant_id text primary key,
+                    project_id text not null references {schema}.project (project_id),
+                    bound_utc timestamptz not null
+                )
+                """,
+                $"""
+                insert into {schema}.sandbox_project_binding (tenant_id, project_id, bound_utc)
+                select distinct on (tenant_id) tenant_id, project_id, requested_utc
+                from {schema}.approval
+                where scope = 'SandboxDatabaseWrite'
+                order by tenant_id, requested_utc, approval_id
+                on conflict (tenant_id) do nothing
+                """,
             ]),
         ];
     }
