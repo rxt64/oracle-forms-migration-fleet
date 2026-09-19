@@ -193,8 +193,8 @@ public sealed record PlatformTargetProfileRejection(string Reason);
 /// <summary>
 /// Validation and canonical identity for target profiles.
 ///
-/// The hash covers the Azure coordinates and the endpoint identity, not the stack enums, because a
-/// target is a specific database in a specific resource group and not a choice of technology.
+/// The hash covers the immutable version, Azure coordinates, endpoint identity, and stack selection so
+/// an approval cannot be replayed against a different destination or generated application shape.
 /// </summary>
 public static class PlatformTargetProfiles
 {

@@ -4,7 +4,7 @@
 
 Run against the final working tree without a deployment or live database mutation:
 
-- .NET solution: 1,279 passed, 0 failed, 0 skipped.
+- .NET solution: 1,293 passed, 0 failed, 0 skipped.
 - Focused identity, durable state, PostgreSQL contract, and trust-boundary suite: 118 passed, 0 failed, 0 skipped.
 - Client production build: passed.
 - Playwright desktop/mobile matrix: 105 passed, 15 intentional project/device skips, 0 failed.

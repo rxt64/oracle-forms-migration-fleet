@@ -97,10 +97,11 @@ public sealed class PlatformAuthorizationStore(
             }
 
             PlatformTargetProfile? profile = await store
-                .GetTargetProfileAsync(tenantId, approval.ProjectId, approval.TargetProfileId, approval.TargetProfileVersion, cancellationToken)
+                .GetTargetProfileAsync(tenantId, approval.ProjectId, approval.TargetProfileId, version: null, cancellationToken)
                 .ConfigureAwait(false);
 
             if (profile is null ||
+                profile.Version != approval.TargetProfileVersion ||
                 !string.Equals(profile.CanonicalHash, approval.TargetProfileHash, StringComparison.Ordinal) ||
                 !MatchesConfiguredSandbox(profile))
             {
@@ -389,26 +390,45 @@ public sealed class PlatformAccessService(
             return PlatformResult<PlatformTargetProfile>.Fail(400, rejection.Reason);
         }
 
-        PlatformTargetProfile? existing = await store
-            .GetTargetProfileAsync(actor.TenantId, projectId, candidate.TargetProfileId, version: null, cancellationToken)
-            .ConfigureAwait(false);
-
-        if (existing is not null)
+        for (int attempt = 0; attempt < 8; attempt++)
         {
-            // Same target, same profile. A different target is a new immutable version, never an edit.
-            if (string.Equals(existing.CanonicalHash, candidate.CanonicalHash, StringComparison.Ordinal))
+            PlatformTargetProfile? existing = await store
+                .GetTargetProfileAsync(actor.TenantId, projectId, candidate.TargetProfileId, version: null, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (existing is not null)
             {
-                return PlatformResult<PlatformTargetProfile>.Ok(existing);
+                // Same target, same profile. A different target is a new immutable version, never an edit.
+                PlatformTargetProfile comparable = candidate with { Version = existing.Version };
+                comparable = comparable with { CanonicalHash = PlatformTargetProfiles.Hash(comparable) };
+                if (string.Equals(existing.CanonicalHash, comparable.CanonicalHash, StringComparison.Ordinal))
+                {
+                    return PlatformResult<PlatformTargetProfile>.Ok(existing);
+                }
+
+                candidate = candidate with { Version = existing.Version + 1 };
+                candidate = candidate with { CanonicalHash = PlatformTargetProfiles.Hash(candidate) };
             }
 
-            candidate = candidate with { Version = existing.Version + 1 };
-            candidate = candidate with { CanonicalHash = PlatformTargetProfiles.Hash(candidate) };
+            PlatformTargetProfile? stored = await store.CreateTargetProfileAsync(candidate, cancellationToken).ConfigureAwait(false);
+            if (stored is not null)
+            {
+                return PlatformResult<PlatformTargetProfile>.Ok(stored);
+            }
+
+            PlatformTargetProfile? concurrent = await store
+                .GetTargetProfileAsync(
+                    actor.TenantId, projectId, candidate.TargetProfileId, candidate.Version, cancellationToken)
+                .ConfigureAwait(false);
+            if (concurrent is not null &&
+                string.Equals(concurrent.CanonicalHash, candidate.CanonicalHash, StringComparison.Ordinal))
+            {
+                return PlatformResult<PlatformTargetProfile>.Ok(concurrent);
+            }
         }
 
-        PlatformTargetProfile? stored = await store.CreateTargetProfileAsync(candidate, cancellationToken).ConfigureAwait(false);
-        return stored is null
-            ? PlatformResult<PlatformTargetProfile>.Fail(409, "That target profile version already exists and is immutable.")
-            : PlatformResult<PlatformTargetProfile>.Ok(stored);
+        return PlatformResult<PlatformTargetProfile>.Fail(
+            409, "The target profile changed repeatedly while a new immutable version was being recorded.");
     }
 
     public async Task<PlatformResult<IReadOnlyList<PlatformApproval>>> ApprovalsAsync(

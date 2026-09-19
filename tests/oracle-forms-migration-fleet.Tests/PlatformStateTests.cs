@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft. All rights reserved.
 
 using OracleFormsMigrationFleet.Hosting;
+using OracleFormsMigrationFleet.Fleet;
+using OracleFormsMigrationFleet.Fleet.Execution;
 namespace OracleFormsMigrationFleet.Tests;
 
 /// <summary>
@@ -232,6 +234,70 @@ public class PlatformStateTests : IDisposable
         PlatformTargetProfile? original = await store.GetTargetProfileAsync(Tenant, projectId, "sandbox", 1, CancellationToken.None);
         Assert.Equal(first.CanonicalHash, original!.CanonicalHash);
         Assert.Equal(Sandbox.EndpointHost, original.EndpointHost);
+    }
+
+    [Fact]
+    public async Task Repeated_configuration_changes_create_only_one_version_per_distinct_target()
+    {
+        (IPlatformStateStore store, PlatformAccessService original, string projectId, PlatformTargetProfile first) =
+            await SeedAsync();
+        PlatformAccessService moved = Service(
+            store,
+            new ConfiguredSandboxTargetBinding("pg-other.postgres.database.azure.com", "ofm_sandbox", "id-ofmfleet-web-dev", true));
+
+        PlatformResult<PlatformTargetProfile>[] profiles =
+        [
+            PlatformResult<PlatformTargetProfile>.Ok(first),
+            await original.EnsureConfiguredTargetProfileAsync(Actor(Requester), projectId, Environment, CancellationToken.None),
+            await moved.EnsureConfiguredTargetProfileAsync(Actor(Requester), projectId, Environment, CancellationToken.None),
+            await moved.EnsureConfiguredTargetProfileAsync(Actor(Requester), projectId, Environment, CancellationToken.None),
+            await moved.EnsureConfiguredTargetProfileAsync(Actor(Requester), projectId, Environment, CancellationToken.None),
+        ];
+
+        Assert.All(profiles, profile => Assert.True(profile.Succeeded, profile.Error));
+        Assert.Equal([1, 1, 2, 2, 2], profiles.Select(profile => profile.Value!.Version));
+        Assert.NotEqual(profiles[0].Value!.CanonicalHash, profiles[2].Value!.CanonicalHash);
+        Assert.Null(await store.GetTargetProfileAsync(Tenant, projectId, "sandbox", 3, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Concurrent_equivalent_target_changes_return_the_same_immutable_version()
+    {
+        (IPlatformStateStore store, _, string projectId, _) = await SeedAsync();
+        RacingTargetProfileStore racing = new(store);
+        ConfiguredSandboxTargetBinding changed =
+            new("pg-other.postgres.database.azure.com", "ofm_sandbox", "id-ofmfleet-web-dev", true);
+
+        PlatformResult<PlatformTargetProfile>[] results = await Task.WhenAll(
+            Service(racing, changed).EnsureConfiguredTargetProfileAsync(
+                Actor(Requester), projectId, Environment, CancellationToken.None),
+            Service(racing, changed).EnsureConfiguredTargetProfileAsync(
+                Actor(Requester), projectId, Environment, CancellationToken.None));
+
+        Assert.All(results, result => Assert.True(result.Succeeded, result.Error));
+        Assert.All(results, result => Assert.Equal(2, result.Value!.Version));
+        Assert.Equal(results[0].Value!.CanonicalHash, results[1].Value!.CanonicalHash);
+        Assert.Null(await store.GetTargetProfileAsync(Tenant, projectId, "sandbox", 3, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Concurrent_distinct_target_changes_receive_distinct_immutable_versions()
+    {
+        (IPlatformStateStore store, _, string projectId, _) = await SeedAsync();
+        RacingTargetProfileStore racing = new(store);
+
+        PlatformResult<PlatformTargetProfile>[] results = await Task.WhenAll(
+            Service(racing, Sandbox with { EndpointHost = "pg-a.postgres.database.azure.com" })
+                .EnsureConfiguredTargetProfileAsync(Actor(Requester), projectId, Environment, CancellationToken.None),
+            Service(racing, Sandbox with { EndpointHost = "pg-b.postgres.database.azure.com" })
+                .EnsureConfiguredTargetProfileAsync(Actor(Requester), projectId, Environment, CancellationToken.None));
+
+        Assert.All(results, result => Assert.True(result.Succeeded, result.Error));
+        Assert.Equal([2, 3], results.Select(result => result.Value!.Version).Order());
+        Assert.Equal(
+            ["pg-a.postgres.database.azure.com", "pg-b.postgres.database.azure.com"],
+            results.Select(result => result.Value!.EndpointHost).Order());
+        Assert.NotEqual(results[0].Value!.CanonicalHash, results[1].Value!.CanonicalHash);
     }
 
     [Theory]
@@ -568,6 +634,89 @@ public class PlatformStateTests : IDisposable
         Assert.NotNull(await store.GetApprovalAsync(Tenant, approval.ApprovalId, CancellationToken.None));
     }
 
+    [Theory]
+    [InlineData("schema")]
+    [InlineData("database")]
+    [InlineData("endpoint")]
+    [InlineData("identity")]
+    [InlineData("environment")]
+    public async Task Superseding_any_destination_dimension_removes_the_old_grant_but_keeps_its_audit_record(
+        string dimension)
+    {
+        (IPlatformStateStore store, _, string projectId, PlatformApproval approval) =
+            await ApprovedAsync();
+        PlatformTargetProfileEnvironment environment = dimension switch
+        {
+            "schema" => Environment with { SchemaName = "project_validation" },
+            "environment" => Environment with { EnvironmentName = "validation" },
+            _ => Environment,
+        };
+        ConfiguredSandboxTargetBinding sandbox = dimension switch
+        {
+            "database" => Sandbox with { DatabaseName = "ofm_sandbox_v2" },
+            "endpoint" => Sandbox with { EndpointHost = "pg-other.postgres.database.azure.com" },
+            "identity" => Sandbox with { ExecutionIdentity = "id-ofmfleet-web-v2" },
+            _ => Sandbox,
+        };
+        PlatformAccessService service = Service(store, sandbox);
+
+        PlatformResult<PlatformTargetProfile> superseding = await service.EnsureConfiguredTargetProfileAsync(
+            Actor(Requester),
+            projectId,
+            environment,
+            CancellationToken.None);
+
+        Assert.True(superseding.Succeeded, superseding.Error);
+        Assert.Equal(approval.TargetProfileVersion + 1, superseding.Value!.Version);
+        Assert.Empty(await new PlatformAuthorizationStore(store, sandbox)
+            .ForOwnerAsync(Actor(Requester).OwnerId, CancellationToken.None));
+
+        PlatformApproval? historical = await store.GetApprovalAsync(Tenant, approval.ApprovalId, CancellationToken.None);
+        Assert.NotNull(historical);
+        Assert.Equal(PlatformApprovalState.Approved, historical.State);
+        Assert.Equal(approval.TargetProfileVersion, historical.TargetProfileVersion);
+        Assert.Equal(approval.TargetProfileHash, historical.TargetProfileHash);
+    }
+
+    [Fact]
+    public async Task Superseding_the_profile_between_gateway_calls_blocks_the_next_external_operation()
+    {
+        (IPlatformStateStore store, PlatformAccessService service, string projectId, PlatformApproval approval) =
+            await ApprovedAsync();
+        MigrationRunRequest request = new()
+        {
+            EngagementId = approval.EngagementId,
+            ApplicationName = "ORDERS",
+            RequestedMode = ExecutionMode.SandboxMigration,
+            Target = new TargetStack { Database = DatabaseTarget.PostgreSql },
+            SourceRoot = "forms",
+            OutputRoot = "out",
+        };
+        WorkbenchMutationAuthorizer authorizer = new(
+            new WorkbenchAuthorizationService(new PlatformAuthorizationStore(store, Sandbox)),
+            Actor(Requester),
+            approval.SourceSnapshotHash,
+            approval.PlanInputHash,
+            approval.TargetProfileHash,
+            projectId: projectId,
+            targetProfileId: approval.TargetProfileId,
+            targetProfileVersion: approval.TargetProfileVersion);
+        AuthorizingDataMigrationGateway gateway = new(
+            new StubDataGateway(new DataMigrationOutcome(0, 0, [], [])), authorizer, request);
+
+        Assert.Empty(await gateway.CountAsync([], CancellationToken.None));
+
+        PlatformResult<PlatformTargetProfile> superseding = await service.EnsureConfiguredTargetProfileAsync(
+            Actor(Requester),
+            projectId,
+            Environment with { EnvironmentName = "superseding" },
+            CancellationToken.None);
+        Assert.True(superseding.Succeeded, superseding.Error);
+
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(
+            () => gateway.CountAsync([], CancellationToken.None));
+    }
+
     [Fact]
     public async Task An_expired_approval_stops_being_a_grant_without_anyone_acting()
     {
@@ -636,5 +785,83 @@ public class PlatformStateTests : IDisposable
         Assert.Empty(await grants.ForOwnerAsync(Actor(Approver).OwnerId, CancellationToken.None));
         Assert.Empty(await grants.ForOwnerAsync(Actor(Requester, OtherTenant).OwnerId, CancellationToken.None));
         Assert.Empty(await grants.ForOwnerAsync("no-tenant-qualifier", CancellationToken.None));
+    }
+
+    private sealed class RacingTargetProfileStore(IPlatformStateStore inner) : IPlatformStateStore
+    {
+        private readonly TaskCompletionSource _bothCreates = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _createCalls;
+
+        public string Description => inner.Description;
+
+        public Task InitializeAsync(CancellationToken cancellationToken) => inner.InitializeAsync(cancellationToken);
+
+        public Task<PlatformOrganization> EnsureOrganizationAsync(
+            string tenantId, string displayName, CancellationToken cancellationToken) =>
+            inner.EnsureOrganizationAsync(tenantId, displayName, cancellationToken);
+
+        public Task<PlatformProject> CreateProjectAsync(
+            PlatformProject project, PlatformMembership founder, CancellationToken cancellationToken) =>
+            inner.CreateProjectAsync(project, founder, cancellationToken);
+
+        public Task<PlatformProject?> GetProjectAsync(
+            string tenantId, string projectId, CancellationToken cancellationToken) =>
+            inner.GetProjectAsync(tenantId, projectId, cancellationToken);
+
+        public Task<IReadOnlyList<PlatformProject>> ProjectsForActorAsync(
+            string tenantId, string objectId, CancellationToken cancellationToken) =>
+            inner.ProjectsForActorAsync(tenantId, objectId, cancellationToken);
+
+        public Task<PlatformMembership?> GetMembershipAsync(
+            string tenantId, string projectId, string objectId, CancellationToken cancellationToken) =>
+            inner.GetMembershipAsync(tenantId, projectId, objectId, cancellationToken);
+
+        public Task<IReadOnlyList<PlatformMembership>> MembershipsAsync(
+            string tenantId, string projectId, CancellationToken cancellationToken) =>
+            inner.MembershipsAsync(tenantId, projectId, cancellationToken);
+
+        public Task<PlatformMembership?> UpsertMembershipAsync(
+            PlatformMembership membership, int? expectedVersion, CancellationToken cancellationToken) =>
+            inner.UpsertMembershipAsync(membership, expectedVersion, cancellationToken);
+
+        public async Task<PlatformTargetProfile?> CreateTargetProfileAsync(
+            PlatformTargetProfile profile, CancellationToken cancellationToken)
+        {
+            if (Interlocked.Increment(ref _createCalls) == 2)
+            {
+                _bothCreates.TrySetResult();
+            }
+
+            await _bothCreates.Task.WaitAsync(cancellationToken);
+            return await inner.CreateTargetProfileAsync(profile, cancellationToken);
+        }
+
+        public Task<PlatformTargetProfile?> GetTargetProfileAsync(
+            string tenantId, string projectId, string targetProfileId, int? version, CancellationToken cancellationToken) =>
+            inner.GetTargetProfileAsync(tenantId, projectId, targetProfileId, version, cancellationToken);
+
+        public Task<IReadOnlyList<PlatformTargetProfile>> TargetProfilesAsync(
+            string tenantId, string projectId, CancellationToken cancellationToken) =>
+            inner.TargetProfilesAsync(tenantId, projectId, cancellationToken);
+
+        public Task<PlatformApproval> CreateApprovalAsync(
+            PlatformApproval approval, CancellationToken cancellationToken) =>
+            inner.CreateApprovalAsync(approval, cancellationToken);
+
+        public Task<PlatformApproval?> GetApprovalAsync(
+            string tenantId, string approvalId, CancellationToken cancellationToken) =>
+            inner.GetApprovalAsync(tenantId, approvalId, cancellationToken);
+
+        public Task<IReadOnlyList<PlatformApproval>> ApprovalsForProjectAsync(
+            string tenantId, string projectId, CancellationToken cancellationToken) =>
+            inner.ApprovalsForProjectAsync(tenantId, projectId, cancellationToken);
+
+        public Task<IReadOnlyList<PlatformApproval>> ApprovalsForRequesterAsync(
+            string tenantId, string objectId, CancellationToken cancellationToken) =>
+            inner.ApprovalsForRequesterAsync(tenantId, objectId, cancellationToken);
+
+        public Task<PlatformApproval?> UpdateApprovalAsync(
+            PlatformApproval approval, int expectedVersion, CancellationToken cancellationToken) =>
+            inner.UpdateApprovalAsync(approval, expectedVersion, cancellationToken);
     }
 }
