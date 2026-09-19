@@ -12,6 +12,20 @@ permissions:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: ofm_integration
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d ofm_integration"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
 
     steps:
       - uses: actions/checkout@v4
@@ -63,6 +77,15 @@ jobs:
             echo "Expected exactly 5 passed Forms textual-pipeline rows, but found $PASSED."
             exit 1
           fi
+
+      - name: Test PostgreSQL platform state integration
+        env:
+          PLATFORM_POSTGRES_INTEGRATION_CONNECTION: Host=localhost;Port=5432;Database=ofm_integration;Username=postgres;Password=postgres;SSL Mode=Disable;Pooling=false
+          REQUIRE_POSTGRES_INTEGRATION: 'true'
+        run: >-
+          dotnet test --no-build -c Release -p:SkipClientBuild=true
+          --filter "Category=PostgresIntegration"
+          --logger "console;verbosity=normal"
 
       - name: Test
         run: dotnet test --no-build -c Release -p:SkipClientBuild=true --logger "console;verbosity=normal"
