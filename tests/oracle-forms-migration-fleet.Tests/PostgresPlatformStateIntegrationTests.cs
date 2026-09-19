@@ -50,10 +50,11 @@ public sealed class PostgresPlatformStateIntegrationTests : IAsyncLifetime
         await store.InitializeAsync(CancellationToken.None);
         ConfiguredSandboxTargetBinding sandbox = new(
             "pg-sandbox.postgres.database.azure.com", "ofm_sandbox", "id-ofmfleet-web-dev", CanWrite: true);
+        PostgresSandboxProjectBindingStore sandboxProjects = new(Options(), OpenAsync);
         PlatformAccessService platform = new(
             store,
             sandbox,
-            sandboxProjects: new PostgresSandboxProjectBindingStore(Options(), OpenAsync));
+            sandboxProjects: sandboxProjects);
         WorkbenchActor requester = Actor(Requester);
         WorkbenchActor approver = Actor(Approver);
 
@@ -94,13 +95,13 @@ public sealed class PostgresPlatformStateIntegrationTests : IAsyncLifetime
         Assert.Single(await store.ApprovalsForProjectAsync(Tenant, project.ProjectId, CancellationToken.None));
         Assert.Single(await store.ApprovalsForRequesterAsync(Tenant, Requester, CancellationToken.None));
 
-        Assert.Single(await new PlatformAuthorizationStore(store, sandbox)
+        Assert.Single(await new PlatformAuthorizationStore(store, sandbox, sandboxProjects: sandboxProjects)
             .ForOwnerAsync(requester.OwnerId, CancellationToken.None));
 
         PlatformApproval revoked = (await platform.RevokeAsync(
             requester, approved.ApprovalId, approved.Version, "Complete", CancellationToken.None)).Value!;
         Assert.Equal(PlatformApprovalState.Revoked, revoked.State);
-        Assert.Empty(await new PlatformAuthorizationStore(store, sandbox)
+        Assert.Empty(await new PlatformAuthorizationStore(store, sandbox, sandboxProjects: sandboxProjects)
             .ForOwnerAsync(requester.OwnerId, CancellationToken.None));
         Assert.Equal(
             ["Requested", "Approved", "Revoked"],
