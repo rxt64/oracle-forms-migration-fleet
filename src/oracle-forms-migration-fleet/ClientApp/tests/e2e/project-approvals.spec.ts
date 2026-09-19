@@ -226,8 +226,9 @@ test.describe("project membership and approvals", () => {
     const workspaceId = await upload(request, REQUESTER, project.projectId);
     const requested = await request.post(`/api/workbench/projects/${project.projectId}/approvals`, {
       headers: { [OWNER_HEADER]: REQUESTER },
-      data: { workspaceId, request: runRequest("ENG-CONSOLE") },
+      data: { workspaceId, scope: "ValidationOnly", request: runRequest("ENG-CONSOLE") },
     });
+    expect(requested.status(), await requested.text()).toBe(201);
     const approval = await requested.json() as ApprovalBody;
 
     // The requester's console shows the request and refuses to offer them the decision.
