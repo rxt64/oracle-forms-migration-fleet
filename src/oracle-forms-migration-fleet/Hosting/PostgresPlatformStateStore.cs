@@ -74,7 +74,7 @@ public sealed class PostgresPlatformStateStore : IPlatformStateStore, IAsyncDisp
     private static readonly string[] s_scope = ["https://ossrdbms-aad.database.windows.net/.default"];
 
     private readonly PlatformDatabaseOptions _options;
-    private readonly TokenCredential _credential;
+    private readonly Func<CancellationToken, Task<NpgsqlConnection>> _connectionFactory;
     private readonly string _schema;
 
     public PostgresPlatformStateStore(PlatformDatabaseOptions options, TokenCredential credential)
@@ -83,8 +83,21 @@ public sealed class PostgresPlatformStateStore : IPlatformStateStore, IAsyncDisp
         ArgumentNullException.ThrowIfNull(credential);
 
         _options = options;
-        _credential = credential;
         _schema = PlatformSchema.ResolveSchemaName(options.Schema);
+        _connectionFactory = cancellationToken =>
+            ConnectWithManagedIdentityAsync(options, credential, cancellationToken);
+    }
+
+    internal PostgresPlatformStateStore(
+        PlatformDatabaseOptions options,
+        Func<CancellationToken, Task<NpgsqlConnection>> connectionFactory)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(connectionFactory);
+
+        _options = options;
+        _schema = PlatformSchema.ResolveSchemaName(options.Schema);
+        _connectionFactory = connectionFactory;
     }
 
     public string Description => $"Azure Database for PostgreSQL schema '{_schema}'";
@@ -98,7 +111,7 @@ public sealed class PostgresPlatformStateStore : IPlatformStateStore, IAsyncDisp
     /// </summary>
     public async Task InitializeAsync(CancellationToken cancellationToken)
     {
-        await using NpgsqlConnection connection = await ConnectAsync(cancellationToken).ConfigureAwait(false);
+        await using NpgsqlConnection connection = await _connectionFactory(cancellationToken).ConfigureAwait(false);
 
         await using (NpgsqlCommand advisory = new("select pg_advisory_lock(@key)", connection))
         {
@@ -489,17 +502,23 @@ public sealed class PostgresPlatformStateStore : IPlatformStateStore, IAsyncDisp
         values (@approval, @tenant, @actor, @action, @recorded, @notes)
         """;
 
-    private async Task<NpgsqlConnection> ConnectAsync(CancellationToken cancellationToken)
+    private Task<NpgsqlConnection> ConnectAsync(CancellationToken cancellationToken) =>
+        _connectionFactory(cancellationToken);
+
+    private static async Task<NpgsqlConnection> ConnectWithManagedIdentityAsync(
+        PlatformDatabaseOptions options,
+        TokenCredential credential,
+        CancellationToken cancellationToken)
     {
-        AccessToken token = await _credential
+        AccessToken token = await credential
             .GetTokenAsync(new TokenRequestContext(s_scope), cancellationToken)
             .ConfigureAwait(false);
 
         NpgsqlConnectionStringBuilder builder = new()
         {
-            Host = _options.Host,
-            Database = _options.Database,
-            Username = _options.User,
+            Host = options.Host,
+            Database = options.Database,
+            Username = options.User,
             Password = token.Token,
             SslMode = SslMode.Require,
             Timeout = 30,
