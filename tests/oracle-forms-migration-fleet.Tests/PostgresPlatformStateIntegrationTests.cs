@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft. All rights reserved.
 
 using Npgsql;
+using OracleFormsMigrationFleet.Fleet;
+using OracleFormsMigrationFleet.Fleet.Execution;
 using OracleFormsMigrationFleet.Hosting;
 
 namespace OracleFormsMigrationFleet.Tests;
@@ -240,6 +242,96 @@ public sealed class PostgresPlatformStateIntegrationTests : IAsyncLifetime
         Assert.Equal(first.ProjectId, await binding.GetSandboxProjectAsync(Tenant, CancellationToken.None));
     }
 
+    [Fact]
+    [Trait("Category", "PostgresIntegration")]
+    public async Task Durable_run_claims_events_fences_history_and_artifacts_round_trip()
+    {
+        PostgresPlatformStateStore? configured = CreateStore();
+        if (configured is null)
+        {
+            RequireConfiguredConnection();
+            return;
+        }
+        await using PostgresPlatformStateStore platformStore = configured;
+        await platformStore.InitializeAsync(CancellationToken.None);
+        PlatformAccessService platform = new(platformStore, sandbox: null);
+        PlatformProject project = (await platform.CreateProjectAsync(
+            Actor(Requester), "Durable run", CancellationToken.None)).Value!;
+        PostgresMigrationRunStore runs = new(Options(), OpenAsync);
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        MigrationRunRecord run = await runs.EnqueueAsync(DurableRun(project.ProjectId, now), CancellationToken.None);
+
+        MigrationRunClaim first = (await runs.ClaimAsync(
+            "node-a", "worker-a", now, TimeSpan.FromMilliseconds(250), CancellationToken.None))!;
+        Assert.Null(await runs.ClaimAsync(
+            "node-a", "worker-b", now, TimeSpan.FromSeconds(30), CancellationToken.None));
+        Assert.NotNull(await runs.AppendEventAsync(
+            run.RunId, first.FenceToken, now, "info", "first", null, null, CancellationToken.None));
+
+        await Task.Delay(TimeSpan.FromMilliseconds(400));
+        Assert.False(await runs.RenewAsync(
+            run.RunId, first.FenceToken, TimeSpan.FromSeconds(30), CancellationToken.None));
+        MigrationRunClaim second = (await runs.ClaimAsync(
+            "node-a", "worker-b", now.AddMinutes(1), TimeSpan.FromSeconds(30), CancellationToken.None))!;
+        Assert.Equal(first.FenceToken + 1, second.FenceToken);
+        Assert.Null(await runs.AppendEventAsync(
+            run.RunId, first.FenceToken, now, "info", "stale", null, null, CancellationToken.None));
+        Assert.NotNull(await runs.AppendEventAsync(
+            run.RunId, second.FenceToken, now, "info", "second", null, null, CancellationToken.None));
+        Assert.True(await runs.CompleteAsync(
+            run.RunId,
+            second.FenceToken,
+            MigrationRunState.Succeeded,
+            now.AddMinutes(2),
+            null,
+            null,
+            [new MigrationRunArtifact(run.RunId, ".fleet-run/runs/run-postgres/report.md", "Report", "Result", 6, new string('d', 64))],
+            "done",
+            new ProgressSignal(
+                ProgressOperations.MigrationRun,
+                ProgressActions.RunCompleted,
+                ProgressState.Completed,
+                "Integration run",
+                "Completed",
+                "Review"),
+            CancellationToken.None));
+
+        Assert.Equal([1L, 2L, 3L], (await runs.EventsAsync(Tenant, run.RunId, 0, CancellationToken.None)).Select(item => item.Sequence));
+        Assert.Single(await runs.ForProjectAsync(Tenant, project.ProjectId, 10, CancellationToken.None));
+        Assert.Single(await runs.ArtifactsAsync(Tenant, run.RunId, CancellationToken.None));
+        Assert.Equal(MigrationRunState.Succeeded, (await runs.GetAsync(Tenant, run.RunId, CancellationToken.None))!.State);
+
+        MigrationRunRecord cancelledRun = await runs.EnqueueAsync(
+            DurableRun(project.ProjectId, now, "run-cancel"), CancellationToken.None);
+        MigrationRunClaim cancelClaim = (await runs.ClaimAsync(
+            "node-a", "worker-c", now, TimeSpan.FromSeconds(30), CancellationToken.None))!;
+        Assert.True(await runs.MarkRunningAsync(
+            cancelledRun.RunId, cancelClaim.FenceToken, now, CancellationToken.None));
+        Assert.True(await runs.RequestCancellationAsync(
+            Tenant, cancelledRun.RunId, Requester, now, CancellationToken.None));
+        Assert.False(await runs.CompleteAsync(
+            cancelledRun.RunId, cancelClaim.FenceToken, MigrationRunState.Succeeded, now, null, null, [],
+            "done", RunSignal(ProgressState.Completed), CancellationToken.None));
+        Assert.True(await runs.CompleteAsync(
+            cancelledRun.RunId, cancelClaim.FenceToken, MigrationRunState.Cancelled, now, null, "Cancelled", [],
+            "error", RunSignal(ProgressState.Failed), CancellationToken.None));
+        Assert.Single(await runs.EventsAsync(Tenant, cancelledRun.RunId, 0, CancellationToken.None));
+
+        MigrationRunRecord interruptedRun = await runs.EnqueueAsync(
+            DurableRun(project.ProjectId, now, "run-interrupted"), CancellationToken.None);
+        MigrationRunClaim interruptedClaim = (await runs.ClaimAsync(
+            "node-a", "worker-d", now, TimeSpan.FromMilliseconds(250), CancellationToken.None))!;
+        Assert.True(await runs.MarkRunningAsync(
+            interruptedRun.RunId, interruptedClaim.FenceToken, now, CancellationToken.None));
+        await Task.Delay(TimeSpan.FromMilliseconds(400));
+        Assert.Equal(1, await runs.ReconcileExpiredAsync(
+            "node-b", DateTimeOffset.UtcNow, "Replica stopped.", CancellationToken.None));
+        Assert.Equal(
+            MigrationRunState.Interrupted,
+            (await runs.GetAsync(Tenant, interruptedRun.RunId, CancellationToken.None))!.State);
+        Assert.Single(await runs.EventsAsync(Tenant, interruptedRun.RunId, 0, CancellationToken.None));
+    }
+
     private PostgresPlatformStateStore? CreateStore()
     {
         if (_connectionString is null)
@@ -355,6 +447,41 @@ public sealed class PostgresPlatformStateIntegrationTests : IAsyncLifetime
         TargetProfileHash = new string('a', 64),
         ExpiresUtc = requestedUtc.AddHours(1),
     };
+
+    private static MigrationRunRecord DurableRun(
+        string projectId, DateTimeOffset enqueuedUtc, string runId = "run-postgres") => new()
+    {
+        RunId = runId,
+        TenantId = Tenant,
+        ProjectId = projectId,
+        ActorObjectId = Requester,
+        WorkspaceId = "workspace-postgres",
+        WorkspaceNodeId = "node-a",
+        WorkspaceOwnerId = $"{Tenant}:{Requester}/{projectId}",
+        SourceSnapshotHash = new string('a', 64),
+        PlanInputHash = new string('b', 64),
+        TargetProfileId = "sandbox",
+        TargetProfileVersion = 1,
+        TargetProfileHash = new string('c', 64),
+        Request = new MigrationRunRequest
+        {
+            EngagementId = "ENG-DURABLE",
+            ApplicationName = "ORDERS",
+            RequestedMode = ExecutionMode.PlanOnly,
+            Target = new TargetStack { Database = DatabaseTarget.PostgreSql },
+            SourceRoot = "forms",
+            OutputRoot = $".fleet-run/runs/{runId}/out",
+        },
+        EnqueuedUtc = enqueuedUtc,
+    };
+
+    private static ProgressSignal RunSignal(ProgressState state) => new(
+        ProgressOperations.MigrationRun,
+        state == ProgressState.Completed ? ProgressActions.RunCompleted : ProgressActions.RunFailed,
+        state,
+        "Integration run",
+        state.ToString(),
+        "Review");
 
     private static void RequireConfiguredConnection()
     {

@@ -203,12 +203,11 @@ export function ActivityPane({
         </div>
 
         <footer>
-          <p><strong>Closing this pane only hides activity.</strong> Keep this tab open because the current operation still depends on its request.</p>
+          <p><strong>Closing this pane or tab does not cancel the run.</strong> Reopen it from run history to replay retained activity.</p>
           <p className="mf-activity-limit">
             <AlertTriangle aria-hidden="true" />
-            If the connection is lost, this browser may not know whether external work stopped. Cancellation is cooperative,
-            changes already applied may remain, and there is no durable resume yet. Inspect retained results and the actual
-            destination before deciding whether retry is safe; an outcome that cannot be established needs review.
+            Cancellation is cooperative and changes already applied may remain. A host loss interrupts started work instead
+            of replaying uncertain external effects; inspect retained results and the destination before deciding whether retry is safe.
           </p>
         </footer>
       </section>

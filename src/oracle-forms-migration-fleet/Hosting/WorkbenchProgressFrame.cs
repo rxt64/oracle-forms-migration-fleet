@@ -17,6 +17,33 @@ internal sealed class WorkbenchProgressSequence
 /// <summary>Builds the additive wire contract for one ordered progress frame.</summary>
 internal static class WorkbenchProgressFrame
 {
+    public static Dictionary<string, object?> Replay(MigrationRunEvent item)
+    {
+        Dictionary<string, object?> frame = new(StringComparer.Ordinal)
+        {
+            ["level"] = item.Level,
+            ["text"] = item.Text,
+            ["sequence"] = item.Sequence,
+            ["timestampUtc"] = item.RecordedUtc.ToString("O", CultureInfo.InvariantCulture),
+        };
+        if (item.Signal is { } signal)
+        {
+            frame["operation"] = signal.Operation;
+            frame["action"] = signal.Action;
+            frame["state"] = signal.State.ToString();
+            frame["purpose"] = signal.Purpose;
+            frame["observed"] = signal.Observed;
+            frame["nextAction"] = signal.NextAction;
+            frame["artifactKind"] = signal.ArtifactKind;
+            frame["artifactCount"] = signal.ArtifactCount;
+        }
+        if (item.Outcome is not null)
+        {
+            frame["result"] = item.Outcome;
+        }
+        return frame;
+    }
+
     public static Dictionary<string, object?> Create(
         WorkbenchProgressSequence sequence,
         string level,

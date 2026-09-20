@@ -135,7 +135,10 @@ public static class WorkbenchExecution
     public sealed record WorkbenchRunPreparation(
         string WorkspaceRoot,
         MigrationRunRequest Request,
-        WorkbenchMutationAuthorizer MutationAuthorizer);
+        WorkbenchMutationAuthorizer MutationAuthorizer,
+        string SourceSnapshotHash,
+        string PlanInputHash,
+        string TargetHash);
 
     /// <summary>
     /// The project and target profile the server resolved for this run, or null when the caller is
@@ -283,7 +286,13 @@ public static class WorkbenchExecution
 
         return new WorkbenchRunPreparationResult(
             true,
-            new WorkbenchRunPreparation(preparation.WorkspaceRoot, prepared, authorizer),
+            new WorkbenchRunPreparation(
+                preparation.WorkspaceRoot,
+                prepared,
+                authorizer,
+                trusted.SourceSnapshotHash,
+                WorkbenchTrustBoundary.PlanInputHash(trusted.Request),
+                targetHash),
             200,
             string.Empty);
     }
@@ -360,8 +369,17 @@ public static class WorkbenchExecution
 
     /// <summary>Drops the previous run's output so a run never analyses or reports its own earlier artifacts.</summary>
     public static void ResetOutput(string workspaceRoot)
+        => ResetOutput(workspaceRoot, OutputRoot);
+
+    public static void ResetOutput(string workspaceRoot, string outputRoot)
     {
-        string path = System.IO.Path.Combine(workspaceRoot, OutputRoot);
+        string normalized = WorkspacePath.Normalize(outputRoot);
+        if (!WorkspacePath.IsWithin(OutputRoot, normalized))
+        {
+            throw new InvalidOperationException("A run output root must stay inside the workbench output directory.");
+        }
+
+        string path = System.IO.Path.Combine(workspaceRoot, normalized);
         if (!Directory.Exists(path))
         {
             return;
@@ -414,6 +432,18 @@ public static class WorkbenchExecution
             return false;
         }
 
+        return TryResolveArtifact(root, path, out absolutePath, out status, out error);
+    }
+
+    internal static bool TryResolveArtifact(
+        string workspaceRoot,
+        string? path,
+        out string absolutePath,
+        out int status,
+        out string error)
+    {
+        absolutePath = string.Empty;
+
         string normalized = WorkspacePath.Normalize(path ?? string.Empty);
         bool inOutput = normalized == OutputRoot || normalized.StartsWith(OutputRoot + "/", StringComparison.Ordinal);
 
@@ -431,7 +461,7 @@ public static class WorkbenchExecution
             return false;
         }
 
-        WorkspaceWriter workspace = new(root);
+        WorkspaceWriter workspace = new(workspaceRoot);
         if (!workspace.TryResolve(normalized, out string resolved, out _) || !File.Exists(resolved))
         {
             status = 404;

@@ -131,6 +131,33 @@ public class PlatformPostgresContractTests
         Assert.DoesNotContain("delete", sql, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public void Version_three_adds_durable_runs_events_artifacts_and_claim_indexes()
+    {
+        string migration = string.Join("\n", PlatformSchema.Migrations(Schema)[2].Statements);
+
+        foreach (string table in new[] { "migration_run", "migration_run_event", "migration_run_artifact" })
+        {
+            Assert.Contains($"create table if not exists {Schema}.{table}", migration, StringComparison.Ordinal);
+        }
+        Assert.Contains("fence_token bigint not null", migration, StringComparison.Ordinal);
+        Assert.Contains("primary key (run_id, sequence)", migration, StringComparison.Ordinal);
+        Assert.Contains("ix_migration_run_claimable", migration, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Durable_claims_use_server_time_skip_locked_and_increment_the_fence()
+    {
+        string sql = PostgresMigrationRunStore.ClaimSql(Schema);
+
+        Assert.Contains("lease_expires_utc <= now()", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("for update skip locked", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("fence_token = r.fence_token + 1", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("workspace_node_id = @node", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("state = 'Leased' and lease_expires_utc <= now()", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("state in ('Leased','Running')", sql, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Theory]
     [InlineData("ofm_platform")]
     [InlineData("ofm_platform_dev")]

@@ -9,6 +9,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using OracleFormsMigrationFleet.Fleet;
 using OracleFormsMigrationFleet.Fleet.Execution;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.Channels;
@@ -372,6 +373,52 @@ internal static class WorkbenchEndpoints
             string workspaceRoot = preparation.WorkspaceRoot;
             MigrationRunRequest prepared = preparation.Request;
 
+            if (context.RequestServices.GetService<IMigrationRunStore>() is { } runStore)
+            {
+                if (FleetGuardrails.ContainsPotentialSecret(JsonSerializer.Serialize(prepared, RequestOptions)))
+                {
+                    await WriteErrorAsync(
+                        context,
+                        400,
+                        "Potential credential material was rejected before the run was stored.",
+                        cancellationToken);
+                    return;
+                }
+                string runId = $"run-{Guid.NewGuid():N}";
+                string suffix = prepared.OutputRoot.Length > WorkbenchExecution.OutputRoot.Length
+                    ? prepared.OutputRoot[(WorkbenchExecution.OutputRoot.Length + 1)..]
+                    : "out";
+                MigrationRunRequest durableRequest = prepared with
+                {
+                    OutputRoot = $"{WorkbenchExecution.OutputRoot}/runs/{runId}/{suffix}",
+                    ExecutionApproval = HumanApproval.Pending,
+                    ProductionApproval = HumanApproval.Pending,
+                    Attestations = [],
+                };
+                await runStore.EnqueueAsync(
+                    new MigrationRunRecord
+                    {
+                        RunId = runId,
+                        TenantId = actor.TenantId,
+                        ProjectId = projectId!,
+                        ActorObjectId = actor.ObjectId,
+                        WorkspaceId = workspaceId!,
+                        WorkspaceNodeId = MigrationRunNode.Current,
+                        WorkspaceOwnerId = binding!.WorkspaceOwnerId,
+                        SourceSnapshotHash = preparation.SourceSnapshotHash,
+                        PlanInputHash = preparation.PlanInputHash,
+                        TargetProfileId = binding.TargetProfileId,
+                        TargetProfileVersion = binding.TargetProfileVersion,
+                        TargetProfileHash = preparation.TargetHash,
+                        Request = durableRequest,
+                        EnqueuedUtc = DateTimeOffset.UtcNow,
+                    },
+                    cancellationToken);
+                context.Response.StatusCode = StatusCodes.Status202Accepted;
+                await context.Response.WriteAsJsonAsync(new { runId }, cancellationToken);
+                return;
+            }
+
             context.Response.ContentType = "text/event-stream";
             context.Response.Headers.CacheControl = "no-cache";
 
@@ -509,26 +556,241 @@ internal static class WorkbenchEndpoints
             }
         });
 
+        endpoints.MapGet("/api/workbench/projects/{projectId}/runs", async (
+            HttpContext context, string projectId, CancellationToken cancellationToken) =>
+        {
+            if (!TryActor(context, identity, out WorkbenchActor actor))
+            {
+                return Results.Unauthorized();
+            }
+            PlatformAccessService? platform = context.RequestServices.GetService<PlatformAccessService>();
+            IMigrationRunStore? runs = context.RequestServices.GetService<IMigrationRunStore>();
+            if (platform is null || runs is null)
+            {
+                return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+            }
+            PlatformResult<PlatformMembership> membership = await platform.RequireMembershipAsync(
+                actor, projectId, null, cancellationToken);
+            if (!membership.Succeeded)
+            {
+                return Results.Json(new { error = membership.Error }, statusCode: membership.Status);
+            }
+            IReadOnlyList<MigrationRunRecord> history = await runs.ForProjectAsync(
+                actor.TenantId, projectId, 50, cancellationToken);
+            return Results.Ok(new { runs = history.Select(ProjectRun).ToArray() });
+        });
+
+        endpoints.MapGet("/api/workbench/runs/{runId}", async (
+            HttpContext context, string runId, CancellationToken cancellationToken) =>
+        {
+            if (!TryActor(context, identity, out WorkbenchActor actor))
+            {
+                return Results.Unauthorized();
+            }
+            PlatformAccessService? platform = context.RequestServices.GetService<PlatformAccessService>();
+            IMigrationRunStore? runs = context.RequestServices.GetService<IMigrationRunStore>();
+            MigrationRunRecord? run = runs is null
+                ? null
+                : await runs.GetAsync(actor.TenantId, runId, cancellationToken);
+            if (platform is null || runs is null)
+            {
+                return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+            }
+            if (run is null)
+            {
+                return Results.NotFound();
+            }
+            PlatformResult<PlatformMembership> membership = await platform.RequireMembershipAsync(
+                actor, run.ProjectId, null, cancellationToken);
+            if (!membership.Succeeded)
+            {
+                return Results.Json(new { error = membership.Error }, statusCode: membership.Status);
+            }
+            return Results.Ok(new
+            {
+                run = ProjectRun(run),
+                outcome = run.Outcome,
+                artifacts = await runs.ArtifactsAsync(actor.TenantId, runId, cancellationToken),
+            });
+        });
+
+        endpoints.MapGet("/api/workbench/runs/{runId}/events", async (
+            HttpContext context, string runId, long? afterSequence, CancellationToken cancellationToken) =>
+        {
+            if (!TryActor(context, identity, out WorkbenchActor actor))
+            {
+                context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                return;
+            }
+            PlatformAccessService? platform = context.RequestServices.GetService<PlatformAccessService>();
+            IMigrationRunStore? runs = context.RequestServices.GetService<IMigrationRunStore>();
+            MigrationRunRecord? run = runs is null
+                ? null
+                : await runs.GetAsync(actor.TenantId, runId, cancellationToken);
+            if (platform is null || runs is null)
+            {
+                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                return;
+            }
+            if (run is null)
+            {
+                context.Response.StatusCode = StatusCodes.Status404NotFound;
+                return;
+            }
+            PlatformResult<PlatformMembership> membership = await platform.RequireMembershipAsync(
+                actor, run.ProjectId, null, cancellationToken);
+            if (!membership.Succeeded)
+            {
+                context.Response.StatusCode = membership.Status;
+                return;
+            }
+
+            context.Response.ContentType = "text/event-stream";
+            context.Response.Headers.CacheControl = "no-cache";
+            long cursor = Math.Max(0, afterSequence ?? 0);
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                membership = await platform.RequireMembershipAsync(
+                    actor, run.ProjectId, null, cancellationToken);
+                if (!membership.Succeeded)
+                {
+                    return;
+                }
+                IReadOnlyList<MigrationRunEvent> events = await runs.EventsAsync(
+                    actor.TenantId, runId, cursor, cancellationToken);
+                foreach (MigrationRunEvent item in events)
+                {
+                    await WriteFrameAsync(context, WorkbenchProgressFrame.Replay(item), cancellationToken);
+                    cursor = item.Sequence;
+                }
+
+                run = await runs.GetAsync(actor.TenantId, runId, cancellationToken);
+                if (run is null || (run.IsTerminal && cursor >= run.LastSequence))
+                {
+                    return;
+                }
+                await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
+            }
+        });
+
+        endpoints.MapPost("/api/workbench/runs/{runId}/cancel", async (
+            HttpContext context, string runId, CancellationToken cancellationToken) =>
+        {
+            if (!TryActor(context, identity, out WorkbenchActor actor))
+            {
+                return Results.Unauthorized();
+            }
+            PlatformAccessService? platform = context.RequestServices.GetService<PlatformAccessService>();
+            IMigrationRunStore? runs = context.RequestServices.GetService<IMigrationRunStore>();
+            MigrationRunRecord? run = runs is null
+                ? null
+                : await runs.GetAsync(actor.TenantId, runId, cancellationToken);
+            if (platform is null || runs is null)
+            {
+                return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+            }
+            if (run is null)
+            {
+                return Results.NotFound();
+            }
+            PlatformResult<PlatformMembership> membership = await platform.RequireMembershipAsync(
+                actor, run.ProjectId, WorkbenchRoles.MigrationOperator, cancellationToken);
+            if (!membership.Succeeded)
+            {
+                return Results.Json(new { error = membership.Error }, statusCode: membership.Status);
+            }
+            return await runs.RequestCancellationAsync(
+                actor.TenantId, runId, actor.ObjectId, DateTimeOffset.UtcNow, cancellationToken)
+                ? Results.Accepted($"/api/workbench/runs/{runId}")
+                : Results.Conflict();
+        });
+
         endpoints.MapGet("/api/workbench/artifact", async (
-            HttpContext context, string? workspaceId, string? path, string? projectId, CancellationToken cancellationToken) =>
+            HttpContext context, string? workspaceId, string? path, string? projectId, string? runId, CancellationToken cancellationToken) =>
         {
             if (!TryActor(context, identity, out WorkbenchActor actor))
             {
                 return Results.Unauthorized();
             }
 
-            ProjectOwnerResolution project = await ResolveProjectOwnerAsync(
-                context, actor, projectId, WorkbenchRoles.MigrationOperator, cancellationToken);
-            if (!project.Succeeded)
+            string owner;
+            string? durableRoot = null;
+            MigrationRunArtifact? manifestArtifact = null;
+            if (!string.IsNullOrWhiteSpace(runId) && context.RequestServices.GetService<IMigrationRunStore>() is { } runs)
             {
-                return Results.Json(new { error = project.Error }, statusCode: project.Status);
+                MigrationRunRecord? run = await runs.GetAsync(actor.TenantId, runId, cancellationToken);
+                if (run is null)
+                {
+                    return Results.NotFound();
+                }
+                PlatformAccessService? platform = context.RequestServices.GetService<PlatformAccessService>();
+                if (platform is null)
+                {
+                    return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+                }
+                PlatformResult<PlatformMembership> membership = await platform.RequireMembershipAsync(
+                    actor, run.ProjectId, WorkbenchRoles.MigrationOperator, cancellationToken);
+                if (!membership.Succeeded)
+                {
+                    return Results.Json(new { error = membership.Error }, statusCode: membership.Status);
+                }
+                IReadOnlyList<MigrationRunArtifact> manifest = await runs.ArtifactsAsync(
+                    actor.TenantId, runId, cancellationToken);
+                manifestArtifact = manifest.FirstOrDefault(
+                    artifact => string.Equals(artifact.Path, path, StringComparison.Ordinal));
+                if (manifestArtifact is null)
+                {
+                    return Results.NotFound();
+                }
+                owner = run.WorkspaceOwnerId;
+                workspaceId = run.WorkspaceId;
+                durableRoot = workspaces.ResolveRoot(owner, workspaceId) ?? workspaces.ResolveDurableRoot(workspaceId);
+            }
+            else
+            {
+                ProjectOwnerResolution project = await ResolveProjectOwnerAsync(
+                    context, actor, projectId, WorkbenchRoles.MigrationOperator, cancellationToken);
+                if (!project.Succeeded)
+                {
+                    return Results.Json(new { error = project.Error }, statusCode: project.Status);
+                }
+                owner = project.OwnerId;
             }
 
-            if (!WorkbenchExecution.TryResolveArtifact(
-                workspaces, project.OwnerId, workspaceId, path,
-                out string absolutePath, out int status, out string error))
+            string absolutePath;
+            int status;
+            string error;
+            bool resolved = durableRoot is null
+                ? WorkbenchExecution.TryResolveArtifact(
+                    workspaces, owner, workspaceId, path,
+                    out absolutePath, out status, out error)
+                : WorkbenchExecution.TryResolveArtifact(
+                    durableRoot, path,
+                    out absolutePath, out status, out error);
+            if (!resolved)
             {
+                if (!string.IsNullOrWhiteSpace(runId) && status == 404)
+                {
+                    return Results.Json(
+                        new { error = "The artifact manifest is retained, but its workspace bytes have expired." },
+                        statusCode: StatusCodes.Status410Gone);
+                }
                 return Results.Json(new { error }, statusCode: status);
+            }
+
+            if (manifestArtifact is not null)
+            {
+                FileInfo file = new(absolutePath);
+                using FileStream stream = file.OpenRead();
+                string hash = Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+                if (file.Length != manifestArtifact.ByteLength ||
+                    !CryptographicOperations.FixedTimeEquals(
+                        Convert.FromHexString(hash), Convert.FromHexString(manifestArtifact.ContentSha256)))
+                {
+                    return Results.Json(
+                        new { error = "The retained artifact bytes no longer match the durable run manifest." },
+                        statusCode: StatusCodes.Status409Conflict);
+                }
             }
 
             string text;
@@ -686,6 +948,21 @@ internal static class WorkbenchEndpoints
         owner = actor.OwnerId;
         return authenticated;
     }
+
+    private static object ProjectRun(MigrationRunRecord run) => new
+    {
+        runId = run.RunId,
+        projectId = run.ProjectId,
+        engagementId = run.Request.EngagementId,
+        applicationName = run.Request.ApplicationName,
+        state = run.State.ToString(),
+        enqueuedUtc = run.EnqueuedUtc,
+        startedUtc = run.StartedUtc,
+        completedUtc = run.CompletedUtc,
+        lastSequence = run.LastSequence,
+        cancelRequestedUtc = run.CancelRequestedUtc,
+        failureReason = run.FailureReason,
+    };
 
     /// <summary>
     /// The authenticated caller and the roles the host says they hold.

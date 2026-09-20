@@ -53,6 +53,20 @@ export interface ConsoleLine {
   artifactCount?: number | null;
 }
 
+export interface DurableRunSummary {
+  runId: string;
+  projectId: string;
+  engagementId: string;
+  applicationName: string;
+  state: "Queued" | "Leased" | "Running" | "Succeeded" | "Failed" | "Cancelled" | "Interrupted";
+  enqueuedUtc: string;
+  startedUtc?: string | null;
+  completedUtc?: string | null;
+  lastSequence: number;
+  cancelRequestedUtc?: string | null;
+  failureReason?: string | null;
+}
+
 export const OPERATION_LABELS: Readonly<Record<string, string>> = {
   "source.acquire": "Copying your source",
   "migration.run": "Running the authorized phases",
@@ -171,17 +185,22 @@ export async function* acquireSource(
 export async function* executeRun(
   body: Record<string, unknown>,
   signal: AbortSignal,
+  onEnqueued?: (runId: string) => void,
 ): AsyncGenerator<ConsoleLine | (ConsoleLine & { level: "done" | "error"; result: ExecutionResult })> {
+  const runId = await enqueueRun(body);
+  onEnqueued?.(runId);
+  yield* followRun(runId, 0, signal);
+}
+
+export async function enqueueRun(body: Record<string, unknown>): Promise<string> {
   let response: Response;
   try {
     response = await fetch("/api/workbench/execute", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-      signal,
     });
   } catch (error) {
-    if (signal.aborted) throw error;
     throw new Error(SessionExpired);
   }
 
@@ -190,11 +209,39 @@ export async function* executeRun(
     const payload = await response.json().catch(() => null) as { error?: string } | null;
     throw new Error(payload?.error ?? `The server refused the request (${response.status}).`);
   }
+  const payload = await response.json() as { runId?: string };
+  if (!payload.runId) throw new Error("The server accepted the run without returning its identifier.");
+  return payload.runId;
+}
+
+export async function* followRun(
+  runId: string,
+  afterSequence: number,
+  signal: AbortSignal,
+): AsyncGenerator<ConsoleLine | (ConsoleLine & { level: "done" | "error"; result: ExecutionResult })> {
+  const response = await fetch(
+    `/api/workbench/runs/${encodeURIComponent(runId)}/events?afterSequence=${afterSequence}`,
+    { signal },
+  );
+  if (response.status === 401 || response.status === 403) throw new Error(SessionExpired);
+  if (!response.ok) throw new Error(`The run activity could not be opened (${response.status}).`);
   yield* readEvents<ConsoleLine & { level: "done" | "error"; result: ExecutionResult }>(response);
 }
 
-export async function fetchArtifact(workspaceId: string, path: string, projectId: string, signal?: AbortSignal) {
-  const query = `workspaceId=${encodeURIComponent(workspaceId)}&path=${encodeURIComponent(path)}&projectId=${encodeURIComponent(projectId)}`;
+export async function fetchRuns(projectId: string, signal?: AbortSignal): Promise<DurableRunSummary[]> {
+  const response = await fetch(`/api/workbench/projects/${encodeURIComponent(projectId)}/runs`, { signal });
+  if (!response.ok) throw new Error(`Run history could not be loaded (${response.status}).`);
+  return ((await response.json()) as { runs: DurableRunSummary[] }).runs;
+}
+
+export async function cancelRun(runId: string): Promise<void> {
+  const response = await fetch(`/api/workbench/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" });
+  if (!response.ok) throw new Error(`Cancellation could not be requested (${response.status}).`);
+}
+
+export async function fetchArtifact(workspaceId: string, path: string, projectId: string, signal?: AbortSignal, runId?: string | null) {
+  const query = `workspaceId=${encodeURIComponent(workspaceId)}&path=${encodeURIComponent(path)}&projectId=${encodeURIComponent(projectId)}`
+    + (runId ? `&runId=${encodeURIComponent(runId)}` : "");
   const response = await fetch(`/api/workbench/artifact?${query}`, { signal });
   if (!response.ok) {
     const payload = await response.json().catch(() => null) as { error?: string } | null;

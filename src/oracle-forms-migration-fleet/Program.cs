@@ -184,6 +184,7 @@ else
 
 // Cloned and uploaded source lives in a per-session sandbox that is swept on a timer and on shutdown.
 SourceWorkspaceService sourceWorkspaces = new(Environment.GetEnvironmentVariable("WORKBENCH_SOURCE_ROOT"));
+builder.Services.AddSingleton(sourceWorkspaces);
 
 // The sandbox database target is configured here, never by a caller, so a request can ask for a data
 // migration but cannot choose where the rows land.
@@ -227,6 +228,7 @@ builder.Services.AddSingleton(
 // approved what, and treating it as one would make an approval disappear on the next revision.
 IPlatformStateStore? platformStore = null;
 ISandboxProjectBindingStore? sandboxProjects = null;
+IMigrationRunStore? migrationRuns = null;
 bool migratePlatformStore = false;
 
 if (PlatformDatabaseOptions.TryRead(Environment.GetEnvironmentVariable, out PlatformDatabaseOptions? platformDatabase, out string platformError))
@@ -236,6 +238,7 @@ if (PlatformDatabaseOptions.TryRead(Environment.GetEnvironmentVariable, out Plat
         : new ManagedIdentityCredential(ManagedIdentityId.FromUserAssignedClientId(managedIdentityClientId));
     platformStore = new PostgresPlatformStateStore(platformDatabase!, platformCredential);
     sandboxProjects = new PostgresSandboxProjectBindingStore(platformDatabase!, platformCredential);
+    migrationRuns = new PostgresMigrationRunStore(platformDatabase!, platformCredential);
     migratePlatformStore = true;
 
     Console.WriteLine($"[INFO] Platform state store: PostgreSQL schema '{platformDatabase!.Schema}' on {platformDatabase.Host}.");
@@ -246,6 +249,7 @@ else if (authenticationOptions.Mode == WorkbenchAuthenticationMode.Development)
         ?? Path.Combine(Path.GetTempPath(), "ofm-platform-development", "platform-state.json");
 
     platformStore = new FilePlatformStateStore(statePath);
+    migrationRuns = new FileMigrationRunStore(Path.ChangeExtension(statePath, ".runs.json"));
     Console.WriteLine($"[INFO] Platform state store: durable development file at {statePath}.");
 }
 else
@@ -255,6 +259,7 @@ else
 }
 
 builder.Services.AddSingleton(platformStore);
+builder.Services.AddSingleton(migrationRuns!);
 builder.Services.AddSingleton(new PlatformAccessService(
     platformStore, sandboxBinding, sandboxProjects: sandboxProjects));
 builder.Services.AddSingleton(new WorkbenchAuthorizationService(
@@ -268,6 +273,7 @@ builder.Services.AddSingleton<IHostedService>(provider => new PlatformStartupSer
     provider.GetRequiredService<ILogger<PlatformStartupService>>(),
     startupStore,
     migrate));
+builder.Services.AddHostedService<MigrationRunWorker>();
 
 builder.RegisterProtocol("responses", endpoints =>
 {

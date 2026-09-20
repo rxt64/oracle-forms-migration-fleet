@@ -163,6 +163,24 @@ public class SourceWorkspaceTests : IDisposable
     }
 
     [Fact]
+    public async Task Retained_workspaces_cannot_be_released_until_the_worker_is_done()
+    {
+        using var service = new SourceWorkspaceService(_root);
+        using MemoryStream archive = BuildArchive(("forms/ORD.fmb", "form"));
+        string workspaceId = Assert.Single(
+            await Collect(service.ExtractAsync("user-a", archive, "orders.zip", CancellationToken.None)),
+            step => step.Level == "done").Text;
+
+        using (service.Retain(workspaceId))
+        {
+            Assert.False(service.Release("user-a", workspaceId));
+            Assert.NotNull(service.Get("user-a", workspaceId));
+        }
+
+        Assert.True(service.Release("user-a", workspaceId));
+    }
+
+    [Fact]
     public async Task Copied_files_are_locked_read_only()
     {
         using var service = new SourceWorkspaceService(_root);
