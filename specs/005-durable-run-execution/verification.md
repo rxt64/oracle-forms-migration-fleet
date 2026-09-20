@@ -10,12 +10,17 @@
 - Workbench Bicep compilation: passed.
 - `git diff --check`: passed with line-ending notices only.
 
+## PostgreSQL CI evidence
+
+PostgreSQL 16 integration: 5 passed, 0 failed. The durable case proves server-time lease expiry,
+late-renewal and stale-fence rejection, ordered events, atomic cancellation/terminal state, history,
+artifact manifests, and expired-run reconciliation. Existing lifecycle, sandbox ownership, migration,
+and concurrent initialization cases also passed.
+
 ## Pending live evidence
 
-PR CI must execute the PostgreSQL integration category against PostgreSQL 16. The new durable case must
-prove server-time lease expiry, stale-fence rejection, ordered events, atomic cancellation/terminal state,
-history, artifact manifests, and expired-run reconciliation. The exact-SHA main deployment must then apply
-schema v3, pass authenticated product smoke, remove its ACI, and leave the intended digest healthy.
+The exact-SHA main deployment must apply schema v3, pass authenticated product smoke, remove its ACI,
+and leave the intended digest healthy.
 
 ## Recovery boundary
 
