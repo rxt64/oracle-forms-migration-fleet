@@ -167,10 +167,23 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${DEPLOY_SHA::12}"
-          docker build -f Dockerfile \
+          PLATFORM_SCHEMA_VERSION=$(python3 - <<'PY'
+          import pathlib
+          import re
+
+          source = pathlib.Path("Hosting/PlatformSchema.cs").read_text(encoding="utf-8")
+          match = re.search(r"public const int CurrentVersion = (\d+);", source)
+          if match is None:
+              raise SystemExit("PlatformSchema.CurrentVersion was not found.")
+          print(match.group(1))
+          PY
+          )
+          docker buildx build --push --provenance=false -f Dockerfile \
+            --annotation "org.opencontainers.image.revision=$DEPLOY_SHA" \
             --label "org.opencontainers.image.revision=$DEPLOY_SHA" \
+            --label "com.microsoft.ofmfleet.platform-schema-min=0" \
+            --label "com.microsoft.ofmfleet.platform-schema-max=$PLATFORM_SCHEMA_VERSION" \
             -t "$REGISTRY.azurecr.io/$IMAGE:$TAG" .
-          docker push "$REGISTRY.azurecr.io/$IMAGE:$TAG"
           DIGEST=$(az acr manifest show-metadata \
             --registry "$REGISTRY" \
             --name "$IMAGE:$TAG" \
@@ -182,6 +195,7 @@ jobs:
           fi
           echo "TAG=$TAG" >> "$GITHUB_ENV"
           echo "IMAGE_DIGEST=$DIGEST" >> "$GITHUB_ENV"
+          echo "PLATFORM_SCHEMA_VERSION=$PLATFORM_SCHEMA_VERSION" >> "$GITHUB_ENV"
 
       - name: Refuse stale automatic deployment before Azure mutation
         env:
@@ -210,6 +224,41 @@ jobs:
             echo "Platform authorization state and sandbox migration must use different PostgreSQL databases." >&2
             exit 1
           fi
+
+      - name: Capture rollback image
+        id: rollback
+        run: |
+          set -euo pipefail
+          APP=$(az containerapp show \
+            --name "$CONTAINER_APP" \
+            --resource-group "$RESOURCE_GROUP" \
+            --output json)
+          PREVIOUS_IMAGE=$(jq -r '.properties.template.containers[0].image' <<< "$APP")
+          PREVIOUS_TEMPLATE=$(jq -c '.properties.template' <<< "$APP")
+          [[ -n "$PREVIOUS_IMAGE" ]]
+          [[ "$PREVIOUS_TEMPLATE" != "null" ]]
+          if [[ ! "$PREVIOUS_IMAGE" =~ ^$REGISTRY\.azurecr\.io/$IMAGE@sha256:[0-9a-f]{64}$ ]]; then
+            echo "The deployed predecessor is not an immutable digest in the expected repository." >&2
+            exit 1
+          fi
+          docker pull "$PREVIOUS_IMAGE"
+          PREVIOUS_MIN_SCHEMA=unknown
+          PREVIOUS_MAX_SCHEMA=unknown
+          CANDIDATE_MIN=$(docker image inspect \
+            --format '{{ index .Config.Labels "com.microsoft.ofmfleet.platform-schema-min" }}' \
+            "$PREVIOUS_IMAGE" 2>/dev/null || true)
+          CANDIDATE_MAX=$(docker image inspect \
+            --format '{{ index .Config.Labels "com.microsoft.ofmfleet.platform-schema-max" }}' \
+            "$PREVIOUS_IMAGE" 2>/dev/null || true)
+          if [[ "$CANDIDATE_MIN" =~ ^[0-9]+$ && "$CANDIDATE_MAX" =~ ^[0-9]+$ && \
+                "$CANDIDATE_MIN" -le "$CANDIDATE_MAX" ]]; then
+            PREVIOUS_MIN_SCHEMA=$CANDIDATE_MIN
+            PREVIOUS_MAX_SCHEMA=$CANDIDATE_MAX
+          fi
+          echo "previous_image=$PREVIOUS_IMAGE" >> "$GITHUB_OUTPUT"
+          echo "previous_template_b64=$(printf '%s' "$PREVIOUS_TEMPLATE" | base64 -w0)" >> "$GITHUB_OUTPUT"
+          echo "previous_min_schema=$PREVIOUS_MIN_SCHEMA" >> "$GITHUB_OUTPUT"
+          echo "previous_max_schema=$PREVIOUS_MAX_SCHEMA" >> "$GITHUB_OUTPUT"
 
       - name: Authorize the dedicated smoke identity
         run: |
@@ -244,22 +293,8 @@ jobs:
             --required-application "$SMOKE_PRIMARY_CLIENT_ID" \
             --denied-application "$SMOKE_UNAUTHORIZED_CLIENT_ID"
 
-      - name: Capture rollback image
-        id: rollback
-        run: |
-          set -euo pipefail
-          APP=$(az containerapp show \
-            --name "$CONTAINER_APP" \
-            --resource-group "$RESOURCE_GROUP" \
-            --output json)
-          PREVIOUS_IMAGE=$(jq -r '.properties.template.containers[0].image' <<< "$APP")
-          PREVIOUS_TEMPLATE=$(jq -c '.properties.template' <<< "$APP")
-          [[ -n "$PREVIOUS_IMAGE" ]]
-          [[ "$PREVIOUS_TEMPLATE" != "null" ]]
-          echo "previous_image=$PREVIOUS_IMAGE" >> "$GITHUB_OUTPUT"
-          echo "previous_template_b64=$(printf '%s' "$PREVIOUS_TEMPLATE" | base64 -w0)" >> "$GITHUB_OUTPUT"
-
       - name: Deploy the image
+        id: deploy_image
         env:
           DEPLOY_SHA: ${{ needs.verify.outputs.deploy_sha }}
           VERIFICATION_MODE: ${{ inputs.verification_mode || 'manual' }}
@@ -273,6 +308,7 @@ jobs:
               exit 1
             fi
           fi
+          echo "mutation_started=true" >> "$GITHUB_OUTPUT"
           az containerapp update \
             --name "$CONTAINER_APP" \
             --resource-group "$RESOURCE_GROUP" \
@@ -399,11 +435,16 @@ jobs:
           SMOKE_NAME: ${{ steps.smoke_runner.outputs.name }}
           PREVIOUS_IMAGE: ${{ steps.rollback.outputs.previous_image }}
           PREVIOUS_TEMPLATE_B64: ${{ steps.rollback.outputs.previous_template_b64 }}
+          PREVIOUS_MIN_SCHEMA: ${{ steps.rollback.outputs.previous_min_schema }}
+          PREVIOUS_MAX_SCHEMA: ${{ steps.rollback.outputs.previous_max_schema }}
+          DEPLOY_MUTATION_STARTED: ${{ steps.deploy_image.outputs.mutation_started }}
           SMOKE_OUTCOME: ${{ steps.smoke.outcome }}
         run: |
           set -euo pipefail
           CLEANUP_FAILED=0
           ROLLBACK_FAILED=0
+          FORWARD_RECOVERY_REQUIRED=0
+          RECOVERY_ACTION=none
 
           if [[ -n "$SMOKE_NAME" ]]; then
             CLEANED=0
@@ -441,9 +482,34 @@ jobs:
             fi
           fi
 
-          if [[ "$SMOKE_OUTCOME" != "success" && -n "$PREVIOUS_IMAGE" && -n "$PREVIOUS_TEMPLATE_B64" ]]; then
-            echo "Post-deployment verification failed; restoring the complete previous container template." >&2
-            echo "Image rollback does not reverse database or schema changes." >&2
+              if [[ "$SMOKE_OUTCOME" != "success" && "$DEPLOY_MUTATION_STARTED" == "true" && \
+                -n "${PLATFORM_SCHEMA_VERSION:-}" && -n "$PREVIOUS_IMAGE" ]]; then
+            DECISION_ARGS=(
+              --applied-schema "$PLATFORM_SCHEMA_VERSION"
+              --previous-min-schema "${PREVIOUS_MIN_SCHEMA:-unknown}"
+              --previous-max-schema "${PREVIOUS_MAX_SCHEMA:-unknown}"
+            )
+            if [[ "$CLEANUP_FAILED" == "0" ]]; then
+              DECISION_ARGS+=(--cleanup-succeeded)
+            fi
+            RECOVERY_DECISION=$(python3 .github/scripts/release_recovery.py "${DECISION_ARGS[@]}")
+            RECOVERY_ACTION=$(jq -r '.action' <<< "$RECOVERY_DECISION")
+            RECOVERY_REASON=$(jq -r '.reason' <<< "$RECOVERY_DECISION")
+            echo "$RECOVERY_REASON" >&2
+          fi
+
+          if [[ "$RECOVERY_ACTION" == "forward-recovery" ]]; then
+            FORWARD_RECOVERY_REQUIRED=1
+            {
+              echo "## Forward recovery required"
+              echo
+              echo "$RECOVERY_REASON"
+              echo
+              echo "The new revision and migrated platform data were preserved. Ship a compatible fix; do not restore the previous image."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=Forward recovery required::$RECOVERY_REASON"
+          elif [[ "$RECOVERY_ACTION" == "rollback" && -n "$PREVIOUS_TEMPLATE_B64" ]]; then
+            echo "Post-deployment verification failed; restoring the schema-compatible previous container template." >&2
             printf '%s' "$PREVIOUS_TEMPLATE_B64" | base64 -d > "$RUNNER_TEMP/previous-template.json"
             python3 - "$RUNNER_TEMP/previous-template.json" "$RUNNER_TEMP/rollback-body.json" <<'PY'
           import json
@@ -504,9 +570,12 @@ jobs:
                 ROLLBACK_FAILED=1
               fi
             fi
+          elif [[ "$RECOVERY_ACTION" == "rollback" ]]; then
+            echo "Recovery policy allowed rollback, but the previous template is unavailable." >&2
+            ROLLBACK_FAILED=1
           fi
 
-          if [[ "$CLEANUP_FAILED" != "0" || "$ROLLBACK_FAILED" != "0" ]]; then
+          if [[ "$CLEANUP_FAILED" != "0" || "$ROLLBACK_FAILED" != "0" || "$FORWARD_RECOVERY_REQUIRED" != "0" ]]; then
             exit 1
           fi
 

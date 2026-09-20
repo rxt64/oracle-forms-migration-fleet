@@ -17,10 +17,19 @@ late-renewal and stale-fence rejection, ordered events, atomic cancellation/term
 artifact manifests, and expired-run reconciliation. Existing lifecycle, sandbox ownership, migration,
 and concurrent initialization cases also passed.
 
-## Pending live evidence
+## Live deployment evidence
 
-The exact-SHA main deployment must apply schema v3, pass authenticated product smoke, remove its ACI,
-and leave the intended digest healthy.
+Main SHA `43f0d8528a71b4c5726cbbefa572f7786e54d240` deployed in workflow run
+`35489040221` as revision `ca-ofmfleet-dev-ykbpnrpd--0000091` with digest
+`sha256:77aac7504e8a57c85aa37222e1cb165fd990a39374f2348dfc46733aef6ebcbb`. Startup applied
+platform schema v3, authenticated smoke passed, its ACI runner was removed, and the intended digest was
+left healthy.
+
+The smoke exercised authenticated bootstrap, project access, platform-state reads, unauthorized-access
+denial, and non-writing approval persistence. It deliberately did not execute customer migration work.
+This evidence does not prove worker-process restart during active work, recovery of replica-local source
+or artifact bytes on another replica, or business equivalence between generated output and native Oracle
+Forms behavior.
 
 ## Recovery boundary
 
