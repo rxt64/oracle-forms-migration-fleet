@@ -236,18 +236,18 @@ test.describe("activity pane", () => {
     await expect(activityCommand(page)).toBeFocused();
   });
 
-  test("the footer states the cooperative, request-bound cancellation boundary", async ({ page }) => {
+  test("the footer states the durable replay and cooperative cancellation boundary", async ({ page }) => {
     const stub = await installStreamStub(page);
     await page.goto("/");
     await beginClone(page);
     await stub.waitForOpen(CLONE_PATH);
 
     const footer = page.locator(".mf-activity footer");
-    await expect(footer).toContainText("Closing this pane only hides activity.");
-    await expect(footer).toContainText("may not know whether external work stopped");
+    await expect(footer).toContainText("Closing this pane or tab does not cancel the run");
+    await expect(footer).toContainText("Reopen it from run history to replay retained activity");
     await expect(footer).toContainText("changes already applied may remain");
-    await expect(footer).toContainText("Inspect retained results and the actual destination before deciding whether retry is safe");
-    await expect(footer).toContainText("no durable resume yet");
+    await expect(footer).toContainText("host loss interrupts started work");
+    await expect(footer).toContainText("inspect retained results and the destination before deciding whether retry is safe");
 
     await stub.close(CLONE_PATH);
   });

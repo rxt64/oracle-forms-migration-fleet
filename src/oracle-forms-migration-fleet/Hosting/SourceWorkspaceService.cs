@@ -70,6 +70,7 @@ public sealed class SourceWorkspaceService : IDisposable
     };
 
     private readonly ConcurrentDictionary<string, WorkspaceRecord> _workspaces = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, int> _retained = new(StringComparer.Ordinal);
     private readonly string _root;
     private readonly Timer _sweeper;
 
@@ -146,6 +147,50 @@ public sealed class SourceWorkspaceService : IDisposable
             ? record.Summary
             : null;
 
+    internal string? ResolveDurableRoot(string workspaceId)
+    {
+        if (workspaceId.Length != 32 || workspaceId.Any(character => !Uri.IsHexDigit(character)))
+        {
+            return null;
+        }
+
+        string root = Path.GetFullPath(_root) + Path.DirectorySeparatorChar;
+        string candidate = Path.GetFullPath(Path.Combine(_root, workspaceId));
+        return candidate.StartsWith(root, StringComparison.Ordinal) && Directory.Exists(candidate)
+            ? candidate
+            : null;
+    }
+
+    internal string? DurableSnapshotHash(string workspaceId, string sourceRoot)
+    {
+        string? root = ResolveDurableRoot(workspaceId);
+        if (root is null || WorkspacePath.Validate(sourceRoot, "Source folder") is not null)
+        {
+            return null;
+        }
+        string normalized = WorkspacePath.Normalize(sourceRoot);
+        string selected = Path.GetFullPath(Path.Combine(root, normalized.Replace('/', Path.DirectorySeparatorChar)));
+        string prefix = root.EndsWith(Path.DirectorySeparatorChar) ? root : root + Path.DirectorySeparatorChar;
+        return selected.StartsWith(prefix, StringComparison.Ordinal) && Directory.Exists(selected)
+            ? SnapshotHash(selected)
+            : null;
+    }
+
+    internal IDisposable Retain(string workspaceId)
+    {
+        _retained.AddOrUpdate(workspaceId, 1, (_, count) => count + 1);
+        return new Retention(() =>
+        {
+            int remaining = _retained.AddOrUpdate(workspaceId, 0, (_, count) => Math.Max(0, count - 1));
+            if (remaining == 0)
+            {
+                _retained.TryRemove(workspaceId, out _);
+            }
+        });
+    }
+
+    internal bool IsRetained(string workspaceId) => _retained.ContainsKey(workspaceId);
+
     /// <summary>
     /// Everything the server knows about a copy the caller owns, for server-side decisions only. A
     /// caller who does not own the workspace gets null rather than any fact about it.
@@ -219,7 +264,8 @@ public sealed class SourceWorkspaceService : IDisposable
     public bool Release(string owner, string workspaceId)
     {
         if (!_workspaces.TryGetValue(workspaceId, out WorkspaceRecord? record) ||
-            !string.Equals(record.Owner, owner, StringComparison.Ordinal))
+            !string.Equals(record.Owner, owner, StringComparison.Ordinal) ||
+            _retained.ContainsKey(workspaceId))
         {
             return false;
         }
@@ -786,7 +832,9 @@ public sealed class SourceWorkspaceService : IDisposable
         DateTimeOffset now = DateTimeOffset.UtcNow;
         foreach (KeyValuePair<string, WorkspaceRecord> entry in _workspaces)
         {
-            if (entry.Value.Summary.ExpiresUtc <= now && _workspaces.TryRemove(entry.Key, out WorkspaceRecord? removed))
+            if (entry.Value.Summary.ExpiresUtc <= now &&
+                !_retained.ContainsKey(entry.Key) &&
+                _workspaces.TryRemove(entry.Key, out WorkspaceRecord? removed))
             {
                 DeleteDirectory(removed.Path);
             }
@@ -798,9 +846,20 @@ public sealed class SourceWorkspaceService : IDisposable
         _sweeper.Dispose();
         foreach (KeyValuePair<string, WorkspaceRecord> entry in _workspaces)
         {
-            DeleteDirectory(entry.Value.Path);
+            if (!_retained.ContainsKey(entry.Key))
+            {
+                DeleteDirectory(entry.Value.Path);
+            }
         }
 
         _workspaces.Clear();
+        _retained.Clear();
+    }
+
+    private sealed class Retention(Action release) : IDisposable
+    {
+        private Action? _release = release;
+
+        public void Dispose() => Interlocked.Exchange(ref _release, null)?.Invoke();
     }
 }

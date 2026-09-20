@@ -20,7 +20,7 @@ public static partial class PlatformSchema
 {
     public const string DefaultSchema = "ofm_platform";
 
-    public const int CurrentVersion = 2;
+    public const int CurrentVersion = 3;
 
     /// <summary>
     /// Lock key for <c>pg_advisory_lock</c>. Two replicas starting together must not both run V001;
@@ -201,6 +201,64 @@ public static partial class PlatformSchema
                 order by tenant_id, requested_utc, approval_id
                 on conflict (tenant_id) do nothing
                 """,
+            ]),
+            new Migration(3, "durable-run-execution",
+            [
+                $"""
+                create table if not exists {schema}.migration_run (
+                    run_id text primary key,
+                    tenant_id text not null,
+                    project_id text not null references {schema}.project (project_id),
+                    actor_object_id text not null,
+                    workspace_id text not null,
+                    workspace_node_id text not null,
+                    workspace_owner_id text not null,
+                    source_snapshot_hash text not null,
+                    plan_input_hash text not null,
+                    target_profile_id text not null,
+                    target_profile_version integer not null,
+                    target_profile_hash text not null,
+                    request_json jsonb not null,
+                    state text not null,
+                    enqueued_utc timestamptz not null,
+                    started_utc timestamptz,
+                    completed_utc timestamptz,
+                    lease_owner text,
+                    lease_expires_utc timestamptz,
+                    fence_token bigint not null default 0,
+                    cancel_requested_utc timestamptz,
+                    cancel_requested_by_object_id text,
+                    last_sequence bigint not null default 0,
+                    outcome_json jsonb,
+                    failure_reason text,
+                    version integer not null default 1
+                )
+                """,
+                $"""
+                create table if not exists {schema}.migration_run_event (
+                    run_id text not null references {schema}.migration_run (run_id),
+                    sequence bigint not null,
+                    recorded_utc timestamptz not null,
+                    level text not null,
+                    text text not null,
+                    signal_json jsonb,
+                    outcome_json jsonb,
+                    primary key (run_id, sequence)
+                )
+                """,
+                $"""
+                create table if not exists {schema}.migration_run_artifact (
+                    run_id text not null references {schema}.migration_run (run_id),
+                    path text not null,
+                    kind text not null,
+                    description text not null,
+                    byte_length bigint not null,
+                    content_sha256 text not null,
+                    primary key (run_id, path)
+                )
+                """,
+                $"create index if not exists ix_migration_run_project on {schema}.migration_run (tenant_id, project_id, enqueued_utc desc)",
+                $"create index if not exists ix_migration_run_claimable on {schema}.migration_run (state, workspace_node_id, enqueued_utc)",
             ]),
         ];
     }

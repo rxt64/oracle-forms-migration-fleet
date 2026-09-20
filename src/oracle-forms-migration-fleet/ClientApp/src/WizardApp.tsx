@@ -48,12 +48,14 @@ import type {
 } from "./types";
 import {
   acquireSource,
-  executeRun,
+  enqueueRun,
   fetchArtifact,
+  followRun,
   formatBytes,
   parseRepositoryUrl,
   proposedResourceNames,
   releaseSource,
+  isTerminal,
   type ConsoleLine,
   type SourceWorkspace,
 } from "./sourceClient";
@@ -62,6 +64,7 @@ import { ActivityPane } from "./MatrixConsole";
 import { ArchitectureReveal } from "./ArchitectureReveal";
 import { InfoTip } from "./InfoTip";
 import { ProjectApprovals } from "./ProjectApprovals";
+import { RunHistory } from "./RunHistory";
 import {
   EVIDENCE_HELP,
   EVIDENCE_NAMES,
@@ -621,6 +624,7 @@ export default function WizardApp() {
   const [executing, setExecuting] = useState(false);
   const [execution, setExecution] = useState<ExecutionResult | null>(null);
   const [executionError, setExecutionError] = useState("");
+  const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [consoleMode, setConsoleMode] = useState<"source" | "execution">("source");
   const [artifact, setArtifact] = useState<{ path: string; text: string; error: string } | null>(null);
   const [dialog, setDialog] = useState<"agent" | "azure" | "artifact" | "glossary" | null>(null);
@@ -1002,6 +1006,57 @@ export default function WizardApp() {
    * Runs the phases the server's own planner authorized. The browser sends the workspace identifier
    * and never a path, and every line in the console is one the server emitted while working.
    */
+  async function consumeExecution(
+    events: ReturnType<typeof followRun>,
+    afterSequence: number,
+  ) {
+    let cursor = afterSequence;
+    let terminal = false;
+    for await (const event of events) {
+      const sequence = event.sequence ?? cursor + 1;
+      if (sequence <= cursor) continue;
+      if (sequence !== cursor + 1) {
+        throw new Error(`Run activity has a sequence gap after ${cursor}. Reopen the run to replay its retained history.`);
+      }
+      cursor = sequence;
+      terminal = isTerminal(event);
+      if ("result" in event) {
+        const result = event.result;
+        const ran = result.phases.filter((phase) => phase.state === "Executed").length;
+        const unsuccessful = event.level === "error";
+        setExecution(result);
+        setConsoleLines((current) => [...current, transcriptLine(
+          event,
+          `${ran} phase${ran === 1 ? "" : "s"} executed. ${result.artifacts.length} file${result.artifacts.length === 1 ? "" : "s"} written.`,
+        )]);
+        setStatus(unsuccessful
+          ? `The run did not complete successfully. ${ran} phase${ran === 1 ? "" : "s"} ran and ${result.artifacts.length} file${result.artifacts.length === 1 ? " was" : "s were"} retained.`
+          : `${ran} phase${ran === 1 ? "" : "s"} ran and wrote ${result.artifacts.length} file${result.artifacts.length === 1 ? "" : "s"} into your session workspace.`);
+        if (unsuccessful) setExecutionError(event.observed || "The run did not complete successfully.");
+      } else {
+        setConsoleLines((current) => [...current, event as ConsoleLine]);
+        if (event.level === "error") setExecutionError(event.text);
+      }
+    }
+    return { cursor, terminal };
+  }
+
+  async function followWithReconnect(runId: string, controller: AbortController, start = 0) {
+    let cursor = start;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      try {
+        const followed = await consumeExecution(followRun(runId, cursor, controller.signal), cursor);
+        cursor = followed.cursor;
+        if (followed.terminal || controller.signal.aborted) return;
+      } catch (error) {
+        if (controller.signal.aborted || attempt === 3) throw error;
+      }
+      setStatus("The activity connection closed. Reconnecting to the retained run...");
+      await new Promise((resolve) => window.setTimeout(resolve, 500 * (attempt + 1)));
+    }
+    throw new Error("The run outcome is still unknown after reconnecting. Reopen it from run history to replay retained activity.");
+  }
+
   async function runAuthorized() {
     if (!workspace || !plan || !projectId) return;
     run.current?.abort();
@@ -1017,31 +1072,15 @@ export default function WizardApp() {
     setStatus("Running the phases the planner authorized...");
 
     try {
-      for await (const event of executeRun({
+      const durableRunId = await enqueueRun({
         ...runRequestBody(),
         workspaceId: workspace.workspaceId,
         // Identifiers only. The server resolves membership and the immutable target profile itself.
         projectId,
         targetProfileId: "sandbox",
-      }, controller.signal)) {
-        if ("result" in event) {
-          const result = event.result;
-          const ran = result.phases.filter((phase) => phase.state === "Executed").length;
-          const unsuccessful = event.level === "error";
-          setExecution(result);
-          setConsoleLines((current) => [...current, transcriptLine(
-            event,
-            `${ran} phase${ran === 1 ? "" : "s"} executed. ${result.artifacts.length} file${result.artifacts.length === 1 ? "" : "s"} written.`,
-          )]);
-          setStatus(unsuccessful
-            ? `The run did not complete successfully. ${ran} phase${ran === 1 ? "" : "s"} ran and ${result.artifacts.length} file${result.artifacts.length === 1 ? " was" : "s were"} retained.`
-            : `${ran} phase${ran === 1 ? "" : "s"} ran and wrote ${result.artifacts.length} file${result.artifacts.length === 1 ? "" : "s"} into your session workspace.`);
-          if (unsuccessful) setExecutionError(event.observed || "The run did not complete successfully.");
-        } else {
-          setConsoleLines((current) => [...current, event as ConsoleLine]);
-          if (event.level === "error") setExecutionError(event.text);
-        }
-      }
+      });
+      setActiveRunId(durableRunId);
+      await followWithReconnect(durableRunId, controller);
     } catch (error) {
       if (!controller.signal.aborted) {
         const message = error instanceof Error ? error.message : "The run failed.";
@@ -1053,12 +1092,37 @@ export default function WizardApp() {
     }
   }
 
+  async function reopenRun(runId: string) {
+    run.current?.abort();
+    const controller = new AbortController();
+    run.current = controller;
+    setActiveRunId(runId);
+    setExecuting(true);
+    setExecution(null);
+    setExecutionError("");
+    setConsoleMode("execution");
+    setConsoleLines([]);
+    setConsoleOpen(true);
+    setStatus("Reopening retained run activity...");
+    try {
+      await followWithReconnect(runId, controller);
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        const message = error instanceof Error ? error.message : "The run activity could not be reopened.";
+        setConsoleLines((current) => [...current, { level: "error", text: message }]);
+        setExecutionError(message);
+      }
+    } finally {
+      if (run.current === controller) setExecuting(false);
+    }
+  }
+
   async function openArtifact(path: string) {
-    if (!workspace || !projectId) return;
+    if ((!workspace && !activeRunId) || !projectId) return;
     setArtifact({ path, text: "", error: "" });
     setDialog("artifact");
     try {
-      const text = await fetchArtifact(workspace.workspaceId, path, projectId);
+      const text = await fetchArtifact(workspace?.workspaceId ?? "", path, projectId, undefined, activeRunId);
       setArtifact({ path, text, error: "" });
     } catch (error) {
       setArtifact({ path, text: "", error: error instanceof Error ? error.message : "The artifact could not be loaded." });
@@ -1544,6 +1608,12 @@ export default function WizardApp() {
           runRequest={runRequestBody()}
           onProjectChange={setProjectId}
         />
+
+        {projectId && <RunHistory
+          projectId={projectId}
+          activeRunId={activeRunId}
+          onOpen={(runId) => void reopenRun(runId)}
+        />}
 
         {/* 4. The run's own results, concise. */}
         <section className="mf-result-section" aria-labelledby="mf-run-results-title">

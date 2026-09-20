@@ -175,7 +175,7 @@ export function runWaitingFrame(): Frame {
 
 export interface StreamStub {
   /** Waits until the page has actually issued the request this stub answers. */
-  waitForOpen(path: string): Promise<void>;
+  waitForOpen(path: string, count?: number): Promise<void>;
   push(path: string, value: Frame): Promise<void>;
   pushAll(path: string, values: Frame[]): Promise<void>;
   close(path: string): Promise<void>;
@@ -198,7 +198,7 @@ declare global {
  * the plan endpoint, the bootstrap catalog, and asset loads stay genuine.
  */
 export async function installStreamStub(page: Page): Promise<StreamStub> {
-  await page.addInitScript(({ paths }: { paths: string[] }) => {
+  await page.addInitScript(({ paths, executePath }: { paths: string[]; executePath: string }) => {
     const controllers = new Map<string, ReadableStreamDefaultController<Uint8Array>>();
     const encoder = new TextEncoder();
     const opened: string[] = [];
@@ -223,6 +223,30 @@ export async function installStreamStub(page: Page): Promise<StreamStub> {
 
     window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes(executePath) && (init?.method ?? "GET") === "POST") {
+        return Promise.resolve(new Response(JSON.stringify({ runId: "run-e2e" }), {
+          status: 202,
+          headers: { "content-type": "application/json" },
+        }));
+      }
+      if (url.includes("/api/workbench/runs/run-e2e/events")) {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controllers.set(executePath, controller);
+            const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+            signal?.addEventListener("abort", () => {
+              if (controllers.get(executePath) !== controller) return;
+              controllers.delete(executePath);
+              controller.error(new DOMException("Aborted", "AbortError"));
+            });
+          },
+        });
+        opened.push(executePath);
+        return Promise.resolve(new Response(body, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        }));
+      }
       const matched = paths.find((path) => url.includes(path));
       if (!matched) return original(input, init);
 
@@ -244,7 +268,7 @@ export async function installStreamStub(page: Page): Promise<StreamStub> {
         headers: { "content-type": "text/event-stream" },
       }));
     };
-  }, { paths: [CLONE_PATH, UPLOAD_PATH, EXECUTE_PATH] });
+  }, { paths: [CLONE_PATH, UPLOAD_PATH], executePath: EXECUTE_PATH });
 
   const push = async (path: string, value: Frame) => {
     const delivered = await page.evaluate(
@@ -255,10 +279,10 @@ export async function installStreamStub(page: Page): Promise<StreamStub> {
   };
 
   return {
-    async waitForOpen(path) {
+    async waitForOpen(path, count = 1) {
       await page.waitForFunction(
-        (target) => (window.__fleetStreamStub?.opened ?? []).includes(target),
-        path,
+        ([target, minimum]) => (window.__fleetStreamStub?.opened ?? []).filter((value) => value === target).length >= minimum,
+        [path, count] as const,
         { timeout: 15_000 },
       );
     },

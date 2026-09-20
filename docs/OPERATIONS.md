@@ -49,6 +49,17 @@ sandbox writes.
 This binding is an intentional reservation, not an approval side effect. Once a validated request claims
 the sandbox, a later approval-storage failure does not release it; retry the request in the same project.
 
+Migration runs are persisted before execution. Closing a tab only disconnects its event follower; run
+history replays ordered events and terminal outcomes. Workers renew server-timed leases independently of
+progress, and every event, completion, and external gateway call is fenced. Queued or leased-before-start
+work may be reclaimed only by the replica that owns its local source bytes. Started work is never taken
+over. A same-replica process restart records expired started work as `Interrupted`; a replacement replica
+cannot claim local bytes it does not own, so retained history remains the reconciliation source.
+Artifact manifests and hashes remain visible after workspace bytes expire.
+
+Platform schema v3 adds durable run, event, and artifact tables. The startup guard rejects older binaries
+after v3 is applied, so deploy migration-capable revisions forward; do not roll back to a v1/v2 binary.
+
 The Foundry endpoint configured by infrastructure must use the canonical hosted-agent form:
 
 ```

@@ -153,9 +153,14 @@ test.describe("workbench HTTP trust boundary", () => {
       headers: { [OWNER_HEADER]: OWNER_A },
       data: forgedRequest(workspaceId, projectId),
     });
-    expect(response.ok()).toBe(true);
+    expect(response.status()).toBe(202);
+    const runId = ((await response.json()) as { runId: string }).runId;
+    const events = await request.get(`/api/workbench/runs/${runId}/events`, {
+      headers: { [OWNER_HEADER]: OWNER_A },
+    });
+    expect(events.ok()).toBe(true);
 
-    const frames = (await response.text())
+    const frames = (await events.text())
       .split("\n\n")
       .map((value) => value.trim())
       .filter((value) => value.startsWith("data:"))
@@ -171,5 +176,38 @@ test.describe("workbench HTTP trust boundary", () => {
       phase: "SandboxDataMigration",
       state: "Executed",
     }));
+
+    const history = await request.get(`/api/workbench/projects/${projectId}/runs`, {
+      headers: { [OWNER_HEADER]: OWNER_A },
+    });
+    expect(history.status()).toBe(200);
+    expect(((await history.json()) as { runs: Array<{ runId: string }> }).runs)
+      .toContainEqual(expect.objectContaining({ runId }));
+    expect((await request.get(`/api/workbench/projects/${projectId}/runs`, {
+      headers: { [OWNER_HEADER]: OWNER_B },
+    })).status()).toBe(404);
+    expect((await request.get(`/api/workbench/runs/${runId}/events`, {
+      headers: { [OWNER_HEADER]: OWNER_B },
+    })).status()).toBe(404);
+  });
+
+  test("credential-like run text is rejected before durable persistence", async ({ request }, testInfo) => {
+    onlyDesktop(testInfo.project.name);
+    const projectId = await createProject(request, OWNER_A);
+    const workspaceId = await upload(request, OWNER_A, projectId);
+    const unsafe = forgedRequest(workspaceId, projectId) as Record<string, unknown>;
+    unsafe.applicationName = "password=hunter2";
+
+    const response = await request.post("/api/workbench/execute", {
+      headers: { [OWNER_HEADER]: OWNER_A },
+      data: unsafe,
+    });
+    expect(response.status()).toBe(400);
+
+    const history = await request.get(`/api/workbench/projects/${projectId}/runs`, {
+      headers: { [OWNER_HEADER]: OWNER_A },
+    });
+    expect(history.status()).toBe(200);
+    expect(((await history.json()) as { runs: unknown[] }).runs).toEqual([]);
   });
 });

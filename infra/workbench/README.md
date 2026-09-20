@@ -56,6 +56,12 @@ validation but before the approval record. It is not rolled back if approval per
 the project-to-sandbox assignment is a durable deployment boundary, while an approval is a separate
 human decision that may be requested again within that owner project.
 
+The Container App remains fixed at one replica. Browser disconnects resume through PostgreSQL event
+replay. Replica-specific workspace ownership prevents an overlapping replacement revision from claiming
+local bytes it does not hold. Started work is never executed twice; same-replica process loss records an
+`Interrupted` outcome, while replacement-replica history remains visible for reconciliation. Cross-replica
+execution requires a shared workspace volume and is intentionally unavailable in this stack.
+
 `Deploy-Workbench.ps1` is retained only for privileged first-time infrastructure and Entra bootstrap in an empty environment. It is not the application release path; routine releases must use the GitHub workflow. Bootstrap requires permission to create resource-group deployments and role assignments and to create or update an Entra application. It exposes that dedicated application as `api://<application-client-id>` and requests v2 access tokens so managed identities receive tokens from the same issuer the workbench validates. It never logs in on the user's behalf.
 
 For the existing development environment, routine releases use the validated workflow above.
