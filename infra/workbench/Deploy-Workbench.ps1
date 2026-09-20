@@ -150,15 +150,34 @@ try {
     }
 
     $credentialDisplayName = "container-app-auth-$ImageTag"
-    $image = "$($outputs.registryLoginServer.value)/$imageRepository`:$ImageTag"
-    & az acr repository show `
-        --name $registryName `
-        --image "$imageRepository`:$ImageTag" `
-        --output none `
+    $imageDigestOutput = & az acr manifest show-metadata `
+        --registry $registryName `
+        --name "$imageRepository`:$ImageTag" `
+        --query digest `
+        --output tsv `
         --only-show-errors
     if ($LASTEXITCODE -ne 0) {
         throw "The commit-addressed image '$imageRepository`:$ImageTag' is not in ACR. Build it with the GitHub runner before bootstrap deploys the app."
     }
+    $imageDigest = ([string] $imageDigestOutput).Trim()
+    if ($imageDigest -notmatch '^sha256:[0-9a-f]{64}$') {
+        throw "ACR returned an invalid digest for '$imageRepository`:$ImageTag'."
+    }
+    $imageRevisionOutput = & az acr manifest show-metadata `
+        --registry $registryName `
+        --name "$imageRepository@$imageDigest" `
+        --query 'annotations."org.opencontainers.image.revision"' `
+        --output tsv `
+        --only-show-errors
+    if ($LASTEXITCODE -ne 0) {
+        throw "The revision metadata for '$imageRepository@$imageDigest' could not be read from ACR."
+    }
+    $imageRevision = ([string] $imageRevisionOutput).Trim()
+    if ($imageRevision -notmatch '^[0-9a-f]{40}$' -or
+        !$imageRevision.StartsWith($ImageTag, [StringComparison]::Ordinal)) {
+        throw "Image '$imageRepository`:$ImageTag' does not carry matching immutable commit metadata."
+    }
+    $image = "$($outputs.registryLoginServer.value)/$imageRepository@$imageDigest"
 
     $applications = Invoke-AzJson -Arguments @('ad', 'app', 'list', '--display-name', $appDisplayName)
     $application = @($applications) | Where-Object displayName -eq $appDisplayName | Select-Object -First 1

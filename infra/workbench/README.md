@@ -88,7 +88,8 @@ $tag = $commit.Substring(0, 12)
   -ImageTag $tag
 ```
 
-The script refuses a missing or non-commit-shaped image tag and never invokes an image build.
+The script refuses a missing or non-commit-shaped image tag, resolves it to an ACR digest, and requires
+the image's immutable revision annotation to match that commit prefix. It never invokes an image build.
 
 ## Deployment verification and rollback
 
@@ -101,8 +102,10 @@ and confirms a second non-allowlisted identity is rejected. It never calls the e
 cannot project a migration mutation grant.
 
 The ACI runner is deleted after every attempt. If verification fails after the image switch, the
-workflow restores the previous image. Image rollback does not reverse PostgreSQL schema migrations or
-other external writes; platform migrations must remain additive and backward-compatible, and any
-unknown external-write outcome requires reconciliation rather than an automatic retry.
+workflow restores the digest-pinned previous template only when its immutable image labels declare
+support for the platform schema the new revision may have applied. An incompatible or unlabelled
+predecessor requires forward recovery and remains untouched. Image rollback does not reverse PostgreSQL
+schema migrations or other external writes; platform migrations must remain additive, and any unknown
+external-write outcome requires reconciliation rather than an automatic retry.
 
 The separate `infra/supporting` stack remains the preview-only destination foundation for Blob Storage, Key Vault, and Azure SQL. Those services are deliberately not granted to the web identity. PostgreSQL sandbox execution is configured independently.

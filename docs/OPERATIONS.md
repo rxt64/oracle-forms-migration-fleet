@@ -107,12 +107,23 @@ phase failure, not a skipped or successful build.
 
 ## Rollback
 
-Revisions are immutable, so rolling back is pointing traffic at the previous one:
+Each CI-built image records its supported platform-schema range in immutable
+`com.microsoft.ofmfleet.platform-schema-min` and `com.microsoft.ofmfleet.platform-schema-max` labels.
+After failed smoke verification, the deployment workflow restores the complete previous Container App
+template only when that range includes the schema version the attempted release may have applied. It then
+proves the restored image is both the latest-ready revision and healthy. Missing labels, an incompatible
+range, a failed template update, or failed readiness all fail the release.
 
-```powershell
-az containerapp update -n ca-ofmfleet-dev-ykbpnrpd -g rg-oracle-forms-migration-fleet-dev-b9f0e875 `
-  --image acrofmfleedevykbpnrpd.azurecr.io/migration-fleet-workbench:<previousTag>
-```
+An incompatible or unknown predecessor requires **forward recovery**. The workflow preserves the new
+revision and migrated data, writes the reason to the run summary, and exits unsuccessfully. Repair the
+fault in a new reviewed commit and deploy that exact SHA. Do not manually point the app at an older image:
+image rollback does not reverse PostgreSQL migrations, and older startup code deliberately rejects a
+newer platform schema.
+
+Smoke-runner cleanup is independent of recovery selection. A cleanup failure still fails the job even
+when compatible rollback succeeds or forward recovery is required. Remove any named residual ACI after
+confirming it belongs to the failed workflow run; never treat cleanup as evidence that release recovery
+succeeded.
 
 ## Failure modes
 

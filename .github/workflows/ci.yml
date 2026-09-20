@@ -49,6 +49,9 @@ jobs:
       - name: Test exact-SHA deployment verifier
         run: python3 .github/scripts/test_verify_required_ci.py
 
+      - name: Test schema-aware release recovery policy
+        run: python3 .github/scripts/test_release_recovery.py
+
       - name: Test post-deployment smoke client
         run: python3 .github/scripts/test_post_deploy_smoke.py
 
