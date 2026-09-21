@@ -94,8 +94,12 @@ public sealed class GeneratedApplicationProcessIntegrationTests
             frontendStarted,
             DateTimeOffset.UtcNow);
 
-        Assert.True(backendResult.Succeeded, backend.Output);
-        Assert.True(frontendResult.Succeeded, frontend.Output);
+        Assert.True(
+            backendResult.Succeeded,
+            $"{backendResult.State}: {string.Join(" | ", backendResult.Failures)}{Environment.NewLine}{backend.Output}");
+        Assert.True(
+            frontendResult.Succeeded,
+            $"{frontendResult.State}: {string.Join(" | ", frontendResult.Failures)}{Environment.NewLine}{frontend.Output}");
     }
 
     [Fact]
