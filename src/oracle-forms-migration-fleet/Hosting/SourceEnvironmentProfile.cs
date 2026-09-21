@@ -111,7 +111,7 @@ public static partial class SourceEnvironmentProfiles
             LastContradictions = [],
             DeclarationHash = string.Empty,
             CanonicalHash = string.Empty,
-            CreatedUtc = createdUtc,
+            CreatedUtc = NormalizeTimestamp(createdUtc),
         };
         IReadOnlyList<string> errors = Validate(candidate);
         if (errors.Count > 0)
@@ -219,11 +219,11 @@ public static partial class SourceEnvironmentProfiles
                 SourceEnvironmentProbeStatus.BlockedPrerequisite => SourceEnvironmentReadiness.BlockedPrerequisite,
                 _ => throw new ArgumentOutOfRangeException(nameof(result)),
             },
-            LastVerifiedUtc = result.Status == SourceEnvironmentProbeStatus.Verified ? result.ProbedUtc : null,
+            LastVerifiedUtc = result.Status == SourceEnvironmentProbeStatus.Verified ? NormalizeTimestamp(result.ProbedUtc) : null,
             LastProbeCapabilities = [.. result.Capabilities],
             LastBlockedPrerequisites = [.. result.BlockedPrerequisites],
             LastContradictions = [.. result.Contradictions],
-            CreatedUtc = createdUtc,
+            CreatedUtc = NormalizeTimestamp(createdUtc),
             CanonicalHash = string.Empty,
         };
         return updated with { CanonicalHash = Hash(updated) };
@@ -326,5 +326,11 @@ public static partial class SourceEnvironmentProfiles
         {
             throw new ArgumentException("The source probe capability states do not support its top-level status.", nameof(result));
         }
+    }
+
+    private static DateTimeOffset NormalizeTimestamp(DateTimeOffset value)
+    {
+        DateTimeOffset utc = value.ToUniversalTime();
+        return new DateTimeOffset(utc.Ticks - utc.Ticks % 10, TimeSpan.Zero);
     }
 }
