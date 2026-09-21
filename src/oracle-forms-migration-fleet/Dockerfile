@@ -19,6 +19,8 @@ RUN dotnet publish -c Release -r linux-musl-x64 --self-contained false -p:Publis
 FROM mcr.microsoft.com/dotnet/aspnet:10.0-alpine AS final
 # git clones customer source into a per-session sandbox; ca-certificates lets it verify the remote.
 RUN apk add --no-cache git ca-certificates openjdk21-jdk maven nodejs npm bubblewrap \
+ && chown root:root /usr/bin/bwrap \
+ && chmod u+s /usr/bin/bwrap \
  && mkdir -p /var/workbench-sources \
  && mkdir -p /home/app/.m2 /home/app/.npm \
  && chown -R app:app /var/workbench-sources /home/app

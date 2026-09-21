@@ -41,7 +41,11 @@ jobs:
           cache: maven
 
       - name: Install network-isolated test runner
-        run: sudo apt-get update && sudo apt-get install --yes bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+          sudo chown root:root /usr/bin/bwrap
+          sudo chmod u+s /usr/bin/bwrap
 
       # The client must be installed before the .NET build: the csproj only runs the vite build when
       # ClientApp/node_modules already exists, and would otherwise silently produce no wwwroot.
