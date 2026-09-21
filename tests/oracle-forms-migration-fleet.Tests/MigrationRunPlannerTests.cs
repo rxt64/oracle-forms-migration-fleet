@@ -435,6 +435,7 @@ public class MigrationRunPlannerTests
                 .. new[]
                 {
                     AttestationKind.SandboxMigrationCompleted,
+                    AttestationKind.GeneratedApplicationTestsPassed,
                     AttestationKind.DataReconciliationPassed,
                     AttestationKind.HumanAcceptanceSigned,
                 }.Select(kind => kind == replacement.Kind ? replacement : Attest(kind)),
@@ -449,6 +450,7 @@ public class MigrationRunPlannerTests
             attestations:
             [
                 Attest(AttestationKind.SandboxMigrationCompleted),
+                Attest(AttestationKind.GeneratedApplicationTestsPassed),
                 Attest(AttestationKind.DataReconciliationPassed),
                 Attest(AttestationKind.HumanAcceptanceSigned),
             ]));
@@ -467,6 +469,7 @@ public class MigrationRunPlannerTests
             attestations:
             [
                 Attest(AttestationKind.SandboxMigrationCompleted),
+                Attest(AttestationKind.GeneratedApplicationTestsPassed),
                 Attest(AttestationKind.DataReconciliationPassed),
                 Attest(AttestationKind.HumanAcceptanceSigned),
             ]));
@@ -520,6 +523,7 @@ public class MigrationRunPlannerTests
             attestations:
             [
                 Attest(AttestationKind.SandboxMigrationCompleted),
+                Attest(AttestationKind.GeneratedApplicationTestsPassed),
                 Attest(AttestationKind.DataReconciliationPassed),
                 Attest(AttestationKind.HumanAcceptanceSigned),
             ]));

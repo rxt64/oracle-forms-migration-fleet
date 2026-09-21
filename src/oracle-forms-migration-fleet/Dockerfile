@@ -18,15 +18,29 @@ RUN dotnet publish -c Release -r linux-musl-x64 --self-contained false -p:Publis
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0-alpine AS final
 # git clones customer source into a per-session sandbox; ca-certificates lets it verify the remote.
-RUN apk add --no-cache git ca-certificates openjdk21-jdk maven nodejs npm \
+RUN apk add --no-cache git ca-certificates openjdk21-jdk maven nodejs npm bubblewrap \
  && mkdir -p /var/workbench-sources \
  && mkdir -p /home/app/.m2 /home/app/.npm \
  && chown -R app:app /var/workbench-sources /home/app
+COPY --from=build /src/Fleet/Execution/Templates/Verification /tmp/ofm-verification
+RUN mkdir -p /opt/ofm-verification-cache/m2 /opt/ofm-verification-cache/npm \
+ && mvn --batch-mode --no-transfer-progress \
+	 -f /tmp/ofm-verification/pom.xml \
+	 -Dmaven.repo.local=/opt/ofm-verification-cache/m2 \
+	 dependency:go-offline \
+ && npm ci --prefix /tmp/ofm-verification/Generic --ignore-scripts --no-audit --no-fund \
+	 --cache=/opt/ofm-verification-cache/npm \
+ && npm ci --prefix /tmp/ofm-verification/Northstar --ignore-scripts --no-audit --no-fund \
+	 --cache=/opt/ofm-verification-cache/npm \
+ && rm -rf /tmp/ofm-verification \
+ && chmod -R a-w /opt/ofm-verification-cache
 WORKDIR /app
 COPY --from=build /app .
 ENV WORKBENCH_SOURCE_ROOT=/var/workbench-sources \
 	HOME=/home/app \
-	MAVEN_OPTS=-Xmx512m
+	MAVEN_OPTS=-Xmx512m \
+	WORKBENCH_VERIFICATION_MAVEN_REPOSITORY=/opt/ofm-verification-cache/m2 \
+	WORKBENCH_VERIFICATION_NPM_CACHE=/opt/ofm-verification-cache/npm
 USER app
 EXPOSE 8088
 ENTRYPOINT ["dotnet", "oracle-forms-migration-fleet.dll"]

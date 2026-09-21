@@ -64,6 +64,9 @@ public enum MigrationPhase
 
     /// <summary>Added after the values above were already in persisted output; runs before conversion.</summary>
     SourceNormalization = 11,
+
+    /// <summary>Executes tests against generated application output without asserting source equivalence.</summary>
+    GeneratedApplicationVerification = 12,
 }
 
 /// <summary>What a phase is allowed to change. Drives which approval gate applies.</summary>
@@ -97,6 +100,7 @@ public enum ArtifactKind
     DataMigrationScript,
     TestSuite,
     ValidationReport,
+    ExecutableVerificationReport,
     ReconciliationReport,
     CutoverRunbook,
 }
@@ -108,6 +112,7 @@ public enum AttestationKind
     DifferentialBehaviorTestPassed,
     DataReconciliationPassed,
     HumanAcceptanceSigned,
+    GeneratedApplicationTestsPassed,
 }
 
 /// <summary>A workspace-relative artifact path. Never a credential, URL, or connection string.</summary>

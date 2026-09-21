@@ -189,10 +189,10 @@ public static class MigrationWorkbenchCatalog
 
         new(WorkbenchStep.MigrateAndValidate, 5,
             "Migrate and validate",
-            "Replay the regression baseline, load a representative data set into the sandbox, and reconcile it against the source.",
-            [MigrationPhase.DifferentialBehaviorTesting, MigrationPhase.SandboxDataMigration, MigrationPhase.DataReconciliation],
+            "Execute generated application tests, replay the regression baseline, load a representative data set into the sandbox, and reconcile it against the source.",
+            [MigrationPhase.GeneratedApplicationVerification, MigrationPhase.DifferentialBehaviorTesting, MigrationPhase.SandboxDataMigration, MigrationPhase.DataReconciliation],
             RequiresExecutionAdapter: true,
-            // SandboxDataMigration runs; behaviour testing and reconciliation have no adapter.
+            // Generated application verification and sandbox migration run; differential testing has no adapter.
             AdapterConnected: true,
             ["managed-identity", "key-vault", "database-target"]),
 

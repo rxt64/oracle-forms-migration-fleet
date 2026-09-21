@@ -354,7 +354,9 @@ public static class NorthstarBankingApplicationProfile
             new GeneratedFile("frontend/index.html", BrowserShell(), "Browser client shell carrying the source application's nine modules."),
             new GeneratedFile("frontend/public/app.js", BrowserScript(), "Browser client behaviour, calling every workflow route."),
             new GeneratedFile("frontend/public/styles.css", BrowserStyles(), "Browser client presentation, unchanged from the source application."),
+            new GeneratedFile("frontend/tests/app.test.js", BrowserInteractionTest(), "Executable browser interaction test for generated Northstar navigation."),
             new GeneratedFile("frontend/package.json", BrowserPackage(), "Vite build for the static browser client. No framework dependency."),
+            new GeneratedFile("frontend/package-lock.json", GeneratedApplicationVerificationTemplates.Read("Northstar/package-lock.json"), "Pinned dependency lock for offline generated UI verification."),
             new GeneratedFile("frontend/vite.config.ts", BrowserViteConfig(), "Vite production build configuration."),
         ];
     }
@@ -2100,21 +2102,33 @@ public static class NorthstarBankingApplicationProfile
     }
 
     private static string BrowserPackage() =>
-        """
-        {
-            "name": "migrated-banking-ui",
-            "private": true,
-            "version": "1.0.0",
-            "type": "module",
-            "scripts": {
-                "build": "vite build"
-            },
-            "dependencies": {
-                "vite": "6.1.0"
-            }
-        }
+        GeneratedApplicationVerificationTemplates.Read("Northstar/package.json");
 
-        """;
+        private static string BrowserInteractionTest() =>
+                """
+                import { readFileSync } from "node:fs";
+                import { afterEach, expect, it, vi } from "vitest";
+
+                afterEach(() => vi.unstubAllGlobals());
+
+                it("opens a generated public workflow module", async () => {
+                    const shell = readFileSync("index.html", "utf8");
+                    const browserPrelude = "<script>window.matchMedia=()=>({matches:false,addEventListener(){},removeEventListener(){}})</script>";
+                    document.open();
+                    document.write(shell.replace("<head>", `<head>${browserPrelude}`));
+                    document.close();
+                    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ status: "ok" }), {
+                        status: 200,
+                        headers: { "content-type": "application/json" },
+                    })));
+
+                    await import("../public/app.js");
+                    document.querySelector('[data-module="interest"]').click();
+
+                    expect(document.querySelector("#panel-interest").hidden).toBe(false);
+                    expect(document.querySelector("#tab-interest").getAttribute("aria-selected")).toBe("true");
+                });
+                """;
 
     private static string BrowserViteConfig() =>
         """

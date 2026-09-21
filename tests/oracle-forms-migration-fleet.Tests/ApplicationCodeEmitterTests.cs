@@ -22,7 +22,18 @@ public class ApplicationCodeEmitterTests
 
         Assert.Equal(tables, conversion.Files.Count(file => file.Path.Contains("/domain/", StringComparison.Ordinal)));
         Assert.Equal(tables, conversion.Files.Count(file => file.Path.Contains("/repository/", StringComparison.Ordinal)));
-        Assert.Equal(tables, conversion.Files.Count(file => file.Path.Contains("/api/", StringComparison.Ordinal)));
+        Assert.Equal(tables, conversion.Files.Count(file => file.Path.EndsWith("Controller.java", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public void Generated_tiers_include_executable_backend_and_frontend_tests()
+    {
+        ApplicationConversion conversion = Convert();
+
+        Assert.Contains(conversion.Files, file => file.Path.EndsWith("ControllerTest.java", StringComparison.Ordinal));
+        Assert.Contains(conversion.Files, file => file.Path == "frontend/src/App.test.tsx");
+        Assert.Contains("vitest run", File(conversion, "package.json"), StringComparison.Ordinal);
+        Assert.Contains("@testing-library/react", File(conversion, "package.json"), StringComparison.Ordinal);
     }
 
     [Fact]

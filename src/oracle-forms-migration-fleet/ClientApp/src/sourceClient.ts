@@ -65,6 +65,8 @@ export interface DurableRunSummary {
   lastSequence: number;
   cancelRequestedUtc?: string | null;
   failureReason?: string | null;
+  applicationVerificationState?: string | null;
+  applicationVerificationDetail?: string | null;
 }
 
 export const OPERATION_LABELS: Readonly<Record<string, string>> = {

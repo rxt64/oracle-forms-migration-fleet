@@ -94,13 +94,16 @@ public sealed class MigrationExecutor
         IDataMigrationGateway? dataGateway = null,
         Agents.CritiqueRepairOrchestrator? orchestrator = null,
         ProgramUnitRepairLoop? programUnitRepair = null,
-        IApplicationBuildGateway? applicationBuild = null) =>
+        IApplicationBuildGateway? applicationBuild = null,
+        IApplicationTestGateway? applicationTests = null,
+        ITargetApplicationVerificationGateway? targetVerification = null) =>
     [
         new SourceAnalysisAdapter(),
         new SourceNormalizationAdapter(),
         new DatabaseConversionAdapter(reviewer, orchestrator),
         new ApplicationCodeConversionAdapter(reviewer),
         new BuildAndStaticValidationAdapter(applicationBuild),
+        new GeneratedApplicationVerificationAdapter(applicationTests, targetVerification),
         new SandboxDataMigrationAdapter(dataGateway, programUnitRepair),
         new DataReconciliationAdapter(dataGateway),
     ];
@@ -113,6 +116,7 @@ public sealed class MigrationExecutor
     /// </summary>
     private static AttestationKind? AttestationFor(MigrationPhase phase) => phase switch
     {
+        MigrationPhase.GeneratedApplicationVerification => AttestationKind.GeneratedApplicationTestsPassed,
         MigrationPhase.DifferentialBehaviorTesting => AttestationKind.DifferentialBehaviorTestPassed,
         MigrationPhase.SandboxDataMigration => AttestationKind.SandboxMigrationCompleted,
         MigrationPhase.DataReconciliation => AttestationKind.DataReconciliationPassed,
@@ -165,7 +169,13 @@ public sealed class MigrationExecutor
 
         [MigrationPhase.DifferentialBehaviorTesting] =
         [
+            new(MigrationPhase.GeneratedApplicationVerification, scope => scope.Produces(MigrationPhase.GeneratedApplicationVerification)),
+        ],
+
+        [MigrationPhase.GeneratedApplicationVerification] =
+        [
             new(MigrationPhase.BuildAndStaticValidation, scope => scope.Produces(MigrationPhase.BuildAndStaticValidation)),
+            new(MigrationPhase.DatabaseConversion, scope => scope.Produces(MigrationPhase.DatabaseConversion)),
         ],
     };
 
