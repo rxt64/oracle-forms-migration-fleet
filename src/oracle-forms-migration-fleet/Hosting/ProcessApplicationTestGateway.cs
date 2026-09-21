@@ -226,7 +226,7 @@ public sealed class ProcessApplicationTestGateway : IApplicationTestGateway
                 "node",
                 [
                     "-e",
-                    "const fs=require('node:fs');if(fs.existsSync(process.argv[1]))process.exit(2);const s=require('node:net').connect(80,'169.254.169.254');s.setTimeout(500,()=>process.exit(0));s.on('error',()=>process.exit(0));s.on('connect',()=>process.exit(3));",
+                    "const fs=require('node:fs'),dns=require('node:dns').promises,net=require('node:net');if(fs.existsSync(process.argv[1]))process.exit(2);dns.lookup('localhost').then(({address})=>{if(address!=='127.0.0.1'&&address!=='::1')process.exit(4);const s=net.connect(80,'169.254.169.254');s.setTimeout(500,()=>process.exit(0));s.on('error',()=>process.exit(0));s.on('connect',()=>process.exit(3));}).catch(()=>process.exit(5));",
                     forbiddenHostPath,
                 ],
                 runner,
@@ -410,6 +410,7 @@ public sealed class ProcessApplicationTestGateway : IApplicationTestGateway
         AddReadOnlyMount(start, "/etc/passwd");
         AddReadOnlyMount(start, "/etc/group");
         AddReadOnlyMount(start, "/etc/nsswitch.conf");
+        AddReadOnlyMount(start, "/etc/hosts");
         AddReadOnlyMount(start, "/etc/localtime");
 
         AddPair(start, "--dev", "/dev");
