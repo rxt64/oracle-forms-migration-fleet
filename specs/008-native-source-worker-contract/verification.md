@@ -16,6 +16,10 @@
 
 The Windows job publishes and executes the real x86 worker, checks positive and negative protocol exits,
 and runs the host-to-worker integration test. Deployment depends on this job and the exact-SHA verifier
-requires its successful conclusion. A GitHub-hosted run remains required for merge evidence.
+requires its successful conclusion.
+
+PR #32 CI run `35656048642` passed at implementation commit
+`ff183901442e89b8b10c8147aa57fa306608b7b9`: `Native source worker contract`, `build-and-test`,
+`Container image builds`, and `Guided UI browser checks` all completed successfully.
 
 Native Forms execution and extraction remain blocked by spec 007 prerequisites.
