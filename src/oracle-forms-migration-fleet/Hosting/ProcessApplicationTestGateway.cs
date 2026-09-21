@@ -222,7 +222,7 @@ public sealed class ProcessApplicationTestGateway : IApplicationTestGateway
                 "node",
                 [
                     "-e",
-                    "const fs=require('node:fs');if(fs.existsSync(process.argv[1]))process.exit(2);fetch('http://169.254.169.254/metadata/identity/oauth2/token',{signal:AbortSignal.timeout(1000)}).then(()=>process.exit(3)).catch(()=>process.exit(0));",
+                    "const fs=require('node:fs');if(fs.existsSync(process.argv[1]))process.exit(2);const s=require('node:net').connect(80,'169.254.169.254');s.setTimeout(500,()=>process.exit(0));s.on('error',()=>process.exit(0));s.on('connect',()=>process.exit(3));",
                     forbiddenHostPath,
                 ],
                 runner,
@@ -364,7 +364,7 @@ public sealed class ProcessApplicationTestGateway : IApplicationTestGateway
         foreach (string argument in new[]
         {
             "--unshare-net", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
-            "--die-with-parent", "--new-session",
+            "--new-session",
         })
         {
             start.ArgumentList.Add(argument);

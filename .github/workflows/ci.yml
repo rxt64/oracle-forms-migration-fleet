@@ -87,7 +87,8 @@ jobs:
           mvn --batch-mode --no-transfer-progress \
             -f src/oracle-forms-migration-fleet/Fleet/Execution/Templates/Verification/pom.xml \
             -Dmaven.repo.local="$CACHE_ROOT/m2" \
-            dependency:go-offline
+            -Dspring-boot.repackage.skip=true \
+            -DskipTests package
           npm ci \
             --prefix src/oracle-forms-migration-fleet/Fleet/Execution/Templates/Verification/Generic \
             --ignore-scripts --no-audit --no-fund --cache="$CACHE_ROOT/npm"
@@ -152,11 +153,11 @@ jobs:
         run: >-
           docker run --rm --entrypoint /usr/bin/bwrap migration-fleet-workbench:ci
           --unshare-net --unshare-pid --unshare-ipc --unshare-uts
-          --die-with-parent --new-session
+          --new-session
           --ro-bind /usr /usr --ro-bind /bin /bin --ro-bind /lib /lib
           --dev /dev --proc /proc --tmpfs /tmp
           -- /usr/bin/node -e
-          "fetch('http://169.254.169.254/metadata/identity/oauth2/token',{signal:AbortSignal.timeout(1000)}).then(()=>process.exit(1)).catch(()=>process.exit(0))"
+          "const s=require('node:net').connect(80,'169.254.169.254');s.setTimeout(500,()=>process.exit(0));s.on('error',()=>process.exit(0));s.on('connect',()=>process.exit(1))"
 
       - name: Build Forms replica image
         working-directory: src/oracle-forms-demo

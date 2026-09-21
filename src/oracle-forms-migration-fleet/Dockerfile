@@ -14,11 +14,13 @@ COPY --from=client-build /src/wwwroot ./wwwroot
 # collapsed into one publish because ReadyToRun must be set at restore time
 # too (otherwise NETSDK1094). --self-contained false keeps the framework-
 # dependent layout, so this costs image size but not a runtime dependency.
-RUN dotnet publish -c Release -r linux-musl-x64 --self-contained false -p:PublishReadyToRun=true -p:SkipClientBuild=true -o /app
+RUN dotnet publish -c Release -r linux-x64 --self-contained false -p:PublishReadyToRun=true -p:SkipClientBuild=true -o /app
 
-FROM mcr.microsoft.com/dotnet/aspnet:10.0-alpine AS final
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS final
 # git clones customer source into a per-session sandbox; ca-certificates lets it verify the remote.
-RUN apk add --no-cache git ca-certificates openjdk21-jdk maven nodejs npm bubblewrap \
+RUN apt-get update \
+ && apt-get install --yes --no-install-recommends git ca-certificates openjdk-21-jdk maven nodejs npm bubblewrap \
+ && rm -rf /var/lib/apt/lists/* \
  && chown root:root /usr/bin/bwrap \
  && chmod u+s /usr/bin/bwrap \
  && mkdir -p /var/workbench-sources \
@@ -29,7 +31,8 @@ RUN mkdir -p /opt/ofm-verification-cache/m2 /opt/ofm-verification-cache/npm \
  && mvn --batch-mode --no-transfer-progress \
 	 -f /tmp/ofm-verification/pom.xml \
 	 -Dmaven.repo.local=/opt/ofm-verification-cache/m2 \
-	 dependency:go-offline \
+	 -Dspring-boot.repackage.skip=true \
+	 -DskipTests package \
  && npm ci --prefix /tmp/ofm-verification/Generic --ignore-scripts --no-audit --no-fund \
 	 --cache=/opt/ofm-verification-cache/npm \
  && npm ci --prefix /tmp/ofm-verification/Northstar --ignore-scripts --no-audit --no-fund \
