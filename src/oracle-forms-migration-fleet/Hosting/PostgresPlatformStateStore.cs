@@ -3,6 +3,8 @@
 using Azure.Core;
 using Npgsql;
 using NpgsqlTypes;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace OracleFormsMigrationFleet.Hosting;
 
@@ -71,6 +73,10 @@ public sealed record PlatformDatabaseOptions
 /// </summary>
 public sealed class PostgresPlatformStateStore : IPlatformStateStore, IAsyncDisposable
 {
+    private static readonly JsonSerializerOptions s_json = new(JsonSerializerDefaults.Web)
+    {
+        Converters = { new JsonStringEnumConverter() },
+    };
     private static readonly string[] s_scope = ["https://ossrdbms-aad.database.windows.net/.default"];
 
     private readonly PlatformDatabaseOptions _options;
@@ -391,6 +397,57 @@ public sealed class PostgresPlatformStateStore : IPlatformStateStore, IAsyncDisp
         return profiles;
     }
 
+    public async Task<SourceEnvironmentProfile?> CreateSourceEnvironmentProfileAsync(
+        SourceEnvironmentProfile profile, CancellationToken cancellationToken)
+    {
+        await using NpgsqlConnection connection = await ConnectAsync(cancellationToken).ConfigureAwait(false);
+        await using NpgsqlCommand command = new(SourceEnvironmentProfileInsertSql(_schema), connection);
+        BindSourceEnvironment(command, profile);
+        return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 0 ? null : profile;
+    }
+
+    public async Task<SourceEnvironmentProfile?> GetSourceEnvironmentProfileAsync(
+        string tenantId, string projectId, string sourceEnvironmentId, int? version, CancellationToken cancellationToken)
+    {
+        await using NpgsqlConnection connection = await ConnectAsync(cancellationToken).ConfigureAwait(false);
+        await using NpgsqlCommand command = new(
+            $"""
+            {SourceEnvironmentProfileSelectSql(_schema)}
+            where tenant_id = @tenant and project_id = @project and source_environment_id = @source
+              and (@version is null or version = @version)
+            order by version desc limit 1
+            """, connection);
+        command.Parameters.AddWithValue("tenant", tenantId);
+        command.Parameters.AddWithValue("project", projectId);
+        command.Parameters.AddWithValue("source", sourceEnvironmentId);
+        command.Parameters.AddWithValue("version", NpgsqlDbType.Integer, version.HasValue ? version.Value : DBNull.Value);
+        await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadSourceEnvironmentProfile(reader) : null;
+    }
+
+    public async Task<IReadOnlyList<SourceEnvironmentProfile>> SourceEnvironmentProfilesAsync(
+        string tenantId, string projectId, CancellationToken cancellationToken)
+    {
+        await using NpgsqlConnection connection = await ConnectAsync(cancellationToken).ConfigureAwait(false);
+        await using NpgsqlCommand command = new(
+            $"""
+                 select distinct on (source_environment_id) profile_json::text, project_id, source_environment_id,
+                     version, tenant_id, canonical_hash, created_utc
+            from {_schema}.source_environment_profile
+            where tenant_id = @tenant and project_id = @project
+            order by source_environment_id, version desc
+            """, connection);
+        command.Parameters.AddWithValue("tenant", tenantId);
+        command.Parameters.AddWithValue("project", projectId);
+        List<SourceEnvironmentProfile> profiles = [];
+        await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            profiles.Add(ReadSourceEnvironmentProfile(reader));
+        }
+        return profiles;
+    }
+
     public async Task<PlatformApproval> CreateApprovalAsync(PlatformApproval approval, CancellationToken cancellationToken)
     {
         await using NpgsqlConnection connection = await ConnectAsync(cancellationToken).ConfigureAwait(false);
@@ -565,6 +622,17 @@ public sealed class PostgresPlatformStateStore : IPlatformStateStore, IAsyncDisp
         from {schema}.target_profile
         """;
 
+    public static string SourceEnvironmentProfileInsertSql(string schema) =>
+        $"""
+        insert into {schema}.source_environment_profile
+            (project_id, source_environment_id, version, tenant_id, canonical_hash, created_utc, profile_json)
+        values (@project, @source, @version, @tenant, @hash, @created, cast(@json as jsonb))
+        on conflict (project_id, source_environment_id, version) do nothing
+        """;
+
+    public static string SourceEnvironmentProfileSelectSql(string schema) =>
+        $"select profile_json::text, project_id, source_environment_id, version, tenant_id, canonical_hash, created_utc from {schema}.source_environment_profile";
+
     public static string ApprovalSelectSql(string schema) =>
         $"""
         select approval_id, project_id, tenant_id, requested_by_object_id, requested_utc, state, scope, required_role,
@@ -626,6 +694,17 @@ public sealed class PostgresPlatformStateStore : IPlatformStateStore, IAsyncDisp
         command.Parameters.AddWithValue("stackBackEnd", profile.StackBackEnd);
         command.Parameters.AddWithValue("canonicalHash", profile.CanonicalHash);
         command.Parameters.AddWithValue("created", NpgsqlDbType.TimestampTz, profile.CreatedUtc);
+    }
+
+    private static void BindSourceEnvironment(NpgsqlCommand command, SourceEnvironmentProfile profile)
+    {
+        command.Parameters.AddWithValue("project", profile.ProjectId);
+        command.Parameters.AddWithValue("source", profile.SourceEnvironmentId);
+        command.Parameters.AddWithValue("version", profile.Version);
+        command.Parameters.AddWithValue("tenant", profile.TenantId);
+        command.Parameters.AddWithValue("hash", profile.CanonicalHash);
+        command.Parameters.AddWithValue("created", NpgsqlDbType.TimestampTz, profile.CreatedUtc);
+        command.Parameters.AddWithValue("json", JsonSerializer.Serialize(profile, s_json));
     }
 
     private static void BindApproval(NpgsqlCommand command, PlatformApproval approval)
@@ -698,6 +777,37 @@ public sealed class PostgresPlatformStateStore : IPlatformStateStore, IAsyncDisp
         CanonicalHash = reader.GetString(17),
         CreatedUtc = reader.GetFieldValue<DateTimeOffset>(18),
     };
+
+    private static SourceEnvironmentProfile ReadSourceEnvironmentProfile(NpgsqlDataReader reader)
+    {
+        SourceEnvironmentProfile profile = DeserializeSourceEnvironmentProfile(reader.GetString(0));
+        if (!string.Equals(profile.ProjectId, reader.GetString(1), StringComparison.Ordinal) ||
+            !string.Equals(profile.SourceEnvironmentId, reader.GetString(2), StringComparison.Ordinal) ||
+            profile.Version != reader.GetInt32(3) ||
+            !string.Equals(profile.TenantId, reader.GetString(4), StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(profile.CanonicalHash, reader.GetString(5), StringComparison.Ordinal) ||
+            profile.CreatedUtc != reader.GetFieldValue<DateTimeOffset>(6))
+        {
+            throw new InvalidOperationException("A stored source environment profile disagrees with its indexed identity columns.");
+        }
+        return profile;
+    }
+
+    internal static SourceEnvironmentProfile DeserializeSourceEnvironmentProfile(string json)
+    {
+        try
+        {
+            return SourceEnvironmentProfiles.VerifyStored(
+                JsonSerializer.Deserialize<SourceEnvironmentProfile>(json, s_json)
+                    ?? throw new InvalidOperationException("A stored source environment profile could not be read."));
+        }
+        catch (Exception exception) when (exception is JsonException or ArgumentException or NullReferenceException)
+        {
+            throw new InvalidOperationException(
+                "A stored source environment profile failed deserialization or integrity validation.",
+                exception);
+        }
+    }
 
     private static PlatformApproval ReadApproval(NpgsqlDataReader reader) => new()
     {

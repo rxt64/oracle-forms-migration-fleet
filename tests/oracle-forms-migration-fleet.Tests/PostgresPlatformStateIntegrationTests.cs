@@ -150,6 +150,50 @@ public sealed class PostgresPlatformStateIntegrationTests : IAsyncLifetime
 
     [Fact]
     [Trait("Category", "PostgresIntegration")]
+    public async Task Source_environment_profiles_round_trip_through_schema_v4()
+    {
+        PostgresPlatformStateStore? configured = CreateStore();
+        if (configured is null)
+        {
+            RequireConfiguredConnection();
+            return;
+        }
+        await using PostgresPlatformStateStore store = configured;
+        await store.InitializeAsync(CancellationToken.None);
+        PlatformAccessService platform = new(store, sandbox: null);
+        WorkbenchActor requester = Actor(Requester);
+        PlatformProject project = (await platform.CreateProjectAsync(
+            requester, "Source profile integration", CancellationToken.None)).Value!;
+        SourceEnvironmentDeclaration declaration = new(
+            "legacy-order-entry",
+            "Legacy Order Entry",
+            SourceConnector.FormsBuilderWorker,
+            "6i",
+            "9i",
+            "legacy-order-entry",
+            ["LEGACY_LAB"],
+            ["oracle-source-credential"]);
+
+        SourceEnvironmentProfile first = (await platform.EnsureSourceEnvironmentProfileAsync(
+            requester, project.ProjectId, declaration, CancellationToken.None)).Value!;
+        SourceEnvironmentProfile same = (await platform.EnsureSourceEnvironmentProfileAsync(
+            requester, project.ProjectId, declaration, CancellationToken.None)).Value!;
+        SourceEnvironmentProfile changed = (await platform.EnsureSourceEnvironmentProfileAsync(
+            requester,
+            project.ProjectId,
+            declaration with { PathAlias = "legacy-order-entry-v2" },
+            CancellationToken.None)).Value!;
+        SourceEnvironmentProfile? exact = await store.GetSourceEnvironmentProfileAsync(
+            Tenant, project.ProjectId, declaration.SourceEnvironmentId, 1, CancellationToken.None);
+
+        Assert.Equal(first.CanonicalHash, same.CanonicalHash);
+        Assert.Equal(2, changed.Version);
+        Assert.Equal(first.CanonicalHash, exact!.CanonicalHash);
+        Assert.Single(await store.SourceEnvironmentProfilesAsync(Tenant, project.ProjectId, CancellationToken.None));
+    }
+
+    [Fact]
+    [Trait("Category", "PostgresIntegration")]
     public async Task Concurrent_initialization_applies_each_migration_once()
     {
         PostgresPlatformStateStore? configured = CreateStore();

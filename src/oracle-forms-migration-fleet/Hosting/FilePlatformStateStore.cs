@@ -206,6 +206,46 @@ public sealed class FilePlatformStateStore : IPlatformStateStore, ISandboxProjec
             .Select(group => group.OrderByDescending(profile => profile.Version).First())
             .OrderBy(profile => profile.CreatedUtc)], cancellationToken);
 
+    public Task<SourceEnvironmentProfile?> CreateSourceEnvironmentProfileAsync(
+        SourceEnvironmentProfile profile, CancellationToken cancellationToken) =>
+        MutateAsync<SourceEnvironmentProfile?>(document =>
+        {
+            bool duplicate = document.SourceEnvironmentProfiles.Any(stored =>
+                string.Equals(stored.TenantId, profile.TenantId, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(stored.ProjectId, profile.ProjectId, StringComparison.Ordinal) &&
+                string.Equals(stored.SourceEnvironmentId, profile.SourceEnvironmentId, StringComparison.Ordinal) &&
+                stored.Version == profile.Version);
+            if (duplicate)
+            {
+                return null;
+            }
+            document.SourceEnvironmentProfiles.Add(profile);
+            return profile;
+        }, cancellationToken);
+
+    public Task<SourceEnvironmentProfile?> GetSourceEnvironmentProfileAsync(
+        string tenantId, string projectId, string sourceEnvironmentId, int? version, CancellationToken cancellationToken) =>
+        ReadAsync(document => document.SourceEnvironmentProfiles
+            .Where(profile =>
+                string.Equals(profile.TenantId, tenantId, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(profile.ProjectId, projectId, StringComparison.Ordinal) &&
+                string.Equals(profile.SourceEnvironmentId, sourceEnvironmentId, StringComparison.Ordinal) &&
+                (version is null || profile.Version == version))
+            .OrderByDescending(profile => profile.Version)
+            .Select(SourceEnvironmentProfiles.VerifyStored)
+            .FirstOrDefault(), cancellationToken);
+
+    public Task<IReadOnlyList<SourceEnvironmentProfile>> SourceEnvironmentProfilesAsync(
+        string tenantId, string projectId, CancellationToken cancellationToken) =>
+        ReadAsync(document => (IReadOnlyList<SourceEnvironmentProfile>)
+        [.. document.SourceEnvironmentProfiles
+            .Where(profile =>
+                string.Equals(profile.TenantId, tenantId, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(profile.ProjectId, projectId, StringComparison.Ordinal))
+            .GroupBy(profile => profile.SourceEnvironmentId, StringComparer.Ordinal)
+            .Select(group => SourceEnvironmentProfiles.VerifyStored(group.OrderByDescending(profile => profile.Version).First()))
+            .OrderBy(profile => profile.SourceEnvironmentId, StringComparer.Ordinal)], cancellationToken);
+
     public Task<string> BindSandboxProjectAsync(
         string tenantId, string projectId, CancellationToken cancellationToken) =>
         MutateAsync(document =>
@@ -361,6 +401,8 @@ public sealed class FilePlatformStateStore : IPlatformStateStore, ISandboxProjec
         public List<PlatformMembership> Memberships { get; set; } = [];
 
         public List<PlatformTargetProfile> TargetProfiles { get; set; } = [];
+
+        public List<SourceEnvironmentProfile> SourceEnvironmentProfiles { get; set; } = [];
 
         public Dictionary<string, string> SandboxProjectBindings { get; set; } =
             new(StringComparer.OrdinalIgnoreCase);

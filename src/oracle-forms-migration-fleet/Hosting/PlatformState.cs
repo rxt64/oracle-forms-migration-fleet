@@ -346,6 +346,14 @@ public interface IPlatformStateStore
 
     Task<IReadOnlyList<PlatformTargetProfile>> TargetProfilesAsync(string tenantId, string projectId, CancellationToken cancellationToken);
 
+    Task<SourceEnvironmentProfile?> CreateSourceEnvironmentProfileAsync(SourceEnvironmentProfile profile, CancellationToken cancellationToken);
+
+    Task<SourceEnvironmentProfile?> GetSourceEnvironmentProfileAsync(
+        string tenantId, string projectId, string sourceEnvironmentId, int? version, CancellationToken cancellationToken);
+
+    Task<IReadOnlyList<SourceEnvironmentProfile>> SourceEnvironmentProfilesAsync(
+        string tenantId, string projectId, CancellationToken cancellationToken);
+
     Task<PlatformApproval> CreateApprovalAsync(PlatformApproval approval, CancellationToken cancellationToken);
 
     Task<PlatformApproval?> GetApprovalAsync(string tenantId, string approvalId, CancellationToken cancellationToken);

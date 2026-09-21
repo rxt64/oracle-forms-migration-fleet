@@ -947,6 +947,18 @@ public class PlatformStateTests : IDisposable
             string tenantId, string projectId, CancellationToken cancellationToken) =>
             inner.TargetProfilesAsync(tenantId, projectId, cancellationToken);
 
+        public Task<SourceEnvironmentProfile?> CreateSourceEnvironmentProfileAsync(
+            SourceEnvironmentProfile profile, CancellationToken cancellationToken) =>
+            inner.CreateSourceEnvironmentProfileAsync(profile, cancellationToken);
+
+        public Task<SourceEnvironmentProfile?> GetSourceEnvironmentProfileAsync(
+            string tenantId, string projectId, string sourceEnvironmentId, int? version, CancellationToken cancellationToken) =>
+            inner.GetSourceEnvironmentProfileAsync(tenantId, projectId, sourceEnvironmentId, version, cancellationToken);
+
+        public Task<IReadOnlyList<SourceEnvironmentProfile>> SourceEnvironmentProfilesAsync(
+            string tenantId, string projectId, CancellationToken cancellationToken) =>
+            inner.SourceEnvironmentProfilesAsync(tenantId, projectId, cancellationToken);
+
         public Task<PlatformApproval> CreateApprovalAsync(
             PlatformApproval approval, CancellationToken cancellationToken) =>
             inner.CreateApprovalAsync(approval, cancellationToken);

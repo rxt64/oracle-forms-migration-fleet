@@ -16,6 +16,16 @@ ever made public.
 | Entra app | `Migration Fleet Workbench - dev` |
 | Foundry | account `cog-czusrhcg4gpm2`, project `oracle-forms-migration-fleet-dev`, agent `oracle-forms-migration-fleet` |
 
+## Native Forms source readiness
+
+Declare a source environment from the project panel before acquiring a native Forms estate. The browser sends
+only expected release labels, a server path alias, schema allowlist, and secret-reference names. `Check
+connection` records a typed probe result; it does not install software or trust caller-supplied observations.
+
+`BlockedPrerequisite` means no native extraction ran. For the Forms 6i pilot, clear it only after an authorized
+operator supplies Forms 6i media, matching x86 Open API libraries, a genuine FMB, and a verified Oracle
+client/database tuple on the separate Windows worker. Never point the web process at an Oracle DLL directory.
+
 Look up the pieces you need:
 
 ```powershell

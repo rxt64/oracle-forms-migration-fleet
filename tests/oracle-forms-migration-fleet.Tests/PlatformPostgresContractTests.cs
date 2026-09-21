@@ -146,6 +146,39 @@ public class PlatformPostgresContractTests
     }
 
     [Fact]
+    public void Version_four_adds_immutable_source_environment_profiles()
+    {
+        string migration = string.Join("\n", PlatformSchema.Migrations(Schema)[3].Statements);
+
+        Assert.Contains($"create table if not exists {Schema}.source_environment_profile", migration, StringComparison.Ordinal);
+        Assert.Contains("primary key (project_id, source_environment_id, version)", migration, StringComparison.Ordinal);
+        Assert.Contains($"references {Schema}.project (project_id)", migration, StringComparison.Ordinal);
+        Assert.Contains("profile_json jsonb not null", migration, StringComparison.Ordinal);
+        Assert.Contains("ix_source_environment_profile_tenant_project", migration, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Source_profile_insert_is_immutable_and_never_updates_a_version()
+    {
+        string sql = PostgresPlatformStateStore.SourceEnvironmentProfileInsertSql(Schema);
+
+        Assert.Contains("on conflict (project_id, source_environment_id, version) do nothing", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("do update", sql, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("{\"connector\":999}")]
+    [InlineData("not-json")]
+    public void Malformed_source_profile_json_is_normalized_to_an_integrity_failure(string json)
+    {
+        InvalidOperationException error = Assert.Throws<InvalidOperationException>(() =>
+            PostgresPlatformStateStore.DeserializeSourceEnvironmentProfile(json));
+
+        Assert.Contains("integrity", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Durable_claims_use_server_time_skip_locked_and_increment_the_fence()
     {
         string sql = PostgresMigrationRunStore.ClaimSql(Schema);
@@ -216,6 +249,7 @@ public class PlatformPostgresContractTests
     [Theory]
     [InlineData("approval")]
     [InlineData("target_profile")]
+    [InlineData("source_environment_profile")]
     [InlineData("approval_event")]
     public void Each_insert_binds_exactly_one_parameter_per_column(string table)
     {
@@ -223,6 +257,7 @@ public class PlatformPostgresContractTests
         {
             "approval" => PostgresPlatformStateStore.ApprovalInsertSql(Schema),
             "target_profile" => PostgresPlatformStateStore.TargetProfileInsertSql(Schema),
+            "source_environment_profile" => PostgresPlatformStateStore.SourceEnvironmentProfileInsertSql(Schema),
             _ => PostgresPlatformStateStore.ApprovalEventInsertSql(Schema),
         };
 
