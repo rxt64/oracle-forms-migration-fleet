@@ -30,7 +30,7 @@ public sealed class ProcessApplicationTestGateway : IApplicationTestGateway
         await ApplicationProcessGate.Lock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            return await RunAsync(
+            ApplicationTestRun result = await RunAsync(
                 "mvn",
                 [
                     "--batch-mode",
@@ -46,6 +46,10 @@ public sealed class ProcessApplicationTestGateway : IApplicationTestGateway
                 readOnlyNpmCache: null,
                 isolateNetwork: true,
                 cancellationToken).ConfigureAwait(false);
+            CopyJUnitReports(
+                Path.Combine(runner.WorkingDirectory, "target", "surefire-reports"),
+                reportDirectory);
+            return result;
         }
         finally
         {
@@ -318,6 +322,31 @@ public sealed class ProcessApplicationTestGateway : IApplicationTestGateway
 
     private static bool Succeeded(ApplicationTestRun run) =>
         run.ToolAvailable && !run.TimedOut && run.ExitCode == 0;
+
+    private static void CopyJUnitReports(string sourceDirectory, string destinationDirectory)
+    {
+        if (!Directory.Exists(sourceDirectory))
+        {
+            return;
+        }
+
+        string[] reports = Directory.GetFiles(sourceDirectory, "TEST-*.xml", SearchOption.TopDirectoryOnly);
+        if (reports.Length > 1_000)
+        {
+            throw new IOException("Generated backend tests produced more than 1,000 JUnit reports.");
+        }
+
+        Directory.CreateDirectory(destinationDirectory);
+        foreach (string report in reports)
+        {
+            FileInfo file = new(report);
+            if ((file.Attributes & FileAttributes.ReparsePoint) != 0 || file.Length > 4 * 1024 * 1024)
+            {
+                throw new IOException("Generated backend tests produced an unsafe JUnit report file.");
+            }
+            File.Copy(report, Path.Combine(destinationDirectory, file.Name), overwrite: false);
+        }
+    }
 
     private static async Task ObserveAsync(params Task<string>[] readers)
     {
