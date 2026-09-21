@@ -29,6 +29,11 @@ RUN apt-get update \
 COPY --from=build /src/Fleet/Execution/Templates/Verification /tmp/ofm-verification
 RUN mkdir -p /opt/ofm-verification-cache/m2 /opt/ofm-verification-cache/npm \
  && mvn --batch-mode --no-transfer-progress \
+	 -Dmaven.repo.local=/opt/ofm-verification-cache/m2 \
+	 dependency:get \
+	 -Dartifact=org.apache.maven.surefire:surefire-junit-platform:3.2.5 \
+	 -Dtransitive=true \
+ && mvn --batch-mode --no-transfer-progress \
 	 -f /tmp/ofm-verification/pom.xml \
 	 -Dmaven.repo.local=/opt/ofm-verification-cache/m2 \
 	 -Dspring-boot.repackage.skip=true \

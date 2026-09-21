@@ -85,6 +85,11 @@ jobs:
           CACHE_ROOT="$RUNNER_TEMP/ofm-verification-cache"
           mkdir -p "$CACHE_ROOT/m2" "$CACHE_ROOT/npm"
           mvn --batch-mode --no-transfer-progress \
+            -Dmaven.repo.local="$CACHE_ROOT/m2" \
+            dependency:get \
+            -Dartifact=org.apache.maven.surefire:surefire-junit-platform:3.2.5 \
+            -Dtransitive=true
+          mvn --batch-mode --no-transfer-progress \
             -f src/oracle-forms-migration-fleet/Fleet/Execution/Templates/Verification/pom.xml \
             -Dmaven.repo.local="$CACHE_ROOT/m2" \
             -Dspring-boot.repackage.skip=true \
