@@ -10,6 +10,71 @@ permissions:
   contents: read
 
 jobs:
+  native-worker-contract:
+    name: Native source worker contract
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Publish Windows x86 worker
+        shell: pwsh
+        run: >-
+          dotnet publish src/OracleFormsMigrationFleet.SourceWorker/OracleFormsMigrationFleet.SourceWorker.csproj
+          -c Release -r win-x86 --self-contained true -o "$env:RUNNER_TEMP/source-worker"
+
+      - name: Verify blocked native probe contract
+        shell: pwsh
+        run: |
+          $request = '{"schemaVersion":1,"sourceEnvironmentId":"legacy-order-entry","expectedFormsRelease":"6.0.8.22.1"}'
+          $output = $request | & "$env:RUNNER_TEMP/source-worker/OracleFormsMigrationFleet.SourceWorker.exe" --probe
+          $exitCode = $LASTEXITCODE
+          $result = $output | ConvertFrom-Json
+          if ($exitCode -ne 2) { throw "Expected blocked-prerequisite exit 2, got $exitCode." }
+          if ($result.status -ne 'BlockedPrerequisite') { throw "Worker did not report BlockedPrerequisite." }
+          if ($result.processArchitecture -ne 'X86') { throw "Worker architecture was $($result.processArchitecture), not X86." }
+          $installation = $result.capabilities | Where-Object id -eq 'forms.installation'
+          if ($installation.prerequisite -ne 'OracleFormsInstallation' -or
+              $installation.requiredArchitecture -ne 'x86' -or
+              $installation.requiredHost -ne 'WindowsWorker') {
+            throw "Worker did not report the missing Forms 6i installation prerequisite."
+          }
+          if (Test-Path "$env:RUNNER_TEMP/source-worker/coreclr.dll") {
+            throw 'Worker publish unexpectedly depends on loose runtime files.'
+          }
+          if (Test-Path "$env:RUNNER_TEMP/source-worker/hostfxr.dll") {
+            throw 'Worker publish unexpectedly depends on a loose hostfxr.'
+          }
+          Write-Output 'Self-contained single-file publish confirmed.'
+          exit 0
+
+      - name: Verify rejected worker requests
+        shell: pwsh
+        run: |
+          '{"schemaVersion":0}' | & "$env:RUNNER_TEMP/source-worker/OracleFormsMigrationFleet.SourceWorker.exe" --probe 2>$null
+          if ($LASTEXITCODE -ne 65) { throw "Expected malformed-request exit 65, got $LASTEXITCODE." }
+          $oversized = '{"schemaVersion":1,"sourceEnvironmentId":"legacy-order-entry","expectedFormsRelease":"6.0.8.22.1"}' + (' ' * 8193)
+          $oversized | & "$env:RUNNER_TEMP/source-worker/OracleFormsMigrationFleet.SourceWorker.exe" --probe 2>$null
+          if ($LASTEXITCODE -ne 65) { throw "Expected oversized-request exit 65, got $LASTEXITCODE." }
+          & "$env:RUNNER_TEMP/source-worker/OracleFormsMigrationFleet.SourceWorker.exe" --unsupported 2>$null
+          if ($LASTEXITCODE -ne 64) { throw "Expected unsupported-command exit 64, got $LASTEXITCODE." }
+          exit 0
+
+      - name: Verify host-to-worker round trip
+        shell: pwsh
+        env:
+          RUN_SOURCE_WORKER_INTEGRATION: 'true'
+          FORMS_SOURCE_WORKER_PATH: ${{ runner.temp }}\source-worker\OracleFormsMigrationFleet.SourceWorker.exe
+          SOURCE_WORKER_INTEGRATION_SENTINEL: ${{ runner.temp }}\source-worker-integration.passed
+        run: |
+          dotnet test tests/oracle-forms-migration-fleet.Tests/oracle-forms-migration-fleet.Tests.csproj --filter "Category=SourceWorkerIntegration" -p:SkipClientBuild=true
+          if (!(Test-Path "$env:SOURCE_WORKER_INTEGRATION_SENTINEL")) {
+            throw 'The host-to-worker integration test did not execute its real process path.'
+          }
+
   build-and-test:
     runs-on: ubuntu-latest
     services:
@@ -214,7 +279,7 @@ jobs:
   deploy:
     name: Deploy verified workbench
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [build-and-test, container, guided-ui]
+    needs: [native-worker-contract, build-and-test, container, guided-ui]
     permissions:
       actions: read
       contents: read

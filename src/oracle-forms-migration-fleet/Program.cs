@@ -118,6 +118,7 @@ if (FoundryAgentClient.TryParseEndpoint(
 var builder = AgentHost.CreateBuilder(args);
 builder.Services.AddSingleton<IApplicationBuildGateway, ProcessApplicationBuildGateway>();
 builder.Services.AddSingleton<IApplicationTestGateway, ProcessApplicationTestGateway>();
+// Native workers run behind a separately deployed source gateway. The web process never starts one.
 builder.Services.AddSingleton<ISourceEnvironmentProbe, UnavailableSourceEnvironmentProbe>();
 builder.Services.AddSingleton<IFormsModuleExtractor, UnavailableFormsModuleExtractor>();
 builder.Services.AddSingleton<IOracleSchemaExtractor, UnavailableOracleSchemaExtractor>();

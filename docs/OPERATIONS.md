@@ -26,6 +26,12 @@ connection` records a typed probe result; it does not install software or trust 
 operator supplies Forms 6i media, matching x86 Open API libraries, a genuine FMB, and a verified Oracle
 client/database tuple on the separate Windows worker. Never point the web process at an Oracle DLL directory.
 
+The source worker is published as a self-contained, single-file `win-x86` executable and communicates only
+through bounded versioned JSON on standard input/output. The future source gateway stream-copies a hash-pinned
+worker to a private directory, verifies the copied hash and x86 PE header, and accepts only the exact blocked
+capability manifest. The workbench web process always registers the unavailable probe and never starts the
+native worker directly.
+
 Look up the pieces you need:
 
 ```powershell
