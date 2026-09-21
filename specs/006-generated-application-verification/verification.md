@@ -16,12 +16,16 @@
   concurrent 20,000-file stress tests. Feature, platform-state (43), and durable-store/worker (13) groups
   pass separately. The complete Linux CI run remains authoritative.
 
-## Pending CI evidence
+## Refreshed CI evidence (2026-09-21)
 
-- Real Maven and Vitest execution for generic CRUD and Northstar generated outputs.
-- Runtime bubblewrap proof that a host sentinel and managed-identity address are unreachable.
-- Disposable PostgreSQL 16 generated-schema execution and cleanup.
-- Full .NET, client, browser, and container matrices for the exact PR SHA.
+Run `35636608289` at merge SHA `9a8f5efdca68bcbc55996facc90ba84daf6e4027` completed successfully.
+Build/test, browser, and container jobs passed. Successful steps include `Execute independently generated
+applications`, `Test PostgreSQL platform state integration`, `Test`, and `Verify networkless generated-code
+runner image`. These establish execution of the configured checks; detailed per-case counts are not
+reconstructed from job conclusions here.
+
+The workbench deploy job also passed, including `Start authenticated smoke runner` and cleanup.
+This is workbench deployment evidence, not proof of a generated .NET target or native Oracle equivalence.
 
 ## Claim boundary
 

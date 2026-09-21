@@ -727,7 +727,8 @@ public sealed class SourceNormalizationAdapter : IPhaseAdapter
         string? DeclaredVersion,
         string? DeclaredFormsVersion,
         string? DeclaredFamily,
-        IReadOnlyList<string> Modules);
+        IReadOnlyList<string> Modules,
+        int RetainedSourceFacts);
 
     private sealed record Manifest(
         string Generator,
@@ -772,8 +773,8 @@ public sealed class SourceNormalizationAdapter : IPhaseAdapter
     {
         List<ManifestFile> files =
         [
-            .. inventory.Binaries.Select(file => new ManifestFile(file.Path, file.Category, file.Bytes, false, null, null, null, [])),
-            .. inventory.LegacyText.Select(file => new ManifestFile(file.Path, file.Category, file.Bytes, false, null, null, null, [])),
+            .. inventory.Binaries.Select(file => new ManifestFile(file.Path, file.Category, file.Bytes, false, null, null, null, [], 0)),
+            .. inventory.LegacyText.Select(file => new ManifestFile(file.Path, file.Category, file.Bytes, false, null, null, null, [], 0)),
             .. inventory.Xml.Select(file => new ManifestFile(
                 file.Path,
                 DescribeXml(file),
@@ -782,7 +783,8 @@ public sealed class SourceNormalizationAdapter : IPhaseAdapter
                 file.Declaration.DeclaredVersion,
                 file.Declaration.DeclaredFormsVersion,
                 file.Declaration.AnyDeclaredVersion is { } declared ? OracleLegacyVersionCatalog.Forms(declared).Family : null,
-                [.. file.Modules.Select(module => module.Name)])),
+                [.. file.Modules.Select(module => module.Name)],
+                file.Modules.Sum(module => module.SourceFacts?.Facts.Count ?? 0))),
         ];
 
         Manifest manifest = new(
@@ -803,6 +805,7 @@ public sealed class SourceNormalizationAdapter : IPhaseAdapter
                 "detectedForms is present only when a supplied export declared a version. effectiveForms is the release this run proceeded on, which may be the operator's intake value; versionAuthority says which.",
                 "declaredVersion and declaredFormsVersion are attributes the supplied file carries. They are not proof of provenance: nothing here establishes that the file came from frmf2xml, from a licensed Forms installation, or from the release it names.",
                 "A recognized release means an intake and normalization route is defined for it. It is not a statement that an application generated from that release has been compiled, deployed, or behaviourally tested.",
+                "retainedSourceFacts counts the elements retained from that file's exports as declared source facts. It is a count of what was found, not a coverage measure: nothing here establishes that the export contained everything the module declares, and no fact retained is a statement about Oracle Forms runtime behaviour.",
             ]);
 
         return JsonSerializer.Serialize(manifest, s_json);
@@ -819,6 +822,25 @@ public sealed class SourceNormalizationAdapter : IPhaseAdapter
         IReadOnlyList<IntermediateItem> Items,
         IReadOnlyList<IntermediateTrigger> Triggers);
 
+    private sealed record IntermediateAttribute(string Name, string Namespace, string Value);
+
+    private sealed record IntermediateFact(
+        string Id,
+        int Order,
+        string? ParentId,
+        int ChildIndex,
+        string LocalName,
+        string Namespace,
+        string? DeclaredName,
+        IReadOnlyList<IntermediateAttribute> Attributes,
+        string? Text,
+        string Kind);
+
+    private sealed record IntermediateFacts(
+        string TextDigest,
+        string? WrapperDeclaredVersion,
+        IReadOnlyList<IntermediateFact> Facts);
+
     private sealed record IntermediateModule(
         string Name,
         string? Title,
@@ -828,7 +850,8 @@ public sealed class SourceNormalizationAdapter : IPhaseAdapter
         IReadOnlyList<IntermediateBlock> Blocks,
         IReadOnlyList<IntermediateTrigger> Triggers,
         IReadOnlyList<string> ProgramUnits,
-        IReadOnlyList<string> Lovs);
+        IReadOnlyList<string> Lovs,
+        IntermediateFacts SourceFacts);
 
     private sealed record Intermediate(
         string Generator,
@@ -870,7 +893,8 @@ public sealed class SourceNormalizationAdapter : IPhaseAdapter
                     [.. module.Triggers.Select(trigger => new IntermediateTrigger(
                         trigger.Name, trigger.Scope, trigger.Body, trigger.BodyEncoding?.ToString()))],
                     module.ProgramUnits,
-                    module.Lovs));
+                    module.Lovs,
+                    Facts(module.SourceFacts)));
             }
         }
 
@@ -887,10 +911,38 @@ public sealed class SourceNormalizationAdapter : IPhaseAdapter
                 "Trigger bodies are retained as untrusted PL/SQL source text so changed behaviour remains distinguishable. BodyEncoding records whether Oracle supplied text as an XML attribute or child element; attribute text is subject to XML attribute whitespace normalization. Bodies are not translated or executed.",
                 "Program-unit bodies and LOV queries are not retained.",
                 "Modules that exist only as a binary are absent entirely. Their absence here is not evidence that they carry no behaviour.",
+                "sourceFacts retains every element of the export in document order with its source-object path, its parent, and all of its declared attributes, so what the interpreted structure above leaves out stays recoverable. Values are the XML-normalized text the export carried and are not decoded again.",
+                "Every source fact is Declared: it is something the export wrote down. None is a default, an inherited value, or a statement about what Oracle Forms would do at runtime, and retaining an element is not a claim that this build understands it.",
+                "wrapperDeclaredVersion is the Module wrapper's version attribute verbatim. It is a string the file carried, not a release this fleet adjudicated; formsFamily above is the adjudicated one.",
+                "textDigest is SHA-256 of the export text this fleet parsed. It is not a digest of the file's bytes on disk and not a snapshot identifier.",
             ]);
 
         return JsonSerializer.Serialize(intermediate, s_json);
     }
+
+    /// <summary>
+    /// Projects a retained fact set for serialization. A module whose facts were not retained writes an
+    /// empty inventory, which its reader refuses: an IR that silently carried no facts would be
+    /// indistinguishable from an export that declared nothing beyond the structure the parser interprets.
+    /// </summary>
+    private static IntermediateFacts Facts(FormsSourceFactSet? set) => set is null
+        ? new IntermediateFacts(FormsSourceFactReader.TextDigest(null), null, [])
+        : new IntermediateFacts(
+            set.TextDigest,
+            set.WrapperDeclaredVersion,
+            [
+                .. set.Facts.Select(fact => new IntermediateFact(
+                    fact.Id,
+                    fact.Order,
+                    fact.ParentId,
+                    fact.ChildIndex,
+                    fact.LocalName,
+                    fact.Namespace,
+                    fact.DeclaredName,
+                    [.. fact.Attributes.Select(attribute => new IntermediateAttribute(attribute.Name, attribute.Namespace, attribute.Value))],
+                    fact.Text,
+                    fact.Kind.ToString())),
+            ]);
 
     private static string RenderReport(
         PhaseExecutionContext context,

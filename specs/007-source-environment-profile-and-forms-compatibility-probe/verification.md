@@ -20,7 +20,12 @@ loaded, no Oracle database connection was attempted, and the existing browser re
 - Desktop Chromium source declaration/probe, non-member denial, and anonymous denial: 3 passed.
 - Focused specialist-to-QA review: GPT-5.6 Sol approved PR CI with no medium-or-higher findings.
 
-## Pending evidence
+## Refreshed CI evidence (2026-09-21)
 
-- PostgreSQL 16 source-profile migration and round trip in CI.
-- Full exact-SHA CI and authenticated deployment smoke.
+Main run `35647814791`, SHA `9433e59031267ff378265e85f0b4895a02760e33`, completed with failure.
+The `build-and-test` job passed, including `Test PostgreSQL platform state integration`, and the container
+job passed. Guided UI execution passed but `Upload browser reports` failed, making that job fail.
+`Deploy verified workbench` was skipped; no authenticated deployment smoke is established by this run.
+
+The descendant PR #32 run `35656433491` at `714113c3a0482ac276280c979dc5e96ffee29a74` passed all four
+required checks, but its deployment was also skipped. Neither result changes the native prerequisite finding.

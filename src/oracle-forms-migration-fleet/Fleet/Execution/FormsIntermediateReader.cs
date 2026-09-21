@@ -2,6 +2,7 @@
 
 using System.Globalization;
 using System.Text.Json;
+using System.Xml.Linq;
 
 namespace OracleFormsMigrationFleet.Fleet.Execution;
 
@@ -37,7 +38,7 @@ public static class FormsIntermediateReader
     public const string Generator = "oracle-forms-migration-fleet/source-normalization";
 
     /// <summary>The only IR schema version this build understands.</summary>
-    public const string SchemaVersion = "2";
+    public const string SchemaVersion = "3";
 
     public const int MaxModules = 5_000;
     public const int MaxChildren = 20_000;
@@ -70,6 +71,16 @@ public static class FormsIntermediateReader
             if (root.ValueKind != JsonValueKind.Object)
             {
                 return Refuse("The normalized Forms representation is not a JSON object.");
+            }
+
+            // A duplicate key is not a harmless oddity here: the parser keeps the first and a reviewer
+            // reading the document sees the last, so a tampered copy can show one value and be read as another.
+            if (DuplicateKey(root) is { } duplicateKey)
+            {
+                return Refuse(
+                    $"The normalized Forms representation declares the key '{duplicateKey}' more than once in one object. " +
+                    "A document this fleet wrote carries each key once, so it was refused rather than read with whichever " +
+                    "occurrence happened to win.");
             }
 
             foreach (string field in s_requiredRootFields)
@@ -185,14 +196,28 @@ public static class FormsIntermediateReader
                     return Refuse(triggerError ?? unitError ?? lovError!);
                 }
 
-                read.Add(new FormsModule(
+                (FormsSourceFactSet? facts, string? factError) = ReadSourceFacts(module, name);
+                if (facts is null)
+                {
+                    return Refuse(factError!);
+                }
+
+                FormsModule interpreted = new(
                     name,
                     title,
                     blocks,
                     triggers,
                     units,
                     lovs,
-                    sourcePath));
+                    sourcePath,
+                    facts);
+
+                if (Reconcile(interpreted, facts) is { } divergence)
+                {
+                    return Refuse(divergence);
+                }
+
+                read.Add(interpreted);
             }
 
             return new FormsIntermediateRead(read, null);
@@ -488,6 +513,640 @@ public static class FormsIntermediateReader
             ? null
             : $"{scope} declares Oracle Forms family '{family}', which is not a family name this catalog recognizes. " +
               $"The producer writes a catalog family or '{OracleLegacyVersionCatalog.UnknownFamily}', so this document is not one this fleet wrote.";
+    }
+
+    /// <summary>
+    /// Reads the retained source facts of one module.
+    ///
+    /// These are the only record of what the export declared beyond the small structure the parser
+    /// interprets, so a damaged inventory is refused rather than read short: a fact set missing entries, or
+    /// whose parent and path relationships disagree, would read back as an export that genuinely declared
+    /// less and an omission would be indistinguishable from an absence.
+    ///
+    /// Nothing here is interpreted. A fact's kind has to be Declared, because this fleet writes no other
+    /// kind and a document claiming an inferred or defaulted fact is not one it wrote.
+    /// </summary>
+    private static (FormsSourceFactSet? Facts, string? Error) ReadSourceFacts(JsonElement module, string moduleName)
+    {
+        string scope = $"module '{moduleName}'";
+
+        if (!module.TryGetProperty("sourceFacts", out JsonElement set) || set.ValueKind != JsonValueKind.Object)
+        {
+            return (null, $"{scope} has no 'sourceFacts' object. Schema version '{SchemaVersion}' retains the export's declared " +
+                "elements and attributes, and a module without them records no evidence of what it dropped. Re-import source to regenerate this format.");
+        }
+
+        if (Trimmed(set, "textDigest") is not { } digest
+            || digest.Length != FormsSourceFactReader.DigestCharacters
+            || !digest.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f'))
+        {
+            return (null, $"The 'sourceFacts' of {scope} records no 'textDigest' in the lowercase hexadecimal SHA-256 form this fleet writes, " +
+                "so the export text these facts were read from cannot be identified.");
+        }
+
+        (string? wrapperVersion, string? wrapperError) = OptionalText(set, "wrapperDeclaredVersion", $"the 'sourceFacts' of {scope}");
+        if (wrapperError is not null)
+        {
+            return (null, wrapperError);
+        }
+
+        (JsonElement declared, string? arrayError) = ArrayField(set, "facts", $"the 'sourceFacts' of {scope}", FormsSourceFactReader.MaxFacts);
+        if (arrayError is not null)
+        {
+            return (null, arrayError);
+        }
+
+        if (declared.GetArrayLength() == 0)
+        {
+            return (null, $"The 'sourceFacts' of {scope} declares no facts. Every module carries at least its own element, so an empty " +
+                "inventory is not one this fleet wrote.");
+        }
+
+        List<FormsSourceFact> facts = [];
+        HashSet<string> identities = new(StringComparer.Ordinal);
+
+        // The elements still open above the fact being read, innermost last. The producer writes facts
+        // depth first, so a parent that has already been closed means these are not the facts it wrote.
+        List<string> open = [];
+
+        // How many direct children each parent has already declared, so childIndex is checked against the
+        // sequence actually present rather than against itself.
+        Dictionary<string, int> children = new(StringComparer.Ordinal);
+
+        // How many preceding siblings of each qualified name each parent has already declared, which is the
+        // counter the producer writes into a path step. Without it a step could carry any positive index.
+        Dictionary<string, int> siblings = new(StringComparer.Ordinal);
+
+        foreach (JsonElement entry in declared.EnumerateArray())
+        {
+            int order = facts.Count;
+            string where = $"source fact {order.ToString(CultureInfo.InvariantCulture)} of {scope}";
+
+            if (entry.ValueKind != JsonValueKind.Object)
+            {
+                return (null, $"{where} is not a JSON object.");
+            }
+
+            if (Trimmed(entry, "id") is not { } id || id.Length > FormsSourceFactReader.MaxIdCharacters)
+            {
+                return (null, $"{where} has no non-empty 'id' within {FormsSourceFactReader.MaxIdCharacters.ToString(CultureInfo.InvariantCulture)} characters, " +
+                    "so the source object it retains cannot be named.");
+            }
+
+            // Checked rather than claimed, so this id is not yet an identity a later parent lookup can
+            // resolve against: a fact naming itself as its own parent has to fail the lookup below.
+            if (identities.Contains(id))
+            {
+                return (null, Duplicate($"source fact in {scope}", id));
+            }
+
+            (int? declaredOrder, string? orderError) = Count(entry, "order", where);
+            if (declaredOrder is null)
+            {
+                return (null, orderError!);
+            }
+
+            if (declaredOrder.Value != order)
+            {
+                return (null, $"{where} declares order {declaredOrder.Value.ToString(CultureInfo.InvariantCulture)} at position " +
+                    $"{order.ToString(CultureInfo.InvariantCulture)}. Document order is what makes an omission detectable, so a " +
+                    "representation whose order disagrees with its own sequence was refused.");
+            }
+
+            (int? childIndex, string? childError) = Count(entry, "childIndex", where);
+            if (childIndex is null)
+            {
+                return (null, childError!);
+            }
+
+            (string? parentId, string? parentError) = OptionalText(entry, "parentId", where);
+            if (parentError is not null)
+            {
+                return (null, parentError);
+            }
+
+            string step;
+
+            if (order == 0)
+            {
+                if (parentId is not null)
+                {
+                    return (null, $"{where} is the module element and declares a parent. The first fact of a module is the module itself.");
+                }
+
+                step = id;
+            }
+            else if (parentId is not { Length: > 0 })
+            {
+                return (null, $"{where} declares no 'parentId'. Only the module element has no parent, and it is the first fact.");
+            }
+            else if (!identities.Contains(parentId))
+            {
+                return (null, $"{where} declares parent '{parentId}', which is not a fact declared before it. A retained element has to sit " +
+                    "under one this representation already recorded.");
+            }
+            else if (!id.StartsWith(parentId + "/", StringComparison.Ordinal)
+                || id[(parentId.Length + 1)..] is not { Length: > 0 } declaredStep
+                || declaredStep.Contains("]/", StringComparison.Ordinal))
+            {
+                return (null, $"{where} declares id '{id}' under parent '{parentId}'. A source-object path is its parent's plus one step, so the two " +
+                    "disagree about where this element sits.");
+            }
+            else
+            {
+                while (open.Count > 0 && !string.Equals(open[^1], parentId, StringComparison.Ordinal))
+                {
+                    open.RemoveAt(open.Count - 1);
+                }
+
+                if (open.Count == 0)
+                {
+                    return (null, $"{where} declares parent '{parentId}', which this representation had already closed. Facts are written " +
+                        "depth first from the module element, so a set that revisits a finished branch is not one this fleet wrote.");
+                }
+
+                // The producer refuses an export nested deeper than this rather than retaining part of it,
+                // so a set that declares a deeper element was never written by it, and reading one would
+                // accept a tree the retaining side would have thrown out.
+                if (open.Count + 1 > FormsSourceFactReader.MaxDepth)
+                {
+                    return (null, $"{where} sits {(open.Count + 1).ToString(CultureInfo.InvariantCulture)} elements deep and this build reads at " +
+                        $"most {FormsSourceFactReader.MaxDepth.ToString(CultureInfo.InvariantCulture)}, which is the depth the retaining side " +
+                        "keeps. It was refused rather than read in part.");
+                }
+
+                step = declaredStep;
+            }
+
+            if (Trimmed(entry, "localName") is not { } localName)
+            {
+                return (null, $"{where} has no non-empty 'localName'.");
+            }
+
+            if (!entry.TryGetProperty("namespace", out JsonElement namespaceValue) || namespaceValue.ValueKind != JsonValueKind.String)
+            {
+                return (null, $"{where} has no 'namespace' string. It is recorded even when empty, so a Forms element and a foreign one " +
+                    "carrying the same name stay distinguishable.");
+            }
+
+            string declaredNamespace = namespaceValue.GetString() ?? string.Empty;
+
+            string parentKey = parentId ?? string.Empty;
+            siblings.TryGetValue($"{parentKey}\0{declaredNamespace}\0{localName}", out int preceding);
+
+            // The module element roots its own id space and is always [1]; every other element carries its
+            // position among the preceding siblings sharing its qualified name. Both are counters the
+            // producer derives from the export, so an index that agrees with neither is a forged path even
+            // when every parent reference around it resolves.
+            int expectedPosition = preceding + 1;
+
+            // The path is what every later citation resolves against, so it is not allowed to name one
+            // element while the fact beside it names another.
+            if (StepPosition(step, localName, declaredNamespace) is not { } position)
+            {
+                return (null, $"{where} ends its path with '{step}' while declaring the element '{declaredNamespace}:{localName}'. A step names " +
+                    "its own element and its position among siblings of that name, from one, so the path and the fact disagree about what was retained.");
+            }
+
+            if (position != expectedPosition)
+            {
+                return (null, $"{where} ends its path with '{step}' while it is element " +
+                    $"{expectedPosition.ToString(CultureInfo.InvariantCulture)} of that qualified name under " +
+                    $"{(parentId is null ? "the module root" : $"'{parentId}'")}. Sibling position is derived from the export, so a set that " +
+                    "numbers it otherwise cites elements the retained tree does not contain.");
+            }
+
+            children.TryGetValue(parentKey, out int expectedChildIndex);
+
+            if (childIndex.Value != expectedChildIndex)
+            {
+                return (null, $"{where} declares child index {childIndex.Value.ToString(CultureInfo.InvariantCulture)} while it is child " +
+                    $"{expectedChildIndex.ToString(CultureInfo.InvariantCulture)} of the parent this representation records. Where an element sat " +
+                    "among its siblings is a fact about the export, so a set that renumbers it was refused.");
+            }
+
+            if (Text(entry, "kind") is not nameof(FormsSourceFactKind.Declared))
+            {
+                return (null, $"{where} declares a fact kind other than '{nameof(FormsSourceFactKind.Declared)}'. This fleet retains only what " +
+                    "the export wrote down, so a document claiming an inferred or defaulted fact is not one it wrote.");
+            }
+
+            (string? declaredName, string? nameError) = OptionalText(entry, "declaredName", where);
+            if (nameError is not null)
+            {
+                return (null, nameError);
+            }
+
+            (string? text, string? textError) = OptionalText(entry, "text", where);
+            if (textError is not null)
+            {
+                return (null, textError);
+            }
+
+            // Whitespace the loader kept is significant text the export preserved, so it is read back as
+            // declared. An element that declared no text at all records null, never the empty string.
+            if (text is { Length: 0 })
+            {
+                return (null, $"{where} declares empty direct text. An element with no retained text records null, so an empty value is not one " +
+                    "this fleet wrote.");
+            }
+
+            if (text?.Length > FormsSourceFactReader.MaxValueCharacters)
+            {
+                return (null, $"The 'text' of {where} contains {text.Length.ToString(CultureInfo.InvariantCulture)} characters and this build " +
+                    $"reads at most {FormsSourceFactReader.MaxValueCharacters.ToString(CultureInfo.InvariantCulture)}. It was refused rather than truncated.");
+            }
+
+            (IReadOnlyList<FormsSourceAttribute>? attributes, string? attributeError) = ReadFactAttributes(entry, where);
+            if (attributes is null)
+            {
+                return (null, attributeError!);
+            }
+
+            // declaredName is a projection of the unqualified Name attribute, never a second source of it.
+            string? nameAttribute = attributes.FirstOrDefault(attribute =>
+                attribute.Namespace.Length == 0
+                && string.Equals(attribute.Name, "Name", StringComparison.OrdinalIgnoreCase))?.Value;
+
+            if (!string.Equals(declaredName, nameAttribute, StringComparison.Ordinal))
+            {
+                return (null, $"{where} records declared name {Quote(declaredName)} while its retained attributes declare {Quote(nameAttribute)}. " +
+                    "The declared name restates the element's own Name attribute, so a set where the two differ was refused rather than read.");
+            }
+
+            identities.Add(id);
+            children[parentKey] = expectedChildIndex + 1;
+            siblings[$"{parentKey}\0{declaredNamespace}\0{localName}"] = expectedPosition;
+            open.Add(id);
+
+            facts.Add(new FormsSourceFact(
+                id,
+                order,
+                parentId,
+                childIndex.Value,
+                localName,
+                declaredNamespace,
+                declaredName,
+                attributes,
+                text,
+                FormsSourceFactKind.Declared));
+        }
+
+        FormsSourceFact moduleFact = facts[0];
+
+        if (!string.Equals(moduleFact.LocalName, "FormModule", StringComparison.Ordinal)
+            || !string.Equals(moduleFact.Namespace, FormsXmlDocument.Namespace, StringComparison.Ordinal))
+        {
+            return (null, $"The first source fact of {scope} is '{moduleFact.Namespace}:{moduleFact.LocalName}' rather than the module element " +
+                $"'{FormsXmlDocument.Namespace}:FormModule'. The inventory of a module begins with the module.");
+        }
+
+        return moduleFact.DeclaredName is { } factName && !string.Equals(factName, moduleName, StringComparison.Ordinal)
+            ? (null, $"The module element retained for {scope} declares name '{factName}'. The retained facts and the module they belong to " +
+                "disagree about which module was read, so nothing was read from the document.")
+            : (new FormsSourceFactSet(digest, wrapperVersion, facts), null);
+    }
+
+    /// <summary>
+    /// The sibling position one step of a source-object path declares, when the step names exactly the
+    /// element recorded beside it: the same namespace, the same local name, and a position counted from
+    /// one. A step that agrees with nothing lets a fact be cited under a path describing some other element
+    /// entirely, so it yields no position rather than a tolerated one.
+    /// </summary>
+    private static int? StepPosition(string step, string localName, string declaredNamespace)
+    {
+        if (step.Length < 4 || step[0] != '{' || step[^1] != ']')
+        {
+            return null;
+        }
+
+        int close = step.IndexOf('}', StringComparison.Ordinal);
+        int open = step.LastIndexOf('[');
+
+        if (close < 0 || open <= close)
+        {
+            return null;
+        }
+
+        string index = step[(open + 1)..^1];
+
+        return string.Equals(step[1..close], declaredNamespace, StringComparison.Ordinal)
+            && string.Equals(step[(close + 1)..open], localName, StringComparison.Ordinal)
+            && int.TryParse(index, NumberStyles.None, CultureInfo.InvariantCulture, out int position)
+            && position >= 1
+            && string.Equals(position.ToString(CultureInfo.InvariantCulture), index, StringComparison.Ordinal)
+                ? position
+                : null;
+    }
+
+    /// <summary>
+    /// Checks that the interpreted structure of a module is the structure its own retained facts describe.
+    ///
+    /// The two used to be read independently and compared only by module name, so a document could declare
+    /// a base table, a prompt, a required flag, or a trigger body that no retained element supports, and
+    /// the converter generated from the declaration rather than from the source it claims to project. The
+    /// facts are rebuilt into the element tree they were read from and put through the same interpretation
+    /// the export itself went through, so what generation consumes is the source this representation
+    /// retained. The text digest plays no part: it names which export text the facts came from and is not
+    /// evidence that anything beside them agrees with it.
+    ///
+    /// The source path is deliberately not compared, because it is not something an export declares: it is
+    /// where the file sat, and it is checked against the run's source root and the module's own identity.
+    /// </summary>
+    private static string? Reconcile(FormsModule interpreted, FormsSourceFactSet facts)
+    {
+        (XElement? module, string? rejection) = FormsSourceFactReader.Rebuild(facts);
+
+        if (module is null)
+        {
+            return $"The source facts retained for module '{interpreted.Name}' do not describe an element tree: {rejection} " +
+                "A representation this fleet wrote retains the export it read, so nothing was read from the document.";
+        }
+
+        if (FormsXmlDocument.ShapeRejection(module) is { } shape)
+        {
+            return $"The source facts retained for module '{interpreted.Name}' describe a document this fleet would not have read: {shape}";
+        }
+
+        // The projection reports what it could not carry rather than throwing, and the report used to be
+        // thrown away here. A retained tree over an element cap projects an empty list and says so in a
+        // finding, so a document declaring an empty structure beside an oversized tree compared equal and
+        // was read as a module with nothing in it. Structural findings are the same ones normalization
+        // refuses to write on — severity and category both — so a representation carrying one is refused
+        // rather than reconciled against the emptiness the projection fell back to. Behaviour findings are
+        // not among them: the IR retains untranslated Forms behaviour on purpose.
+        List<ConversionFinding> findings = [];
+        FormsModule projected = FormsModuleParser.Project(module, facts, findings);
+
+        ConversionFinding? blocking = findings.FirstOrDefault(finding =>
+            finding.Severity == ConversionSeverity.Unsupported
+            && string.Equals(finding.Category, "Forms module", StringComparison.Ordinal));
+
+        return blocking is not null
+            ? $"The source facts retained for module '{interpreted.Name}' describe source this fleet would have refused to normalize: " +
+              $"{blocking.Construct} — {blocking.Reason} The structure declared beside them cannot be checked against source that was " +
+              "never readable as a module, so nothing was read from the document."
+            : Divergence(interpreted, projected);
+    }
+
+    /// <summary>
+    /// The first field on which the interpreted structure and the structure projected from the retained
+    /// facts disagree, or nothing. Order is compared as well as content: blocks, items, and triggers are
+    /// positions in a source document, so a reordered list is a different module.
+    /// </summary>
+    private static string? Divergence(FormsModule interpreted, FormsModule projected)
+    {
+        string scope = $"module '{interpreted.Name}'";
+
+        if (!string.Equals(interpreted.Name, projected.Name, StringComparison.Ordinal))
+        {
+            return Disagrees(scope, "name", interpreted.Name, projected.Name);
+        }
+
+        if (!string.Equals(interpreted.Title, projected.Title, StringComparison.Ordinal))
+        {
+            return Disagrees(scope, "title", interpreted.Title, projected.Title);
+        }
+
+        if (Names(scope, "program unit", interpreted.ProgramUnits, projected.ProgramUnits) is { } unitDivergence)
+        {
+            return unitDivergence;
+        }
+
+        if (Names(scope, "LOV", interpreted.Lovs, projected.Lovs) is { } lovDivergence)
+        {
+            return lovDivergence;
+        }
+
+        if (Triggers(scope, interpreted.Triggers, projected.Triggers) is { } moduleTriggerDivergence)
+        {
+            return moduleTriggerDivergence;
+        }
+
+        if (interpreted.Blocks.Count != projected.Blocks.Count)
+        {
+            return Disagrees(scope, "block count", Number(interpreted.Blocks.Count), Number(projected.Blocks.Count));
+        }
+
+        for (int index = 0; index < interpreted.Blocks.Count; index++)
+        {
+            FormsBlock declared = interpreted.Blocks[index];
+            FormsBlock retained = projected.Blocks[index];
+            string blockScope = $"block '{interpreted.Name}.{declared.Name}'";
+
+            if (!string.Equals(declared.Name, retained.Name, StringComparison.Ordinal))
+            {
+                return Disagrees($"{scope} at block {Number(index)}", "name", declared.Name, retained.Name);
+            }
+
+            if (!string.Equals(declared.BaseTable, retained.BaseTable, StringComparison.Ordinal))
+            {
+                return Disagrees(blockScope, "base table", declared.BaseTable, retained.BaseTable);
+            }
+
+            if (declared.RecordsDisplayed != retained.RecordsDisplayed)
+            {
+                return Disagrees(blockScope, "displayed record count", Number(declared.RecordsDisplayed), Number(retained.RecordsDisplayed));
+            }
+
+            if (Items(blockScope, declared.Items, retained.Items) is { } itemDivergence)
+            {
+                return itemDivergence;
+            }
+
+            if (Triggers(blockScope, declared.Triggers, retained.Triggers) is { } blockTriggerDivergence)
+            {
+                return blockTriggerDivergence;
+            }
+        }
+
+        return null;
+    }
+
+    private static string? Items(string scope, IReadOnlyList<FormsItem> interpreted, IReadOnlyList<FormsItem> projected)
+    {
+        if (interpreted.Count != projected.Count)
+        {
+            return Disagrees(scope, "item count", Number(interpreted.Count), Number(projected.Count));
+        }
+
+        for (int index = 0; index < interpreted.Count; index++)
+        {
+            FormsItem declared = interpreted[index];
+            FormsItem retained = projected[index];
+            string itemScope = $"item {Number(index)} of {scope}";
+
+            if (declared != retained)
+            {
+                return !string.Equals(declared.Name, retained.Name, StringComparison.Ordinal)
+                    ? Disagrees(itemScope, "name", declared.Name, retained.Name)
+                    : Disagrees(
+                        $"item '{declared.Name}' of {scope}",
+                        "declared properties",
+                        Describe(declared),
+                        Describe(retained));
+            }
+        }
+
+        return null;
+    }
+
+    private static string? Triggers(string scope, IReadOnlyList<FormsTrigger> interpreted, IReadOnlyList<FormsTrigger> projected)
+    {
+        if (interpreted.Count != projected.Count)
+        {
+            return Disagrees(scope, "trigger count", Number(interpreted.Count), Number(projected.Count));
+        }
+
+        for (int index = 0; index < interpreted.Count; index++)
+        {
+            FormsTrigger declared = interpreted[index];
+            FormsTrigger retained = projected[index];
+
+            if (declared != retained)
+            {
+                return Disagrees(
+                    $"trigger {Number(index)} of {scope}",
+                    "identity, scope, body, or body encoding",
+                    Describe(declared),
+                    Describe(retained));
+            }
+        }
+
+        return null;
+    }
+
+    private static string? Names(string scope, string kind, IReadOnlyList<string> interpreted, IReadOnlyList<string> projected)
+    {
+        if (interpreted.Count != projected.Count)
+        {
+            return Disagrees(scope, $"{kind} count", Number(interpreted.Count), Number(projected.Count));
+        }
+
+        for (int index = 0; index < interpreted.Count; index++)
+        {
+            if (!string.Equals(interpreted[index], projected[index], StringComparison.Ordinal))
+            {
+                return Disagrees(scope, $"{kind} {Number(index)}", interpreted[index], projected[index]);
+            }
+        }
+
+        return null;
+    }
+
+    private static string Disagrees(string scope, string field, string? interpreted, string? projected) =>
+        $"The interpreted {field} of {scope} is {Quote(interpreted)} while the source facts retained beside it describe " +
+        $"{Quote(projected)}. A representation this fleet wrote projects the export it retained, so the document was refused rather " +
+        "than generating from a structure no retained element supports.";
+
+    private static string Describe(FormsItem item) =>
+        $"{item.ItemType}, data type {Quote(item.DataType)}, column {Quote(item.ColumnName)}, prompt {Quote(item.Prompt)}, " +
+        $"required {item.Required}, visible {item.Visible}, maximum length {(item.MaxLength is { } length ? Number(length) : "none")}";
+
+    private static string Describe(FormsTrigger trigger) =>
+        $"'{trigger.Name}' in scope '{trigger.Scope}' with body {Quote(trigger.Body)} supplied as {trigger.BodyEncoding?.ToString() ?? "no body"}";
+
+    private static string Number(int value) => value.ToString(CultureInfo.InvariantCulture);
+
+    private static string Quote(string? value) => value is null ? "none" : $"'{value}'";
+
+    private static (IReadOnlyList<FormsSourceAttribute>? Attributes, string? Error) ReadFactAttributes(JsonElement fact, string scope)
+    {
+        (JsonElement declared, string? error) = ArrayField(fact, "attributes", scope, FormsSourceFactReader.MaxAttributes);
+        if (error is not null)
+        {
+            return (null, error);
+        }
+
+        List<FormsSourceAttribute> attributes = [];
+        HashSet<string> qualified = new(StringComparer.Ordinal);
+
+        foreach (JsonElement entry in declared.EnumerateArray())
+        {
+            if (entry.ValueKind != JsonValueKind.Object || Trimmed(entry, "name") is not { } name)
+            {
+                return (null, $"The 'attributes' of {scope} contains an entry that is not an object with a non-empty 'name'.");
+            }
+
+            if (!entry.TryGetProperty("namespace", out JsonElement namespaceValue) || namespaceValue.ValueKind != JsonValueKind.String)
+            {
+                return (null, $"Attribute '{name}' of {scope} has no 'namespace' string. It is recorded even when empty, so a qualified " +
+                    "attribute cannot pass as the unqualified one the interpreting readers look up.");
+            }
+
+            string declaredNamespace = namespaceValue.GetString() ?? string.Empty;
+
+            // The retaining side skips namespace declarations, so a set that carries one describes an
+            // element tree no export it read could have produced.
+            if (string.Equals(declaredNamespace, "http://www.w3.org/2000/xmlns/", StringComparison.Ordinal)
+                || (declaredNamespace.Length == 0 && string.Equals(name, "xmlns", StringComparison.Ordinal)))
+            {
+                return (null, $"Attribute '{name}' of {scope} is a namespace declaration. Declarations are not retained as attributes, " +
+                    "so a set that records one is not one this fleet wrote.");
+            }
+
+            if (!entry.TryGetProperty("value", out JsonElement value) || value.ValueKind != JsonValueKind.String)
+            {
+                return (null, $"Attribute '{name}' of {scope} has no 'value' string. A declared attribute with no value is not something " +
+                    "an export writes, and reading it as absent would lose a fact this representation exists to retain.");
+            }
+
+            string text = value.GetString() ?? string.Empty;
+
+            if (text.Length > FormsSourceFactReader.MaxValueCharacters)
+            {
+                return (null, $"Attribute '{name}' of {scope} contains {text.Length.ToString(CultureInfo.InvariantCulture)} characters and this " +
+                    $"build reads at most {FormsSourceFactReader.MaxValueCharacters.ToString(CultureInfo.InvariantCulture)}. It was refused rather than truncated.");
+            }
+
+            if (!qualified.Add($"{declaredNamespace}\0{name}"))
+            {
+                return (null, Duplicate($"attribute on {scope}", name));
+            }
+
+            attributes.Add(new FormsSourceAttribute(name, declaredNamespace, text));
+        }
+
+        return (attributes, null);
+    }
+
+    /// <summary>The first object key declared more than once anywhere in the document, or nothing.</summary>
+    private static string? DuplicateKey(JsonElement element)
+    {
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.Object:
+                HashSet<string> names = new(StringComparer.Ordinal);
+
+                foreach (JsonProperty property in element.EnumerateObject())
+                {
+                    if (!names.Add(property.Name))
+                    {
+                        return property.Name;
+                    }
+
+                    if (DuplicateKey(property.Value) is { } nested)
+                    {
+                        return nested;
+                    }
+                }
+
+                return null;
+
+            case JsonValueKind.Array:
+                foreach (JsonElement entry in element.EnumerateArray())
+                {
+                    if (DuplicateKey(entry) is { } nested)
+                    {
+                        return nested;
+                    }
+                }
+
+                return null;
+
+            default:
+                return null;
+        }
     }
 
     private static FormsIntermediateRead Refuse(string reason) => new(null, reason);

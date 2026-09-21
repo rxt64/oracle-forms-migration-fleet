@@ -138,6 +138,16 @@ public static class FormsXmlDocument
     }
 
     /// <summary>
+    /// Why <paramref name="root"/> and everything under it are not a shape this fleet reads, or nothing.
+    ///
+    /// Exposed so a module element rebuilt from retained facts passes the same gate the export it claims to
+    /// describe had to pass. A fact set can encode a shape no accepted export carries — a foreign element
+    /// under a Forms name, a qualified attribute competing with the one the readers look up, a trigger with
+    /// two bodies — and rebuilding it without this check would interpret structure Oracle never produced.
+    /// </summary>
+    internal static string? ShapeRejection(XElement root) => Foreign(root);
+
+    /// <summary>
     /// The first structural element declared outside the Forms namespace, or the first namespace-qualified
     /// attribute on a Forms element, described as a refusal.
     ///

@@ -23,3 +23,7 @@ PR #32 CI run `35656048642` passed at implementation commit
 `Container image builds`, and `Guided UI browser checks` all completed successfully.
 
 Native Forms execution and extraction remain blocked by spec 007 prerequisites.
+
+Refreshed 2026-09-21: PR #32 remains open at `714113c3a0482ac276280c979dc5e96ffee29a74`.
+Run `35656433491` completed successfully with the same four required jobs. `Deploy verified workbench`
+was skipped. This closes the stale pending CI status, not a merge, release, or native-extraction claim.
