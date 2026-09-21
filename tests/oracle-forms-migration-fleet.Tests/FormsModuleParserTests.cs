@@ -247,6 +247,69 @@ public class FormsModuleParserTests
     }
 
     /// <summary>
+    /// An element's direct text is retained as one value and rebuilt before its children, so text declared
+    /// on both sides of a child came back as one run before it: <c>&lt;Note&gt;A&lt;Span&gt;B&lt;/Span&gt;C&lt;/Note&gt;</c>
+    /// retained "AC" and put it ahead of Span. Nothing said so, and the retained inventory is the only
+    /// record of what the export declared, so the document is refused instead.
+    /// </summary>
+    [Fact]
+    public void Text_declared_beside_child_elements_is_refused_rather_than_retained_out_of_order()
+    {
+        const string Mixed = """
+            <FormModule xmlns="http://xmlns.oracle.com/Forms" Name="MIXED">
+              <Note>A<Span>B</Span>C</Note>
+              <Block Name="B1" QueryDataSourceName="T" RecordsDisplayed="1"/>
+            </FormModule>
+            """;
+
+        FormsModuleParse parse = FormsModuleParser.Parse(Mixed);
+
+        Assert.Empty(parse.Modules);
+
+        ConversionFinding finding = Assert.Single(
+            parse.Findings,
+            item => item.Severity == ConversionSeverity.Unsupported && item.Category == "Forms module");
+
+        Assert.Contains("declares text directly beside child elements", finding.Reason, StringComparison.Ordinal);
+        Assert.Contains("{http://xmlns.oracle.com/Forms}Note[1]", finding.Reason, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The refusal above is about text that shares an element with child elements, and nothing else. A leaf
+    /// carrying a body, indentation an export preserves around its children, and an ordinary export all
+    /// stay readable, or the fix would refuse the estates it exists to keep honest.
+    /// </summary>
+    [Fact]
+    public void A_leaf_body_preserved_indentation_and_an_ordinary_export_are_still_retained()
+    {
+        const string Neighbours = """
+            <FormModule xmlns="http://xmlns.oracle.com/Forms" Name="NEIGHBOURS">
+              <Block Name="B1" QueryDataSourceName="T" RecordsDisplayed="1">
+                <Trigger Name="WHEN-VALIDATE-RECORD">
+                  <TriggerText>BEGIN RECALCULATE; END;</TriggerText>
+                </Trigger>
+              </Block>
+              <Wrapper xml:space="preserve">
+                <Leaf>body</Leaf>
+              </Wrapper>
+            </FormModule>
+            """;
+
+        FormsSourceFactSet facts = Facts(Neighbours);
+
+        Assert.Equal("BEGIN RECALCULATE; END;", Fact(facts, $"{Forms}FormModule[1]/{Forms}Block[1]/{Forms}Trigger[1]/{Forms}TriggerText[1]").Text);
+        Assert.Equal("body", Fact(facts, $"{Forms}FormModule[1]/{Forms}Wrapper[1]/{Forms}Leaf[1]").Text);
+
+        // Whitespace an export preserves around its children is indentation, not declared content.
+        Assert.True(string.IsNullOrWhiteSpace(Fact(facts, $"{Forms}FormModule[1]/{Forms}Wrapper[1]").Text));
+
+        Assert.Equal(5, Facts(Export).Facts.Count(fact => fact.LocalName == "Item"));
+        Assert.DoesNotContain(
+            FormsModuleParser.Parse(Export).Findings,
+            finding => finding.Reason.Contains("beside child elements", StringComparison.Ordinal));
+    }
+
+    /// <summary>
     /// The wrapper's version attribute is a string the file carried. It is kept verbatim and apart from any
     /// release this fleet adjudicates, and an export with no wrapper records none.
     /// </summary>

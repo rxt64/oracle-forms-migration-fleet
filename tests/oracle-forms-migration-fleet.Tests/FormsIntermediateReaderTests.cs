@@ -64,7 +64,7 @@ public class FormsIntermediateReaderTests
               "lovs": [],
               "sourceFacts": {
                 "textDigest": "3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b",
-                "wrapperDeclaredVersion": "122010400",
+                "wrapperDeclaredVersion": "12.2.1.4",
                 "facts": [
                   {
                     "id": "{http://xmlns.oracle.com/Forms}FormModule[1]",
@@ -432,12 +432,14 @@ public class FormsIntermediateReaderTests
 
     /// <summary>
     /// An export that declared no version is written with no version and the unknown family, which is the
-    /// one case where a module's family may differ from the release the run settled on.
+    /// one case where a module's family may differ from the release the run settled on. It carries no
+    /// wrapper version either: the wrapper's attribute is one of the declarations that would have given the
+    /// module a family.
     /// </summary>
     [Fact]
     public void An_export_that_declared_no_version_reads_as_the_unknown_family()
     {
-        string json = Mutate("\"declaredVersion\": \"12.2.1.4\",", string.Empty)
+        string json = Mutate("\"declaredVersion\": \"12.2.1.4\",", string.Empty, "\"wrapperDeclaredVersion\": \"12.2.1.4\",", string.Empty)
             .Replace("\"declaredFamily\": \"12c\"", "\"declaredFamily\": \"unknown\"", StringComparison.Ordinal);
 
         FormsIntermediateRead read = Read(json);
@@ -450,7 +452,7 @@ public class FormsIntermediateReaderTests
     public void A_null_declared_version_reads_as_no_version_rather_than_a_refusal()
     {
         FormsIntermediateRead read = Read(
-            Mutate("\"declaredVersion\": \"12.2.1.4\"", "\"declaredVersion\": null")
+            Mutate("\"declaredVersion\": \"12.2.1.4\"", "\"declaredVersion\": null", "\"wrapperDeclaredVersion\": \"12.2.1.4\",", string.Empty)
                 .Replace("\"declaredFamily\": \"12c\"", "\"declaredFamily\": \"unknown\"", StringComparison.Ordinal));
 
         Assert.Null(read.Error);
@@ -587,7 +589,7 @@ public class FormsIntermediateReaderTests
         FormsModule module = Assert.Single(Read(ValidIr).Modules!);
         FormsSourceFactSet facts = module.SourceFacts!;
 
-        Assert.Equal("122010400", facts.WrapperDeclaredVersion);
+        Assert.Equal("12.2.1.4", facts.WrapperDeclaredVersion);
         Assert.Equal(6, facts.Facts.Count);
         Assert.Equal([0, 1, 2, 3, 4, 5], facts.Facts.Select(fact => fact.Order));
         Assert.All(facts.Facts, fact => Assert.Equal(FormsSourceFactKind.Declared, fact.Kind));
@@ -599,6 +601,98 @@ public class FormsIntermediateReaderTests
         Assert.Equal("ACCOUNT_ID", item.DeclaredName);
         Assert.Equal("999G999", Assert.Single(item.Attributes, attribute => attribute.Name == "FormatMask").Value);
         Assert.Equal("{http://xmlns.oracle.com/Forms}FormModule[1]/{http://xmlns.oracle.com/Forms}Block[1]", item.ParentId);
+    }
+
+    /// <summary>
+    /// The wrapper version is retained verbatim and this reader adjudicates nothing from it. What it checks
+    /// is that the string agrees with the release decision the same document records: normalization reads
+    /// every version attribute a supplied export declares, the Module wrapper's among them, and refuses the
+    /// estate when one is uninterpretable, names a second family, or names a second release. The Oracle
+    /// internal build number below is the case that mattered — normalization refuses an estate declaring
+    /// it, while this reader accepted it beside a module attributed to Forms 12c.
+    /// </summary>
+    [Theory]
+    [InlineData("\"wrapperDeclaredVersion\": \"122010400\"", "matches no Oracle Forms release this catalog knows")]
+    [InlineData("\"wrapperDeclaredVersion\": \"banana\"", "matches no Oracle Forms release this catalog knows")]
+    [InlineData("\"wrapperDeclaredVersion\": \"\"", "empty 'wrapperDeclaredVersion'")]
+    [InlineData("\"wrapperDeclaredVersion\": \"   \"", "empty 'wrapperDeclaredVersion'")]
+    [InlineData("\"wrapperDeclaredVersion\": 122010400", "present and is not a string")]
+    [InlineData("\"wrapperDeclaredVersion\": \"6i\"", "reads as Oracle Forms family '6i'")]
+    [InlineData("\"wrapperDeclaredVersion\": \"12.2.1.5\"", "rather than one release stated at different precision")]
+    public void A_wrapper_version_the_normalization_phase_would_have_refused_is_refused(string replace, string expected)
+    {
+        FormsIntermediateRead read = Read(Mutate("\"wrapperDeclaredVersion\": \"12.2.1.4\"", replace));
+
+        Assert.Null(read.Modules);
+        Assert.Contains(expected, read.Error!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The accepted cases, so the check above cannot pass by refusing everything: the same release the
+    /// export declared, stated less precisely on the wrapper than in the module beside it.
+    /// </summary>
+    [Theory]
+    [InlineData("12.2")]
+    [InlineData("12c")]
+    public void A_wrapper_version_the_normalization_phase_would_have_written_is_read_back_verbatim(string retained)
+    {
+        FormsIntermediateRead read = Read(Mutate("\"wrapperDeclaredVersion\": \"12.2.1.4\"", $"\"wrapperDeclaredVersion\": \"{retained}\""));
+
+        Assert.Null(read.Error);
+        Assert.Equal(retained, Assert.Single(read.Modules!).SourceFacts!.WrapperDeclaredVersion);
+    }
+
+    /// <summary>
+    /// An export whose root is the FormModule itself carries no wrapper, so it declares no wrapper version
+    /// and the producer retains none. That absence is read back as an absence, not as a gap in the record.
+    /// </summary>
+    [Fact]
+    public void A_module_retaining_no_wrapper_version_is_read_as_having_declared_none()
+    {
+        FormsIntermediateRead read = Read(Mutate("\"wrapperDeclaredVersion\": \"12.2.1.4\",", string.Empty));
+
+        Assert.Null(read.Error);
+        Assert.Null(Assert.Single(read.Modules!).SourceFacts!.WrapperDeclaredVersion);
+    }
+
+    /// <summary>
+    /// The wrapper's version is one of the declarations that decides the release, so a module recording
+    /// that its export declared none cannot sit beside a wrapper that named one.
+    /// </summary>
+    [Fact]
+    public void A_wrapper_version_beside_a_module_declaring_no_release_is_refused()
+    {
+        FormsIntermediateRead read = Read(Mutate(
+            "\"declaredVersion\": \"12.2.1.4\",",
+            string.Empty,
+            "\"declaredFamily\": \"12c\"",
+            "\"declaredFamily\": \"unknown\""));
+
+        Assert.Null(read.Modules);
+        Assert.Contains("declared no release at all", read.Error!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A retained element's direct text is rebuilt before its children, so a set declaring both describes a
+    /// tree in an order the retaining side refuses to write. Indentation an export preserves is not that:
+    /// moving whitespace changes no declared content, and refusing it would reject exports this fleet reads.
+    /// </summary>
+    [Theory]
+    [InlineData("\"text\": \"A\",", false)]
+    [InlineData("\"text\": \"   \",", true)]
+    public void Text_retained_beside_child_elements_is_refused_and_preserved_indentation_is_not(string inserted, bool accepted)
+    {
+        FormsIntermediateRead read = Read(Mutate("\"declaredName\": \"ORDER_BLOCK\",", $"\"declaredName\": \"ORDER_BLOCK\", {inserted}"));
+
+        if (accepted)
+        {
+            Assert.Null(read.Error);
+            Assert.Equal("   ", Assert.Single(read.Modules!).SourceFacts!.Facts[2].Text);
+            return;
+        }
+
+        Assert.Null(read.Modules);
+        Assert.Contains("retains text of its own beside it", read.Error!, StringComparison.Ordinal);
     }
 
     /// <summary>

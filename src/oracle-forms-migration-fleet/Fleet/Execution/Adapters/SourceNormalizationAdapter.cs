@@ -909,7 +909,7 @@ public sealed class SourceNormalizationAdapter : IPhaseAdapter
             [
                 "This representation carries blocks, base tables, items, trigger identities, and XML-normalized trigger body text, plus the names of program units and LOVs.",
                 "Trigger bodies are retained as untrusted PL/SQL source text so changed behaviour remains distinguishable. BodyEncoding records whether Oracle supplied text as an XML attribute or child element; attribute text is subject to XML attribute whitespace normalization. Bodies are not translated or executed.",
-                "Program-unit bodies and LOV queries are not retained.",
+                "Program-unit bodies and LOV queries are absent from the interpreted structure above, which carries their names only. Where the export declared them they are still retained verbatim in sourceFacts, as the declared attributes or elements the file carried: retained means readable, not translated.",
                 "Modules that exist only as a binary are absent entirely. Their absence here is not evidence that they carry no behaviour.",
                 "sourceFacts retains every element of the export in document order with its source-object path, its parent, and all of its declared attributes, so what the interpreted structure above leaves out stays recoverable. Values are the XML-normalized text the export carried and are not decoded again.",
                 "Every source fact is Declared: it is something the export wrote down. None is a default, an inherited value, or a statement about what Oracle Forms would do at runtime, and retaining an element is not a claim that this build understands it.",

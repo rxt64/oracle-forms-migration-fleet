@@ -26,7 +26,9 @@ public sealed record FormsIntermediateRead(IReadOnlyList<FormsModule>? Modules, 
 /// what this fleet wrote is now refused with a reason, and the caller generates nothing.
 ///
 /// It retains trigger bodies as untrusted source text so changed source behaviour remains distinguishable.
-/// It does not translate or execute them, and no program-unit body or LOV query is present to recover.
+/// It does not translate or execute them. Program-unit bodies and LOV queries are absent from the
+/// interpreted structure, which carries their names alone; where the export declared them they are readable
+/// in the retained source facts beside it, untranslated and interpreted by nothing here.
 ///
 /// The document is also bound to the run reading it: the caller supplies the source root it is executing
 /// against, and a representation that records a different root, or a module read from outside that root,
@@ -160,11 +162,13 @@ public static class FormsIntermediateReader
                     return Refuse("A module in the normalized Forms representation has no non-empty 'name'.");
                 }
 
-                (string? sourcePath, string? provenanceError) = Provenance(module, name, formsFamily, sourceRoot);
-                if (sourcePath is null)
+                (ModuleProvenance? provenance, string? provenanceError) = Provenance(module, name, formsFamily, sourceRoot);
+                if (provenance is null)
                 {
                     return Refuse(provenanceError!);
                 }
+
+                string sourcePath = provenance.SourcePath;
 
                 // Two directories carrying one module name carry two modules, so identity is the name
                 // qualified by the directory it was supplied from. Refusing on the bare name rejected an
@@ -196,7 +200,7 @@ public static class FormsIntermediateReader
                     return Refuse(triggerError ?? unitError ?? lovError!);
                 }
 
-                (FormsSourceFactSet? facts, string? factError) = ReadSourceFacts(module, name);
+                (FormsSourceFactSet? facts, string? factError) = ReadSourceFacts(module, name, provenance);
                 if (facts is null)
                 {
                     return Refuse(factError!);
@@ -400,6 +404,16 @@ public static class FormsIntermediateReader
     }
 
     /// <summary>
+    /// What one module entry records about where it came from and which release its export declared, once
+    /// every one of those fields has been checked against the document around it.
+    /// </summary>
+    /// <param name="DeclaredRelease">
+    /// The catalog's reading of the module's own <c>declaredVersion</c>, or null where the export declared
+    /// none. It is the release the producer adjudicated, never one inferred from anything else.
+    /// </param>
+    private sealed record ModuleProvenance(string SourcePath, string DeclaredFamily, OracleVersionAssessment? DeclaredRelease);
+
+    /// <summary>
     /// Checks the provenance a module has to carry: where it was read from, and which Forms release the
     /// export it came from declared.
     ///
@@ -413,7 +427,7 @@ public static class FormsIntermediateReader
     /// normalized, matched on whole segments so a sibling directory whose name merely begins with the
     /// root's cannot pass as one beneath it.
     /// </summary>
-    private static (string? SourcePath, string? Error) Provenance(JsonElement module, string name, string formsFamily, string sourceRoot)
+    private static (ModuleProvenance? Provenance, string? Error) Provenance(JsonElement module, string name, string formsFamily, string sourceRoot)
     {
         if (Trimmed(module, "sourcePath") is not { } sourcePath)
         {
@@ -473,7 +487,7 @@ public static class FormsIntermediateReader
 
         if (declaredVersion is null)
         {
-            return (normalizedPath, null);
+            return (new ModuleProvenance(normalizedPath, declaredFamily, null), null);
         }
 
         if (declaredVersion.Trim() is not { Length: > 0 } version)
@@ -491,7 +505,7 @@ public static class FormsIntermediateReader
         }
 
         return string.Equals(assessment.Family, declaredFamily, StringComparison.Ordinal)
-            ? (normalizedPath, null)
+            ? (new ModuleProvenance(normalizedPath, declaredFamily, assessment), null)
             : (null, $"Module '{name}' declares Oracle Forms version '{version}', which this catalog reads as family '{assessment.Family}', " +
               $"while the same module records family '{declaredFamily}'. The two disagree about one module, so nothing was read from it.");
     }
@@ -526,7 +540,7 @@ public static class FormsIntermediateReader
     /// Nothing here is interpreted. A fact's kind has to be Declared, because this fleet writes no other
     /// kind and a document claiming an inferred or defaulted fact is not one it wrote.
     /// </summary>
-    private static (FormsSourceFactSet? Facts, string? Error) ReadSourceFacts(JsonElement module, string moduleName)
+    private static (FormsSourceFactSet? Facts, string? Error) ReadSourceFacts(JsonElement module, string moduleName, ModuleProvenance provenance)
     {
         string scope = $"module '{moduleName}'";
 
@@ -548,6 +562,11 @@ public static class FormsIntermediateReader
         if (wrapperError is not null)
         {
             return (null, wrapperError);
+        }
+
+        if (wrapperVersion is not null && WrapperRejection(wrapperVersion, scope, provenance) is { } wrapperRejection)
+        {
+            return (null, wrapperRejection);
         }
 
         (JsonElement declared, string? arrayError) = ArrayField(set, "facts", $"the 'sourceFacts' of {scope}", FormsSourceFactReader.MaxFacts);
@@ -805,6 +824,59 @@ public static class FormsIntermediateReader
             ? (null, $"The module element retained for {scope} declares name '{factName}'. The retained facts and the module they belong to " +
                 "disagree about which module was read, so nothing was read from the document.")
             : (new FormsSourceFactSet(digest, wrapperVersion, facts), null);
+    }
+
+    /// <summary>
+    /// Why the wrapper version retained beside a module is not one the producer could have written, or
+    /// nothing.
+    ///
+    /// The string itself is a verbatim copy of an attribute the file carried and this fleet adjudicates
+    /// nothing from it here. What is checked is that it agrees with the release decision the same document
+    /// records: normalization reads every version attribute an export declares — the Module wrapper's
+    /// among them — and refuses the estate when one of them is uninterpretable, names a second family, or
+    /// names a second release rather than the same one stated less precisely. A representation carrying a
+    /// wrapper string that would have failed any of those was not written by the phase it claims to come
+    /// from, and reading it would attribute generated screens to a release nothing adjudicated.
+    ///
+    /// Only the catalog's existing rules decide this. No numeric token is reshaped into a release, so an
+    /// Oracle internal build number is refused here exactly as normalization refuses it.
+    /// </summary>
+    private static string? WrapperRejection(string wrapperVersion, string scope, ModuleProvenance provenance)
+    {
+        if (wrapperVersion.Trim() is not { Length: > 0 } version)
+        {
+            return $"The 'sourceFacts' of {scope} record an empty 'wrapperDeclaredVersion'. An export whose wrapper declared no version " +
+                "retains none at all, so a field present and blank is not one this fleet wrote.";
+        }
+
+        OracleVersionAssessment assessment = OracleLegacyVersionCatalog.Forms(version);
+
+        if (!assessment.IsRecognized)
+        {
+            return $"The 'sourceFacts' of {scope} retain wrapper version '{version}', which matches no Oracle Forms release this catalog knows. " +
+                "Normalization adjudicates every version attribute a supplied export declares, including the wrapper's, and refuses the estate " +
+                "when one cannot be interpreted, so it wrote no representation carrying this. Nothing was read from the document.";
+        }
+
+        if (string.Equals(provenance.DeclaredFamily, OracleLegacyVersionCatalog.UnknownFamily, StringComparison.Ordinal))
+        {
+            return $"The 'sourceFacts' of {scope} retain wrapper version '{version}' while the module records that its export declared no " +
+                "release at all. The wrapper's version is one of the declarations that decides the release, so a module reading as versionless " +
+                "beside a wrapper that named one describes no export this fleet read.";
+        }
+
+        if (!string.Equals(assessment.Family, provenance.DeclaredFamily, StringComparison.Ordinal))
+        {
+            return $"The 'sourceFacts' of {scope} retain wrapper version '{version}', which this catalog reads as Oracle Forms family " +
+                $"'{assessment.Family}', while the module records family '{provenance.DeclaredFamily}'. One export cannot have been produced " +
+                "by two families, so nothing was read from the document.";
+        }
+
+        return provenance.DeclaredRelease is { } declared && !assessment.IsCompatibleWith(declared)
+            ? $"The 'sourceFacts' of {scope} retain wrapper version '{version}' while the module declares '{declared.Supplied}'. These are two " +
+              "Oracle Forms releases rather than one release stated at different precision, and normalization refuses an export that declares " +
+              "both, so nothing was read from the document."
+            : null;
     }
 
     /// <summary>

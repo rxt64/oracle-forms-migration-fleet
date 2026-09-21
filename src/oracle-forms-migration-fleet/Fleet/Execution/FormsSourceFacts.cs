@@ -36,7 +36,9 @@ public sealed record FormsSourceAttribute(string Name, string Namespace, string 
 /// <param name="Text">
 /// Direct text exactly as the loader supplied it, or null only where the element declared no text node at
 /// all. The loader drops insignificant inter-element whitespace, so whitespace reaching here is significant
-/// — mixed content, or an element under <c>xml:space="preserve"</c> — and is retained rather than blanked.
+/// — an element under <c>xml:space="preserve"</c> — and is retained rather than blanked. Text declared
+/// beside child elements is refused rather than retained, because it is held as one value and rebuilt
+/// before those children.
 /// </param>
 public sealed record FormsSourceFact(
     string Id,
@@ -189,6 +191,12 @@ public static class FormsSourceFactReader
             {
                 return (null, $"'{fact.Id}' sits under '{fact.ParentId}', which this inventory does not retain.");
             }
+            else if (parent.Nodes().OfType<XText>().Any(node => !string.IsNullOrWhiteSpace(node.Value)))
+            {
+                return (null, $"'{fact.Id}' sits under '{fact.ParentId}', which retains text of its own beside it. Direct text is rebuilt " +
+                    "before an element's children, so the retaining side refuses a document that declares both and an inventory carrying " +
+                    "one is not a tree it wrote.");
+            }
             else
             {
                 parent.Add(element);
@@ -332,6 +340,17 @@ public static class FormsSourceFactReader
         {
             return $"The direct text of '{id}' is {Count(text.Length)} characters and this build retains at most " +
                 $"{Count(MaxValueCharacters)}. The document was refused rather than retaining it in part.";
+        }
+
+        // An element's direct text is retained as one value and rebuilt before its children, so text
+        // interleaved with elements would come back reordered and the segments between them concatenated.
+        // Whitespace-only text is exempt: it is the indentation an export under xml:space="preserve"
+        // carries, and moving it changes no declared content.
+        if (element.HasElements && !string.IsNullOrWhiteSpace(text))
+        {
+            return $"'{id}' declares text directly beside child elements. This build retains an element's direct text as a single " +
+                "value written before its children, so the order the export declared could not be restored and the text between " +
+                "two elements would silently become text before both. The document was refused rather than retaining it reordered.";
         }
 
         facts.Add(new FormsSourceFact(

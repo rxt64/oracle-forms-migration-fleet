@@ -21,8 +21,18 @@ findings. QA fixes include projection/fact reconciliation, exact sibling ordinal
 and rejecting structural projection-limit findings rather than accepting an empty projection.
 
 These are local product tests, not evidence of executing a generated .NET target, a fresh browser flow,
-or an opt-in external integration. New increment remains uncommitted on feat/export-source-facts;
-no new exact-SHA remote CI result or PR is claimed.
+or an opt-in external integration. Published commit 8389baf1fba178dc181e495d191e7c87fe3c3512 is on
+feat/export-source-facts, PR https://github.com/rxt64/oracle-forms-migration-fleet/pull/33, based on PR32.
+The original main-only PR trigger did not run CI for this stacked base; feature-base PR CI is now enabled.
+Exact-SHA CI for the corrected commit remains pending; no deployment is claimed.
+
+GPT-6 Astra (copilot) independently reviewed the published SHA and ran 312 focused tests successfully.
+Review result: HOLD, with medium findings for wrapper-release inconsistency and mixed-content order loss,
+plus absent exact-SHA CI. Corrections reconcile release declarations using existing catalog rules and
+refuse unsupported mixed content instead of silently rearranging text. Post-repair focused tests:
+327 source parser/reader/normalization tests and 53 executor/workspace/application conversion tests passed.
+The earlier 1,508 result predates these repairs; focused Astra re-review is required.
+See astra-review-8389baf.md for the requirement-by-requirement record.
 
 ## Source qualification
 
