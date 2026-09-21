@@ -230,6 +230,9 @@ internal static class JUnitReportReader
         return Attribute(element, "tests") == cases.Count &&
             Attribute(element, "failures") == outcomes.Count(outcome => outcome.Name.LocalName == "failure") &&
             Attribute(element, "errors") == outcomes.Count(outcome => outcome.Name.LocalName == "error") &&
-            Attribute(element, "skipped") == outcomes.Count(outcome => outcome.Name.LocalName == "skipped");
+            OptionalAttribute(element, "skipped") == outcomes.Count(outcome => outcome.Name.LocalName == "skipped");
     }
+
+    private static int OptionalAttribute(XElement element, string name) =>
+        int.Parse((string?)element.Attribute(name) ?? "0", System.Globalization.CultureInfo.InvariantCulture);
 }

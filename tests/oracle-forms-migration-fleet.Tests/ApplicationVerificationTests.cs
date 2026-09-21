@@ -175,6 +175,23 @@ public sealed class ApplicationVerificationTests
     }
 
     [Fact]
+    public async Task Junit_without_optional_skipped_counter_can_pass()
+    {
+        using TemporaryWorkspace workspace = WorkspaceWithGeneratedApplication();
+        void WriteVitestShape(string directory, ApplicationVerificationLeg _) => WriteXml(
+            directory,
+            "<testsuite tests=\"1\" failures=\"0\" errors=\"0\"><testcase name=\"vitest pass\" /></testsuite>");
+        GeneratedApplicationVerificationAdapter adapter = new(
+            new StubApplicationTestGateway(s_pass, s_pass, WriteVitestShape),
+            new StubTargetVerificationGateway(s_pass, WriteVitestShape));
+
+        PhaseExecutionResult result = await adapter.ExecuteAsync(Context(workspace), CancellationToken.None);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(3, Count(workspace.Read(ReportPath()), "\"state\": \"Executed\""));
+    }
+
+    [Fact]
     public async Task Credential_like_junit_failure_text_is_withheld()
     {
         using TemporaryWorkspace workspace = WorkspaceWithGeneratedApplication();
