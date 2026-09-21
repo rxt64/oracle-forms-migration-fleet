@@ -72,6 +72,8 @@ public sealed class GeneratedApplicationProcessIntegrationTests
         ProcessApplicationTestGateway gateway = new();
         string backendReports = workspace.Absolute("reports/backend");
         string frontendReports = workspace.Absolute("reports/frontend");
+        Directory.CreateDirectory(backendReports);
+        Directory.CreateDirectory(frontendReports);
         DateTimeOffset backendStarted = DateTimeOffset.UtcNow;
         ApplicationTestRun backend = await gateway.RunBackendTestsAsync(
             workspace.Absolute("generated/backend"), backendReports, CancellationToken.None);

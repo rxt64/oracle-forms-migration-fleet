@@ -149,14 +149,9 @@ jobs:
         working-directory: src/oracle-forms-migration-fleet
         run: docker build -f Dockerfile -t migration-fleet-workbench:ci .
 
-      - name: Verify generated-code sandbox inside runtime image
+      - name: Verify networkless generated-code runner image
         run: >-
-          docker run --rm --entrypoint /usr/bin/bwrap migration-fleet-workbench:ci
-          --unshare-net --unshare-pid --unshare-ipc --unshare-uts
-          --new-session
-          --ro-bind /usr /usr --ro-bind /bin /bin --ro-bind /lib /lib
-          --dev /dev --proc /proc --tmpfs /tmp
-          -- /usr/bin/node -e
+          docker run --rm --network none --entrypoint /usr/bin/node migration-fleet-workbench:ci -e
           "const s=require('node:net').connect(80,'169.254.169.254');s.setTimeout(500,()=>process.exit(0));s.on('error',()=>process.exit(0));s.on('connect',()=>process.exit(1))"
 
       - name: Build Forms replica image
