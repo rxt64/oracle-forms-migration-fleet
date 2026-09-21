@@ -126,6 +126,26 @@ public class BuildAndStaticValidationPhaseTests
 public class ProcessApplicationBuildGatewayTests
 {
     [Fact]
+    public async Task Generated_builds_never_fall_back_to_direct_host_execution()
+    {
+        if (OperatingSystem.IsLinux())
+        {
+            return;
+        }
+
+        using TemporaryWorkspace workspace = new();
+        ProcessApplicationBuildGateway gateway = new();
+
+        ApplicationBuildResult java = await gateway.BuildJavaAsync(workspace.Root, CancellationToken.None);
+        ApplicationBuildResult react = await gateway.BuildReactAsync(workspace.Root, CancellationToken.None);
+
+        Assert.False(java.ToolAvailable);
+        Assert.False(react.ToolAvailable);
+        Assert.Contains("bubblewrap", java.Output, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("bubblewrap", react.Output, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Output_tail_is_bounded_and_preserves_the_end()
     {
         string output = new string('a', 40_000) + "THE END";

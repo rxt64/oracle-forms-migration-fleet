@@ -105,6 +105,19 @@ installs those tools. A generation run writes `reports/build-and-static-analysis
 command, exit code, and bounded output for both Java/Spring Boot and React/TypeScript. A missing tool is a
 phase failure, not a skipped or successful build.
 
+An approved sandbox run separately writes `reports/generated-application-verification.json`. Maven
+executes generated Spring tests, Vitest executes generated browser interactions, and the generated
+PostgreSQL schema is executed in a disposable `ofm_verify_*` schema that is removed afterward. Missing,
+malformed, stale, zero-test, timed-out, setup-failed, or failing legs block the phase and production
+promotion. This report tests generated output only; it does not contact Oracle or establish source
+behavior equivalence.
+
+Generated Maven/Vite builds and tests never execute directly in the workbench process namespace. The
+image carries read-only dependency caches built from checked-in manifests; runtime commands use exact
+generated lockfiles, `--offline`, private copied source, isolated home/tmp directories, and a bubblewrap
+network namespace. If bubblewrap or a cache is unavailable, verification fails rather than falling back
+to host execution. Raw JUnit XML is deleted after redaction and is not included in workspace exports.
+
 ## Rollback
 
 Each CI-built image records its supported platform-schema range in immutable

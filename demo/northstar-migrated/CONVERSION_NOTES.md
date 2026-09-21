@@ -61,7 +61,9 @@ JSON 404.
 | `frontend/index.html` | Browser client shell carrying the source application's nine modules. |
 | `frontend/public/app.js` | Browser client behaviour, calling every workflow route. |
 | `frontend/public/styles.css` | Browser client presentation, unchanged from the source application. |
+| `frontend/tests/app.test.js` | Executable browser interaction test for generated Northstar navigation. |
 | `frontend/package.json` | Vite build for the static browser client. No framework dependency. |
+| `frontend/package-lock.json` | Pinned dependency lock for offline generated UI verification. |
 | `frontend/vite.config.ts` | Vite production build configuration. |
 | `backend/Dockerfile` | Container build for the migrated back end. No credential is baked into the image. |
 | `backend/.dockerignore` | Keeps build output and notes out of the image context. |

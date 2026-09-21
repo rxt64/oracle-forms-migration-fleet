@@ -29,17 +29,18 @@ public class MigrationLifecycleTests
     [InlineData(MigrationPhase.HumanAcceptance, 9)]
     [InlineData(MigrationPhase.ProductionCutover, 10)]
     [InlineData(MigrationPhase.SourceNormalization, 11)]
+    [InlineData(MigrationPhase.GeneratedApplicationVerification, 12)]
     public void Every_phase_keeps_its_persisted_numeric_value(MigrationPhase phase, int expected) =>
         Assert.Equal(expected, (int)phase);
 
     [Fact]
-    public void The_numeric_map_is_exactly_these_twelve_phases()
+    public void The_numeric_map_is_exactly_these_thirteen_phases()
     {
         // Catches a phase added without deciding its wire value, and a value reused for two phases.
         MigrationPhase[] all = Enum.GetValues<MigrationPhase>();
 
-        Assert.Equal(12, all.Length);
-        Assert.Equal([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], all.Select(phase => (int)phase).Order());
+        Assert.Equal(13, all.Length);
+        Assert.Equal([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], all.Select(phase => (int)phase).Order());
     }
 
     [Fact]
@@ -62,6 +63,7 @@ public class MigrationLifecycleTests
                 MigrationPhase.ApplicationCodeConversion,
                 MigrationPhase.DatabaseConversion,
                 MigrationPhase.BuildAndStaticValidation,
+                MigrationPhase.GeneratedApplicationVerification,
                 MigrationPhase.DifferentialBehaviorTesting,
                 MigrationPhase.SandboxDataMigration,
                 MigrationPhase.DataReconciliation,

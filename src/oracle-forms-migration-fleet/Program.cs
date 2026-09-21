@@ -117,6 +117,7 @@ if (FoundryAgentClient.TryParseEndpoint(
 //   - x-platform-server response header
 var builder = AgentHost.CreateBuilder(args);
 builder.Services.AddSingleton<IApplicationBuildGateway, ProcessApplicationBuildGateway>();
+builder.Services.AddSingleton<IApplicationTestGateway, ProcessApplicationTestGateway>();
 
 // The workbench API speaks enums as strings so the static console never carries numeric enum values.
 builder.Services.ConfigureHttpJsonOptions(options =>
@@ -194,13 +195,20 @@ string sandboxDatabase = Environment.GetEnvironmentVariable("SANDBOX_PGDATABASE"
 bool sandboxDatabaseConfigured = !string.IsNullOrWhiteSpace(sandboxHost) && !string.IsNullOrWhiteSpace(sandboxUser);
 if (sandboxDatabaseConfigured)
 {
+    TokenCredential sandboxCredential = string.IsNullOrWhiteSpace(managedIdentityClientId)
+        ? new AzureDeveloperCliCredential(new AzureDeveloperCliCredentialOptions { ProcessTimeout = TimeSpan.FromSeconds(30) })
+        : new ManagedIdentityCredential(ManagedIdentityId.FromUserAssignedClientId(managedIdentityClientId));
     builder.Services.AddSingleton<IDataMigrationGateway>(new PostgresDataMigrationGateway(
         sandboxHost!,
         sandboxDatabase,
         sandboxUser!,
-        string.IsNullOrWhiteSpace(managedIdentityClientId)
-            ? new AzureDeveloperCliCredential(new AzureDeveloperCliCredentialOptions { ProcessTimeout = TimeSpan.FromSeconds(30) })
-            : new ManagedIdentityCredential(ManagedIdentityId.FromUserAssignedClientId(managedIdentityClientId))));
+        sandboxCredential));
+    builder.Services.AddSingleton<ITargetApplicationVerificationGateway>(
+        new PostgresTargetApplicationVerificationGateway(
+            sandboxHost!,
+            sandboxDatabase,
+            sandboxUser!,
+            sandboxCredential));
 
     Console.WriteLine($"[INFO] Sandbox data migration target: {sandboxHost}. Authentication is Entra only.");
 }

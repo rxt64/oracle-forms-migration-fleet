@@ -446,7 +446,9 @@ internal static class WorkbenchEndpoints
                     gateway,
                     context.RequestServices.GetService<Fleet.Agents.CritiqueRepairOrchestrator>(),
                     context.RequestServices.GetService<ProgramUnitRepairLoop>(),
-                    context.RequestServices.GetService<IApplicationBuildGateway>()),
+                    context.RequestServices.GetService<IApplicationBuildGateway>(),
+                    context.RequestServices.GetService<IApplicationTestGateway>(),
+                    context.RequestServices.GetService<ITargetApplicationVerificationGateway>()),
                 preparation.MutationAuthorizer);
 
             // The run moves off the request thread to keep progress frames flowing while it works.
@@ -962,6 +964,10 @@ internal static class WorkbenchEndpoints
         lastSequence = run.LastSequence,
         cancelRequestedUtc = run.CancelRequestedUtc,
         failureReason = run.FailureReason,
+        applicationVerificationState = run.Outcome?.Phases
+            .FirstOrDefault(phase => phase.Phase == nameof(MigrationPhase.GeneratedApplicationVerification))?.State,
+        applicationVerificationDetail = run.Outcome?.Phases
+            .FirstOrDefault(phase => phase.Phase == nameof(MigrationPhase.GeneratedApplicationVerification))?.Detail,
     };
 
     /// <summary>

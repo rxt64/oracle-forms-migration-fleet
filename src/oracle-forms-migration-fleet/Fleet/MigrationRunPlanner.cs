@@ -165,6 +165,7 @@ public static class MigrationRunPlanner
         AttestationKind[] requiredAttestations =
         [
             AttestationKind.SandboxMigrationCompleted,
+            AttestationKind.GeneratedApplicationTestsPassed,
             AttestationKind.DataReconciliationPassed,
             AttestationKind.HumanAcceptanceSigned,
         ];
@@ -453,6 +454,14 @@ public static class MigrationRunPlanner
                 [],
                 [new ArtifactReference($"{root}/reports/build-and-static-analysis.json", ArtifactKind.ValidationReport, "Build, lint, and static analysis results for the generated code.")],
                 ["npm/vite build", "Maven or Gradle build", "Static analysis over generated sources"],
+                []),
+
+            new(MigrationPhase.GeneratedApplicationVerification, FleetRole.BuildAndTestEngineer, PhaseStatus.Planned,
+                MutationClass.SandboxDatabaseWrite, ExecutionMode.SandboxMigration, RequiresApproval: true,
+                "Execute generated Spring tests, React interaction tests, and generated DDL against an isolated disposable PostgreSQL schema. This does not compare behavior with Oracle Forms.",
+                [nameof(EvidenceKind.DatabaseSchemaExport)],
+                [new ArtifactReference($"{root}/reports/generated-application-verification.json", ArtifactKind.ExecutableVerificationReport, "Machine-readable backend, frontend interaction, and disposable target database test results; no source-runtime equivalence is asserted.")],
+                ["Maven Surefire", "Vitest and Testing Library", "Disposable PostgreSQL schema"],
                 []),
 
             new(MigrationPhase.DifferentialBehaviorTesting, FleetRole.BuildAndTestEngineer, PhaseStatus.Planned,

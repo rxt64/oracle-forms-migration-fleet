@@ -34,6 +34,19 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Install network-isolated test runner
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+          sudo chown root:root /usr/bin/bwrap
+          sudo chmod u+s /usr/bin/bwrap
+
       # The client must be installed before the .NET build: the csproj only runs the vite build when
       # ClientApp/node_modules already exists, and would otherwise silently produce no wwwroot.
       - uses: actions/setup-node@v4
@@ -65,6 +78,39 @@ jobs:
       - name: Restore
         run: dotnet restore
 
+      - name: Prime trusted generated-app dependency caches
+        shell: bash
+        run: |
+          set -euo pipefail
+          CACHE_ROOT="$RUNNER_TEMP/ofm-verification-cache"
+          mkdir -p "$CACHE_ROOT/m2" "$CACHE_ROOT/npm"
+          mvn --batch-mode --no-transfer-progress \
+            -Dmaven.repo.local="$CACHE_ROOT/m2" \
+            dependency:get \
+            -Dartifact=org.apache.maven.surefire:surefire-junit-platform:3.2.5 \
+            -Dtransitive=true
+          mvn --batch-mode --no-transfer-progress \
+            -Dmaven.repo.local="$CACHE_ROOT/m2" \
+            dependency:get \
+            -Dartifact=org.junit.platform:junit-platform-launcher:1.10.5 \
+            -Dtransitive=true
+          mvn --batch-mode --no-transfer-progress \
+            -f src/oracle-forms-migration-fleet/Fleet/Execution/Templates/Verification/pom.xml \
+            -Dmaven.repo.local="$CACHE_ROOT/m2" \
+            -Dspring-boot.repackage.skip=true \
+            -DskipTests package
+          npm ci \
+            --prefix src/oracle-forms-migration-fleet/Fleet/Execution/Templates/Verification/Generic \
+            --ignore-scripts --no-audit --no-fund --cache="$CACHE_ROOT/npm"
+          npm ci \
+            --prefix src/oracle-forms-migration-fleet/Fleet/Execution/Templates/Verification/Northstar \
+            --ignore-scripts --no-audit --no-fund --cache="$CACHE_ROOT/npm"
+          rm -rf \
+            src/oracle-forms-migration-fleet/Fleet/Execution/Templates/Verification/Generic/node_modules \
+            src/oracle-forms-migration-fleet/Fleet/Execution/Templates/Verification/Northstar/node_modules
+          echo "WORKBENCH_VERIFICATION_MAVEN_REPOSITORY=$CACHE_ROOT/m2" >> "$GITHUB_ENV"
+          echo "WORKBENCH_VERIFICATION_NPM_CACHE=$CACHE_ROOT/npm" >> "$GITHUB_ENV"
+
       - name: Build
         run: dotnet build --no-restore -c Release -p:SkipClientBuild=true
 
@@ -90,6 +136,14 @@ jobs:
           --filter "Category=PostgresIntegration"
           --logger "console;verbosity=normal"
 
+      - name: Execute independently generated applications
+        env:
+          RUN_GENERATED_APP_INTEGRATION: 'true'
+        run: >-
+          dotnet test --no-build -c Release -p:SkipClientBuild=true
+          --filter "Category=GeneratedApplicationIntegration"
+          --logger "console;verbosity=normal"
+
       - name: Test
         run: dotnet test --no-build -c Release -p:SkipClientBuild=true --logger "console;verbosity=normal"
 
@@ -104,6 +158,11 @@ jobs:
       - name: Build workbench image
         working-directory: src/oracle-forms-migration-fleet
         run: docker build -f Dockerfile -t migration-fleet-workbench:ci .
+
+      - name: Verify networkless generated-code runner image
+        run: >-
+          docker run --rm --network none --entrypoint /usr/bin/node migration-fleet-workbench:ci -e
+          "const s=require('node:net').connect(80,'169.254.169.254');s.setTimeout(500,()=>process.exit(0));s.on('error',()=>process.exit(0));s.on('connect',()=>process.exit(1))"
 
       - name: Build Forms replica image
         working-directory: src/oracle-forms-demo

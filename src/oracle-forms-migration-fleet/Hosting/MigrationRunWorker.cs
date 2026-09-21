@@ -136,7 +136,9 @@ public sealed class MigrationRunWorker(
                 gateway,
                 services.GetService<Fleet.Agents.CritiqueRepairOrchestrator>(),
                 services.GetService<ProgramUnitRepairLoop>(),
-                services.GetService<IApplicationBuildGateway>()),
+                services.GetService<IApplicationBuildGateway>(),
+                services.GetService<IApplicationTestGateway>(),
+                services.GetService<ITargetApplicationVerificationGateway>()),
             authorizer);
 
         WorkbenchExecution.ResetOutput(workspaceRoot, request.OutputRoot);

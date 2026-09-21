@@ -84,6 +84,11 @@ public static class ApplicationCodeEmitter
             }
         }
 
+        if (!recognized)
+        {
+            files.Add(BuildControllerTest(tables[0]));
+        }
+
         if (recognized)
         {
             files.AddRange(NorthstarBankingApplicationProfile.Generate(schema, BasePackage, tables));
@@ -93,6 +98,10 @@ public static class ApplicationCodeEmitter
             files.Add(BuildReactTypes(tables));
             files.Add(BuildReactClient(tables));
             files.Add(BuildReactPackage());
+            files.Add(new GeneratedFile(
+                "frontend/package-lock.json",
+                GeneratedApplicationVerificationTemplates.Read("Generic/package-lock.json"),
+                "Pinned dependency lock for offline generated UI verification."));
             files.Add(BuildTypeScriptConfig());
             files.Add(BuildViteConfig());
             files.Add(BuildReactIndex());
@@ -126,6 +135,7 @@ public static class ApplicationCodeEmitter
             files.Add(screens.Count > 0
                 ? BuildReactAppFromForms(screens[0], tables, findings)
                 : BuildReactApp(tables));
+            files.Add(BuildReactInteractionTest(tables[0]));
         }
 
         files.Add(BuildDockerfile());
@@ -463,6 +473,53 @@ public static class ApplicationCodeEmitter
             $"REST endpoints for {table.Name}.");
     }
 
+    private static GeneratedFile BuildControllerTest(OracleTable table)
+    {
+        string className = ClassName(table.Name);
+        string route = RouteName(table.Name);
+        string field = FieldName(table.Columns[0].Name);
+        string value = JavaSampleValue(table.Columns[0]);
+
+        return new GeneratedFile(
+            $"backend/src/test/java/{BasePackage.Replace('.', '/')}/api/{className}ControllerTest.java",
+            $$"""
+            package {{BasePackage}}.api;
+
+            import {{BasePackage}}.domain.{{className}};
+            import {{BasePackage}}.repository.{{className}}Repository;
+            import org.junit.jupiter.api.Test;
+            import org.springframework.beans.factory.annotation.Autowired;
+            import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+            import org.springframework.boot.test.mock.mockito.MockBean;
+            import org.springframework.test.web.servlet.MockMvc;
+
+            import java.util.List;
+
+            import static org.mockito.Mockito.when;
+            import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+            import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+            import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+            @WebMvcTest({{className}}Controller.class)
+            class {{className}}ControllerTest {
+                @Autowired MockMvc mvc;
+                @MockBean {{className}}Repository repository;
+
+                @Test
+                void lists_generated_entities() throws Exception {
+                    {{className}} row = new {{className}}();
+                    row.set{{char.ToUpperInvariant(field[0]) + field[1..]}}({{value}});
+                    when(repository.findAll()).thenReturn(List.of(row));
+
+                    mvc.perform(get("/api/{{route}}"))
+                        .andExpect(status().isOk())
+                        .andExpect(jsonPath("$[0].{{field}}").exists());
+                }
+            }
+            """,
+            $"Executable Spring MVC contract test for {table.Name}.");
+    }
+
     private static GeneratedFile BuildReactTypes(IReadOnlyList<OracleTable> tables)
     {
         StringBuilder builder = new();
@@ -674,27 +731,41 @@ public static class ApplicationCodeEmitter
 
         private static GeneratedFile BuildReactPackage() => new(
                 "frontend/package.json",
-                """
+                GeneratedApplicationVerificationTemplates.Read("Generic/package.json"),
+                "Pinned React, TypeScript, Vite, and interaction-test dependencies.");
+
+                private static GeneratedFile BuildReactInteractionTest(OracleTable table)
                 {
-                    "name": "migrated-forms-ui",
-                    "private": true,
-                    "version": "1.0.0",
-                    "type": "module",
-                    "scripts": {
-                        "build": "tsc --noEmit && vite build"
-                    },
-                    "dependencies": {
-                        "@vitejs/plugin-react": "4.3.4",
-                        "vite": "6.1.0",
-                        "typescript": "5.7.3",
-                        "react": "19.0.0",
-                        "react-dom": "19.0.0",
-                        "@types/react": "19.0.8",
-                        "@types/react-dom": "19.0.3"
-                    }
+                        string className = ClassName(table.Name);
+                        string field = FieldName(table.Columns[0].Name);
+                        string value = TypeScriptSampleValue(table.Columns[0]);
+
+                        return new GeneratedFile(
+                                "frontend/src/App.test.tsx",
+                                $$"""
+                                import { render, screen } from "@testing-library/react";
+                                import { afterEach, describe, expect, it, vi } from "vitest";
+                                import App from "./App";
+                                import type { {{className}} } from "./types";
+
+                                afterEach(() => vi.unstubAllGlobals());
+
+                                describe("generated {{className}} screen", () => {
+                                    it("loads and renders target API data", async () => {
+                                        const row = { {{field}}: {{value}} } as {{className}};
+                                        vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify([row]), {
+                                            status: 200,
+                                            headers: { "content-type": "application/json" },
+                                        })));
+
+                                        render(<App />);
+
+                                        expect(await screen.findByText(String(row.{{field}}))).toBeTruthy();
+                                    });
+                                });
+                                """,
+                                $"Executable React interaction test for {table.Name}.");
                 }
-                """,
-                "Pinned React, TypeScript, and Vite build dependencies.");
 
         private static GeneratedFile BuildTypeScriptConfig() => new(
                 "frontend/tsconfig.json",
@@ -848,6 +919,23 @@ public static class ApplicationCodeEmitter
         "Long" or "Double" or "BigDecimal" => "number",
         "byte[]" => "string",
         _ => "string",
+    };
+
+    private static string JavaSampleValue(OracleColumn column) => JavaType(column) switch
+    {
+        "Long" => "1L",
+        "Double" => "1.0d",
+        "BigDecimal" => "new java.math.BigDecimal(\"1.0\")",
+        "LocalDate" => "java.time.LocalDate.of(2024, 1, 1)",
+        "LocalDateTime" => "java.time.LocalDateTime.of(2024, 1, 1, 0, 0)",
+        "byte[]" => "new byte[] { 1 }",
+        _ => "\"verified-value\"",
+    };
+
+    private static string TypeScriptSampleValue(OracleColumn column) => TypeScriptType(column) switch
+    {
+        "number" => "1",
+        _ => "\"verified-value\"",
     };
 
     private static string ClassName(string tableName)

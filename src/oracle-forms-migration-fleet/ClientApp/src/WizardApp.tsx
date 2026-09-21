@@ -534,6 +534,7 @@ function CapabilityStates({ execution }: { execution: ExecutionResult | null }) 
   const generated = execution?.artifacts.length ?? 0;
   const normalizedForms = execution?.artifacts.some((artifact) => artifact.path.endsWith("/forms-ir.json")) ?? false;
   const build = execution?.phases.find((phase) => phase.phase === "BuildAndStaticValidation");
+  const applicationVerification = execution?.phases.find((phase) => phase.phase === "GeneratedApplicationVerification");
   const behavior = execution?.attestations.find((attestation) => attestation.kind === "DifferentialBehaviorTestPassed" && attestation.succeeded);
   const rows: Array<{ label: string; state: "done" | "pending" | "retained" | "failed" | "unavailable"; detail: string }> = [
     { label: "Plan generated", state: "done", detail: "The deterministic planner produced the plan below." },
@@ -552,6 +553,15 @@ function CapabilityStates({ execution }: { execution: ExecutionResult | null }) 
         : build?.state === "Failed"
           ? "Build or static validation failed; inspect the phase report before continuing."
           : "No build and static-validation phase has completed in this tab yet.",
+    },
+    {
+      label: "Generated app tested",
+      state: applicationVerification?.state === "Executed" ? "done" : applicationVerification?.state === "Failed" ? "failed" : "pending",
+      detail: applicationVerification?.state === "Executed"
+        ? "Generated Spring tests, React interactions, and disposable PostgreSQL target checks passed. This does not assert Oracle runtime equivalence."
+        : applicationVerification?.state === "Failed"
+          ? "One or more generated-application test legs failed. Open the machine-readable verification report."
+          : "No generated-application verification phase has completed in this tab yet.",
     },
     {
       label: "Behaviour tested",

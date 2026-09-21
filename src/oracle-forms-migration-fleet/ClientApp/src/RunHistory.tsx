@@ -55,6 +55,9 @@ export function RunHistory({
         <div>
           <strong>{run.applicationName}</strong>
           <small>{run.engagementId} · {new Date(run.enqueuedUtc).toLocaleString()}</small>
+          {run.applicationVerificationState && <small>
+            Generated app tests: {run.applicationVerificationState === "Executed" ? "passed" : run.applicationVerificationState}
+          </small>}
         </div>
         <span className={`mf-pill ${tone(run.state)}`}>{run.state}</span>
         <button type="button" className="mf-secondary" onClick={() => onOpen(run.runId)}>

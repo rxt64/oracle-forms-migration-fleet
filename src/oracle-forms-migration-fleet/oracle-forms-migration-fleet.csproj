@@ -33,6 +33,7 @@
   <ItemGroup>
     <!-- Application templates the generators emit. Embedded so nothing is read from the repository at run time. -->
     <EmbeddedResource Include="Fleet\Execution\Templates\Northstar\*" />
+    <EmbeddedResource Include="Fleet\Execution\Templates\Verification\**\*" />
   </ItemGroup>
 
   <Target Name="BuildClientApp" BeforeTargets="Build;Publish" Inputs="@(ClientAppSource)" Outputs="$(ClientAppRoot)\.build-stamp" Condition="'$(SkipClientBuild)' != 'true' and Exists('$(ClientAppRoot)\node_modules')">

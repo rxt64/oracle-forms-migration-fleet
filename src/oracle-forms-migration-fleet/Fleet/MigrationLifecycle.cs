@@ -22,6 +22,7 @@ public static class MigrationLifecycle
         MigrationPhase.ApplicationCodeConversion,
         MigrationPhase.DatabaseConversion,
         MigrationPhase.BuildAndStaticValidation,
+        MigrationPhase.GeneratedApplicationVerification,
         MigrationPhase.DifferentialBehaviorTesting,
         MigrationPhase.SandboxDataMigration,
         MigrationPhase.DataReconciliation,
