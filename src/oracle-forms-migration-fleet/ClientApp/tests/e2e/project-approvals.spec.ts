@@ -165,6 +165,15 @@ test.describe("project membership and approvals", () => {
       const response = await request.get(path, { headers: { [OWNER_HEADER]: OUTSIDER } });
       expect(response.status()).toBe(404);
     }
+    const declare = await request.post(`/api/workbench/projects/${project.projectId}/source-environments`, {
+      headers: { [OWNER_HEADER]: OUTSIDER },
+      data: { sourceEnvironmentId: "forbidden", name: "Forbidden", connector: "FormsBuilderWorker", pathAlias: "forbidden" },
+    });
+    expect(declare.status()).toBe(404);
+    const probe = await request.post(`/api/workbench/projects/${project.projectId}/source-environments/forbidden/probe`, {
+      headers: { [OWNER_HEADER]: OUTSIDER },
+    });
+    expect(probe.status()).toBe(404);
 
     const context = await request.get("/api/workbench/context", { headers: { [OWNER_HEADER]: OUTSIDER } });
     const body = await context.json() as { projects: { projectId: string }[] };
@@ -208,6 +217,8 @@ test.describe("project membership and approvals", () => {
       expect((await anonymous.get("/api/workbench/bootstrap")).status()).toBe(401);
       expect((await anonymous.get("/api/workbench/context")).status()).toBe(401);
       expect((await anonymous.post("/api/workbench/projects", { data: { name: "x" } })).status()).toBe(401);
+      expect((await anonymous.post("/api/workbench/projects/prj-1/source-environments", { data: {} })).status()).toBe(401);
+      expect((await anonymous.post("/api/workbench/projects/prj-1/source-environments/source-1/probe")).status()).toBe(401);
       expect((await anonymous.post("/api/workbench/agent", { data: { message: "inspect this migration" } })).status()).toBe(401);
       expect((await anonymous.post("/api/workbench/approvals/apr-1/revoke", { data: { expectedVersion: 1 } })).status()).toBe(401);
     } finally {
@@ -263,5 +274,50 @@ test.describe("project membership and approvals", () => {
     });
     const approvals = ((await listed.json()) as { approvals: ApprovalBody[] }).approvals;
     expect(approvals.find((item) => item.approvalId === approval.approvalId)!.state).toBe("Approved");
+  });
+
+  test("a Forms 6i source profile reports native prerequisites instead of simulated readiness", async ({ page, request }, testInfo) => {
+    onlyDesktop(testInfo.project.name);
+    const project = await createProject(request, REQUESTER, "Forms 6i compatibility");
+    const declared = await request.post(`/api/workbench/projects/${project.projectId}/source-environments`, {
+      headers: { [OWNER_HEADER]: REQUESTER },
+      data: {
+        sourceEnvironmentId: "legacy-order-entry",
+        name: "Legacy Order Entry",
+        connector: "FormsBuilderWorker",
+        expectedFormsVersion: "6i",
+        expectedDatabaseVersion: "9i",
+        pathAlias: "legacy-order-entry",
+        schemaAllowlist: ["LEGACY_LAB"],
+        secretReferences: [],
+        observedFormsVersion: "12.2.1.4",
+        readiness: "Verified",
+        version: 99,
+      },
+    });
+    expect(declared.status(), await declared.text()).toBe(201);
+    const source = await declared.json() as { version: number; readiness: string; observedFormsVersion: string | null };
+    expect(source.version).toBe(1);
+    expect(source.readiness).toBe("Declared");
+    expect(source.observedFormsVersion).toBeNull();
+
+    await page.setExtraHTTPHeaders({ [OWNER_HEADER]: REQUESTER });
+    await page.goto("/");
+    const panel = page.getByTestId("project-panel");
+    await panel.getByTestId("project-select").selectOption({ label: "Forms 6i compatibility" });
+    await expect(panel.getByTestId("source-readiness")).toHaveText("Declared");
+    await panel.getByTestId("probe-source").click();
+    const result = panel.getByTestId("source-probe-result");
+    await expect(result).toContainText("BlockedPrerequisite");
+    await expect(result).toContainText("OracleFormsInstallation");
+    await expect(result).toContainText("6.0.8.22.1");
+    await expect(result).toContainText("x86");
+    await expect(result).toContainText("WindowsWorker");
+    await expect(panel.getByText("Declare a new immutable source version")).toBeVisible();
+
+    await createProject(request, REQUESTER, "Second source project");
+    await panel.getByTestId("refresh-context").click();
+    await panel.getByTestId("project-select").selectOption({ label: "Second source project" });
+    await expect(panel.getByTestId("source-probe-result")).toHaveCount(0);
   });
 });

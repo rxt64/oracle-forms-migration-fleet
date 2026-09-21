@@ -446,6 +446,121 @@ public sealed class PlatformAccessService(
             409, "The target profile changed repeatedly while a new immutable version was being recorded.");
     }
 
+    public async Task<PlatformResult<SourceEnvironmentProfile>> EnsureSourceEnvironmentProfileAsync(
+        WorkbenchActor actor,
+        string projectId,
+        SourceEnvironmentDeclaration declaration,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(declaration);
+        PlatformResult<PlatformMembership> access = await RequireMembershipAsync(
+            actor, projectId, WorkbenchRoles.MigrationOperator, cancellationToken).ConfigureAwait(false);
+        if (!access.Succeeded)
+        {
+            return PlatformResult<SourceEnvironmentProfile>.Fail(access.Status, access.Error);
+        }
+
+        for (int attempt = 0; attempt < 8; attempt++)
+        {
+            SourceEnvironmentProfile? existing = await store.GetSourceEnvironmentProfileAsync(
+                actor.TenantId, projectId, declaration.SourceEnvironmentId, version: null, cancellationToken)
+                .ConfigureAwait(false);
+            int version = existing?.Version ?? 1;
+            SourceEnvironmentProfile candidate;
+            try
+            {
+                candidate = SourceEnvironmentProfiles.Create(
+                    actor.TenantId, projectId, declaration.SourceEnvironmentId, version,
+                    declaration.Name, declaration.Connector, declaration.ExpectedFormsVersion,
+                    declaration.ExpectedDatabaseVersion, declaration.PathAlias, declaration.SchemaAllowlist,
+                    declaration.SecretReferences, _clock());
+            }
+            catch (ArgumentException exception)
+            {
+                return PlatformResult<SourceEnvironmentProfile>.Fail(400, exception.Message);
+            }
+
+            if (existing is not null && string.Equals(existing.DeclarationHash, candidate.DeclarationHash, StringComparison.Ordinal))
+            {
+                return PlatformResult<SourceEnvironmentProfile>.Ok(existing);
+            }
+            if (existing is not null)
+            {
+                candidate = SourceEnvironmentProfiles.Create(
+                    actor.TenantId, projectId, declaration.SourceEnvironmentId, existing.Version + 1,
+                    declaration.Name, declaration.Connector, declaration.ExpectedFormsVersion,
+                    declaration.ExpectedDatabaseVersion, declaration.PathAlias, declaration.SchemaAllowlist,
+                    declaration.SecretReferences, _clock());
+            }
+
+            SourceEnvironmentProfile? stored = await store
+                .CreateSourceEnvironmentProfileAsync(candidate, cancellationToken).ConfigureAwait(false);
+            if (stored is not null)
+            {
+                return PlatformResult<SourceEnvironmentProfile>.Ok(stored);
+            }
+        }
+
+        return PlatformResult<SourceEnvironmentProfile>.Fail(
+            409, "The source environment profile changed repeatedly while a new immutable version was being recorded.");
+    }
+
+    public async Task<PlatformResult<SourceEnvironmentProbeResult>> ProbeSourceEnvironmentAsync(
+        WorkbenchActor actor,
+        string projectId,
+        string sourceEnvironmentId,
+        ISourceEnvironmentProbe probe,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(probe);
+        PlatformResult<PlatformMembership> access = await RequireMembershipAsync(
+            actor, projectId, WorkbenchRoles.MigrationOperator, cancellationToken).ConfigureAwait(false);
+        if (!access.Succeeded)
+        {
+            return PlatformResult<SourceEnvironmentProbeResult>.Fail(access.Status, access.Error);
+        }
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            SourceEnvironmentProfile? current = await store.GetSourceEnvironmentProfileAsync(
+                actor.TenantId, projectId, sourceEnvironmentId, version: null, cancellationToken).ConfigureAwait(false);
+            if (current is null)
+            {
+                return PlatformResult<SourceEnvironmentProbeResult>.Fail(404, "The source environment profile was not found.");
+            }
+
+            SourceEnvironmentProbeResult result = await probe.ProbeAsync(current, cancellationToken).ConfigureAwait(false);
+            SourceEnvironmentProfile observed;
+            try
+            {
+                observed = SourceEnvironmentProfiles.RecordProbe(current, result, _clock());
+            }
+            catch (ArgumentException exception)
+            {
+                return PlatformResult<SourceEnvironmentProbeResult>.Fail(400, exception.Message);
+            }
+            if (current.Readiness == observed.Readiness &&
+                string.Equals(current.ObservedFormsVersion, observed.ObservedFormsVersion, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(current.ObservedDatabaseVersion, observed.ObservedDatabaseVersion, StringComparison.OrdinalIgnoreCase) &&
+                current.LastProbeCapabilities.SequenceEqual(observed.LastProbeCapabilities) &&
+                current.LastBlockedPrerequisites.SequenceEqual(observed.LastBlockedPrerequisites) &&
+                current.LastContradictions.SequenceEqual(observed.LastContradictions, StringComparer.Ordinal))
+            {
+                return PlatformResult<SourceEnvironmentProbeResult>.Ok(result);
+            }
+            SourceEnvironmentProfile? stored = await store.CreateSourceEnvironmentProfileAsync(observed, cancellationToken).ConfigureAwait(false);
+            if (stored is not null)
+            {
+                return PlatformResult<SourceEnvironmentProbeResult>.Ok(result with
+                {
+                    ProfileVersion = stored.Version,
+                    ProfileHash = stored.CanonicalHash,
+                });
+            }
+        }
+        return PlatformResult<SourceEnvironmentProbeResult>.Fail(
+            409, "The source environment changed repeatedly while its probe result was being recorded.");
+    }
+
     public async Task<PlatformResult<IReadOnlyList<PlatformApproval>>> ApprovalsAsync(
         WorkbenchActor actor,
         string projectId,

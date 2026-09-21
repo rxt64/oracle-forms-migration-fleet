@@ -118,6 +118,9 @@ if (FoundryAgentClient.TryParseEndpoint(
 var builder = AgentHost.CreateBuilder(args);
 builder.Services.AddSingleton<IApplicationBuildGateway, ProcessApplicationBuildGateway>();
 builder.Services.AddSingleton<IApplicationTestGateway, ProcessApplicationTestGateway>();
+builder.Services.AddSingleton<ISourceEnvironmentProbe, UnavailableSourceEnvironmentProbe>();
+builder.Services.AddSingleton<IFormsModuleExtractor, UnavailableFormsModuleExtractor>();
+builder.Services.AddSingleton<IOracleSchemaExtractor, UnavailableOracleSchemaExtractor>();
 
 // The workbench API speaks enums as strings so the static console never carries numeric enum values.
 builder.Services.ConfigureHttpJsonOptions(options =>
@@ -186,6 +189,7 @@ else
 // Cloned and uploaded source lives in a per-session sandbox that is swept on a timer and on shutdown.
 SourceWorkspaceService sourceWorkspaces = new(Environment.GetEnvironmentVariable("WORKBENCH_SOURCE_ROOT"));
 builder.Services.AddSingleton(sourceWorkspaces);
+builder.Services.AddSingleton<ISourceSnapshotStore, WorkspaceSourceSnapshotStore>();
 
 // The sandbox database target is configured here, never by a caller, so a request can ask for a data
 // migration but cannot choose where the rows land.

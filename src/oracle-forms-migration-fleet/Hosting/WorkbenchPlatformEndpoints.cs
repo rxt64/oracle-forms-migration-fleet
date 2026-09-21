@@ -50,6 +50,18 @@ internal static class WorkbenchPlatformEndpoints
                     IReadOnlyList<PlatformTargetProfile> profiles = await platform.Store
                         .TargetProfilesAsync(actor.TenantId, project.ProjectId, cancellationToken);
 
+                    IReadOnlyList<SourceEnvironmentProfile> sourceEnvironments = [];
+                    string? sourceEnvironmentError = null;
+                    try
+                    {
+                        sourceEnvironments = await platform.Store
+                            .SourceEnvironmentProfilesAsync(actor.TenantId, project.ProjectId, cancellationToken);
+                    }
+                    catch (InvalidOperationException)
+                    {
+                        sourceEnvironmentError = "A stored source environment failed integrity validation and was not returned.";
+                    }
+
                     IReadOnlyList<PlatformApproval> approvals = await platform.Store
                         .ApprovalsForProjectAsync(actor.TenantId, project.ProjectId, cancellationToken);
 
@@ -60,6 +72,8 @@ internal static class WorkbenchPlatformEndpoints
                         createdUtc = project.CreatedUtc,
                         roles = membership?.Roles ?? [],
                         targetProfiles = profiles.Select(Describe).ToArray(),
+                        sourceEnvironments = sourceEnvironments.Select(Describe).ToArray(),
+                        sourceEnvironmentError,
                         approvals = approvals.Select(approval => Describe(approval, actor, membership)).ToArray(),
                     });
                 }
@@ -180,6 +194,58 @@ internal static class WorkbenchPlatformEndpoints
             return added.Succeeded
                 ? Results.Ok(new { objectId = added.Value!.ObjectId, roles = added.Value.Roles, version = added.Value.Version })
                 : Results.Json(new { error = added.Error }, statusCode: added.Status);
+        });
+
+        endpoints.MapPost("/api/workbench/projects/{projectId}/source-environments", async (
+            HttpContext context, string projectId, CancellationToken cancellationToken) =>
+        {
+            if (!WorkbenchEndpoints.TryActor(context, identity, out WorkbenchActor actor))
+            {
+                return Results.Unauthorized();
+            }
+            if (context.RequestServices.GetService<PlatformAccessService>() is not { } platform)
+            {
+                return Unavailable();
+            }
+            if (await ReadBodyAsync(context, cancellationToken) is not { } body ||
+                !TryReadConnector(body, out SourceConnector connector))
+            {
+                return Results.BadRequest(new { error = "A valid source environment declaration is required." });
+            }
+
+            SourceEnvironmentDeclaration declaration = new(
+                WorkbenchEndpoints.ReadString(body, "sourceEnvironmentId") ?? string.Empty,
+                WorkbenchEndpoints.ReadString(body, "name") ?? string.Empty,
+                connector,
+                WorkbenchEndpoints.ReadString(body, "expectedFormsVersion") ?? "unknown",
+                WorkbenchEndpoints.ReadString(body, "expectedDatabaseVersion") ?? "unknown",
+                WorkbenchEndpoints.ReadString(body, "pathAlias") ?? string.Empty,
+                ReadStrings(body, "schemaAllowlist"),
+                ReadStrings(body, "secretReferences"));
+            PlatformResult<SourceEnvironmentProfile> result = await platform.EnsureSourceEnvironmentProfileAsync(
+                actor, projectId, declaration, cancellationToken);
+            return result.Succeeded
+                ? Results.Json(Describe(result.Value!), statusCode: StatusCodes.Status201Created)
+                : Results.Json(new { error = result.Error }, statusCode: result.Status);
+        });
+
+        endpoints.MapPost("/api/workbench/projects/{projectId}/source-environments/{sourceEnvironmentId}/probe", async (
+            HttpContext context, string projectId, string sourceEnvironmentId, CancellationToken cancellationToken) =>
+        {
+            if (!WorkbenchEndpoints.TryActor(context, identity, out WorkbenchActor actor))
+            {
+                return Results.Unauthorized();
+            }
+            if (context.RequestServices.GetService<PlatformAccessService>() is not { } platform)
+            {
+                return Unavailable();
+            }
+            ISourceEnvironmentProbe probe = context.RequestServices.GetRequiredService<ISourceEnvironmentProbe>();
+            PlatformResult<SourceEnvironmentProbeResult> result = await platform.ProbeSourceEnvironmentAsync(
+                actor, projectId, sourceEnvironmentId, probe, cancellationToken);
+            return result.Succeeded
+                ? Results.Ok(result.Value)
+                : Results.Json(new { error = result.Error }, statusCode: result.Status);
         });
 
         endpoints.MapGet("/api/workbench/projects/{projectId}/approvals", async (
@@ -424,6 +490,15 @@ internal static class WorkbenchPlatformEndpoints
             ? parsed
             : null;
 
+    private static string[] ReadStrings(JsonElement body, string property) =>
+        body.TryGetProperty(property, out JsonElement value) && value.ValueKind == JsonValueKind.Array
+            ? [.. value.EnumerateArray().Where(item => item.ValueKind == JsonValueKind.String).Select(item => item.GetString()!)]
+            : [];
+
+    private static bool TryReadConnector(JsonElement body, out SourceConnector connector) =>
+        Enum.TryParse(WorkbenchEndpoints.ReadString(body, "connector"), ignoreCase: true, out connector) &&
+        Enum.IsDefined(connector);
+
     private static object Describe(PlatformTargetProfile profile) => new
     {
         targetProfileId = profile.TargetProfileId,
@@ -439,6 +514,27 @@ internal static class WorkbenchPlatformEndpoints
         schemaName = profile.SchemaName,
         executionIdentity = profile.ExecutionIdentity,
         stack = new { database = profile.StackDatabase, frontEnd = profile.StackFrontEnd, backEnd = profile.StackBackEnd },
+        canonicalHash = profile.CanonicalHash,
+        createdUtc = profile.CreatedUtc,
+    };
+
+    private static object Describe(SourceEnvironmentProfile profile) => new
+    {
+        sourceEnvironmentId = profile.SourceEnvironmentId,
+        version = profile.Version,
+        name = profile.Name,
+        connector = profile.Connector.ToString(),
+        expectedFormsVersion = profile.ExpectedFormsVersion,
+        expectedDatabaseVersion = profile.ExpectedDatabaseVersion,
+        pathAlias = profile.PathAlias,
+        schemaAllowlist = profile.SchemaAllowlist,
+        observedFormsVersion = profile.ObservedFormsVersion,
+        observedDatabaseVersion = profile.ObservedDatabaseVersion,
+        readiness = profile.Readiness.ToString(),
+        lastVerifiedUtc = profile.LastVerifiedUtc,
+        capabilities = profile.LastProbeCapabilities,
+        blockedPrerequisites = profile.LastBlockedPrerequisites,
+        contradictions = profile.LastContradictions,
         canonicalHash = profile.CanonicalHash,
         createdUtc = profile.CreatedUtc,
     };

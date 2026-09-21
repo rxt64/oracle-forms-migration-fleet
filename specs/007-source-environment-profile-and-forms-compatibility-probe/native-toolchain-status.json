@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "status": "BlockedPrerequisite",
+  "requestedPilot": "Legacy Order Entry",
+  "expectedFormsRelease": "6i (candidate exact build 6.0.8.22.1)",
+  "expectedWorkerArchitecture": "x86",
+  "observed": {
+    "formsInstallation": null,
+    "formsBuilderVersion": null,
+    "formsRuntimeVersion": null,
+    "oracleClientVersion": null,
+    "oracleDatabaseVersion": null,
+    "nativeLibraries": [],
+    "genuineModuleSha256": null
+  },
+  "blockedPrerequisites": [
+    "OracleFormsInstallation",
+    "OracleFormsOpenApiLibraries",
+    "OperatorSuppliedExport",
+    "OracleClientConnectivity",
+    "WorkerHostArchitecture"
+  ],
+  "attemptedChecks": [
+    "Windows Oracle environment variables",
+    "Native and WOW6432Node Oracle registry homes",
+    "Installed Oracle and Forms products",
+    "Canonical Oracle installation roots and Forms 6i binary names",
+    "Operator-supplied attachment folder and repository candidate artifacts"
+  ],
+  "nativeFormsRuntimeRunning": false,
+  "nativeSourceExtractionPerformed": false,
+  "oracleConnectionAttempted": false,
+  "simulatedSourceSubstituted": false
+}

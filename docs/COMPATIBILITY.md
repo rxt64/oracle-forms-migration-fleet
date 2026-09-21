@@ -51,6 +51,13 @@ The researched intake and normalization path for 6i is documented in
 [ORACLE_FORMS_6I_RESEARCH.md](ORACLE_FORMS_6I_RESEARCH.md). It keeps 6i at **accepted for assessment**
 until an authorized representative pilot passes the stated readiness gates.
 
+Project source-environment profiles now persist the declared release separately from probe observations.
+The compatibility probe reports typed prerequisites and never upgrades an expected release or marks a source
+ready from browser-supplied observations. The current pilot probe is `BlockedPrerequisite`: no authorized Forms
+6i media, matching x86 Open API libraries, genuine pilot FMB, or verified Oracle client/database tuple was found
+in the bounded inventory. See
+[native-toolchain-status.json](../specs/007-source-environment-profile-and-forms-compatibility-probe/native-toolchain-status.json).
+
 ## Intake status by release
 
 `OracleLegacyVersionCatalog` canonicalizes the release an operator supplies and decides what evidence
@@ -63,7 +70,7 @@ has been compiled, deployed, or behaviourally tested.
 | Release | Intake | Readiness | What the fleet actually requires |
 |---|---|---|---|
 | pre-6i (3.x, 4.x, 4.5, 5.x) | Recognized, outside the implemented range | `NormalizedTextRequired` | Oracle requires an upgrade to Forms 10.1.2 with every module and library recompiled first. Database-resident modules must be saved to the file system and client-side PL/SQL v1/v2 converted. |
-| 6i (6.0.8.x) | Accepted for assessment | `NormalizedTextRequired` | Operator-produced Forms XML. Oracle recommends bridging through Forms 10.1.2 in most cases; `FRM-18130` proves that bridge is mandatory where it is raised. Upgrade order is `.olb`, `.pll`, `.mmb`, `.fmb`. `.fmt`/`.mmt` need 6i tooling to become 6i `.fmb`/`.mmb` first. |
+| 6i (6.0.8.x) | Accepted for assessment | `NormalizedTextRequired` | A source profile and compatibility probe record declared versus observed versions. Native extraction additionally requires authorized media, matching x86 Open API libraries, a genuine module, and a verified client/database tuple. Operator-produced Forms XML remains the non-native normalization route. Oracle recommends bridging through Forms 10.1.2 in most cases; `FRM-18130` proves that bridge is mandatory where it is raised. Upgrade order is `.olb`, `.pll`, `.mmb`, `.fmb`. `.fmt`/`.mmt` need 6i tooling to become 6i `.fmb`/`.mmb` first. |
 | 9i | Accepted for assessment | `NormalizedTextRequired` | Operator-produced Forms XML, upgraded in the same dependency order. |
 | 10g (9.0.4, 10.1.2.x) | Accepted for assessment | `NormalizedTextRequired` | Operator-produced Forms XML. |
 | 11g (11.1.x) | Accepted for assessment | `NormalizedTextRequired` | Operator-produced Forms XML. |

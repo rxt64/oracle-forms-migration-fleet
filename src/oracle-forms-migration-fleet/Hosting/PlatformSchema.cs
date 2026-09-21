@@ -20,7 +20,7 @@ public static partial class PlatformSchema
 {
     public const string DefaultSchema = "ofm_platform";
 
-    public const int CurrentVersion = 3;
+    public const int CurrentVersion = 4;
 
     /// <summary>
     /// Lock key for <c>pg_advisory_lock</c>. Two replicas starting together must not both run V001;
@@ -259,6 +259,22 @@ public static partial class PlatformSchema
                 """,
                 $"create index if not exists ix_migration_run_project on {schema}.migration_run (tenant_id, project_id, enqueued_utc desc)",
                 $"create index if not exists ix_migration_run_claimable on {schema}.migration_run (state, workspace_node_id, enqueued_utc)",
+            ]),
+            new Migration(4, "source-environment-profile",
+            [
+                $"""
+                create table if not exists {schema}.source_environment_profile (
+                    project_id text not null references {schema}.project (project_id),
+                    source_environment_id text not null,
+                    version integer not null,
+                    tenant_id text not null,
+                    canonical_hash text not null,
+                    created_utc timestamptz not null,
+                    profile_json jsonb not null,
+                    primary key (project_id, source_environment_id, version)
+                )
+                """,
+                $"create index if not exists ix_source_environment_profile_tenant_project on {schema}.source_environment_profile (tenant_id, project_id, source_environment_id, version desc)",
             ]),
         ];
     }

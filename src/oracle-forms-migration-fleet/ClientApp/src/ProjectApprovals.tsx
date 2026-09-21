@@ -31,6 +31,39 @@ export interface TargetProfileView {
   stack: { database: string; frontEnd: string; backEnd: string };
 }
 
+export interface SourceEnvironmentView {
+  sourceEnvironmentId: string;
+  version: number;
+  name: string;
+  connector: "OperatorSuppliedExport" | "FormsBuilderWorker" | "OracleDatabaseReader";
+  expectedFormsVersion: string;
+  expectedDatabaseVersion: string;
+  pathAlias: string;
+  schemaAllowlist: string[];
+  observedFormsVersion: string | null;
+  observedDatabaseVersion: string | null;
+  readiness: "Declared" | "BlockedPrerequisite" | "Verified" | "Contradicted" | "Rejected";
+  lastVerifiedUtc: string | null;
+  capabilities: SourceProbeResult["capabilities"];
+  blockedPrerequisites: string[];
+  contradictions: string[];
+  canonicalHash: string;
+}
+
+interface SourceProbeResult {
+  status: "Verified" | "BlockedPrerequisite" | "Contradicted" | "Rejected";
+  observed: { forms: string | null; database: string | null };
+  capabilities: Array<{
+    id: string;
+    state: string;
+    prerequisite: string;
+    requiredRelease?: string | null;
+    requiredArchitecture?: string | null;
+    requiredHost?: string | null;
+    remediation: string;
+  }>;
+}
+
 export interface ApprovalView {
   approvalId: string;
   projectId: string;
@@ -57,6 +90,8 @@ export interface ProjectView {
   name: string;
   roles: string[];
   targetProfiles: TargetProfileView[];
+  sourceEnvironments: SourceEnvironmentView[];
+  sourceEnvironmentError?: string | null;
   approvals: ApprovalView[];
 }
 
@@ -100,6 +135,15 @@ export function ProjectApprovals({ workspaceId, runRequest, onProjectChange }: P
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
+  const [sourceName, setSourceName] = useState("Legacy Order Entry");
+  const [sourceId, setSourceId] = useState("legacy-order-entry");
+  const [sourceAlias, setSourceAlias] = useState("legacy-order-entry");
+  const [formsVersion, setFormsVersion] = useState("6i");
+  const [databaseVersion, setDatabaseVersion] = useState("9i");
+  const [schemaAllowlist, setSchemaAllowlist] = useState("LEGACY_LAB");
+  const [sourceProbe, setSourceProbe] = useState<SourceProbeResult | null>(null);
+  const [connector, setConnector] = useState<SourceEnvironmentView["connector"]>("FormsBuilderWorker");
+  const [selectedSourceId, setSelectedSourceId] = useState("");
 
   const load = useCallback(async () => {
     try {
@@ -120,6 +164,29 @@ export function ProjectApprovals({ workspaceId, runRequest, onProjectChange }: P
   }, [onProjectChange]);
 
   useEffect(() => { void load(); }, [load]);
+
+  const project = context?.projects.find((item) => item.projectId === selected) ?? null;
+  const profile = project?.targetProfiles[0] ?? null;
+  const source = project?.sourceEnvironments.find((item) => item.sourceEnvironmentId === selectedSourceId)
+    ?? project?.sourceEnvironments[0]
+    ?? null;
+
+  useEffect(() => {
+    setSourceProbe(null);
+    setSelectedSourceId("");
+  }, [selected]);
+
+  useEffect(() => {
+    if (source) {
+      setSourceId(source.sourceEnvironmentId);
+      setSourceName(source.name);
+      setConnector(source.connector);
+      setFormsVersion(source.expectedFormsVersion);
+      setDatabaseVersion(source.expectedDatabaseVersion);
+      setSourceAlias(source.pathAlias);
+      setSchemaAllowlist(source.schemaAllowlist.join(", "));
+    }
+  }, [source?.canonicalHash]);
 
   async function act(action: () => Promise<void>, done: string) {
     setBusy(true);
@@ -146,8 +213,19 @@ export function ProjectApprovals({ workspaceId, runRequest, onProjectChange }: P
 
   if (!context) return null;
 
-  const project = context.projects.find((item) => item.projectId === selected) ?? null;
-  const profile = project?.targetProfiles[0] ?? null;
+  async function saveSource(projectId: string) {
+    setSourceProbe(null);
+    await send(`/api/workbench/projects/${projectId}/source-environments`, "POST", {
+      sourceEnvironmentId: sourceId,
+      name: sourceName,
+      connector,
+      expectedFormsVersion: formsVersion,
+      expectedDatabaseVersion: databaseVersion,
+      pathAlias: sourceAlias,
+      schemaAllowlist: schemaAllowlist.split(",").map((value) => value.trim()).filter(Boolean),
+      secretReferences: [],
+    });
+  }
 
   return <section className="mf-result-section" aria-labelledby="mf-project-title" data-testid="project-panel">
     <p className="mf-kicker">Project and approvals</p>
@@ -202,6 +280,67 @@ export function ProjectApprovals({ workspaceId, runRequest, onProjectChange }: P
       <div className="mf-review" data-testid="project-membership"><dl>
         <Row label="Project roles" value={project.roles.length ? project.roles.join(", ") : "none"} testId="project-roles" />
       </dl></div>
+      <h3>Source environment</h3>
+      {project.sourceEnvironmentError && <p className="mf-error" role="alert">{project.sourceEnvironmentError}</p>}
+      {project.sourceEnvironments.length > 1 && <label className="mf-field"><span>Choose source</span><select
+        value={source?.sourceEnvironmentId ?? ""}
+        onChange={(event) => { setSelectedSourceId(event.target.value); setSourceProbe(null); }}
+      >{project.sourceEnvironments.map((item) => <option key={item.sourceEnvironmentId} value={item.sourceEnvironmentId}>{item.name}</option>)}</select></label>}
+      {source && <div className="mf-review" data-testid="source-environment"><dl>
+          <Row label="Name" value={source.name} />
+          <Row label="Connector" value={source.connector} />
+          <Row label="Expected Forms" value={source.expectedFormsVersion} />
+          <Row label="Expected database" value={source.expectedDatabaseVersion} />
+          <Row label="Observed Forms" value={source.observedFormsVersion ?? "Not observed"} />
+          <Row label="Observed database" value={source.observedDatabaseVersion ?? "Not observed"} />
+          <Row label="Readiness" value={source.readiness} testId="source-readiness" />
+          <Row label="Version" value={String(source.version)} />
+          <Row label="Identity digest" value={`${source.canonicalHash.slice(0, 16)}…`} />
+        </dl></div>}
+      {source && !sourceProbe && source.capabilities.length > 0 && <div className="mf-review" data-testid="persisted-source-probe" role="status">
+        <p><strong>Last compatibility status:</strong> {source.readiness}</p>
+        <dl>{source.capabilities.map((capability) => <div className="mf-review-row" key={capability.id}>
+          <dt>{capability.id}</dt><dd>{capability.state}; prerequisite {capability.prerequisite}<small>Recovery action: {capability.remediation}</small></dd>
+        </div>)}</dl>
+      </div>}
+      <details className="mf-optional" open={!source}>
+        <summary>{source ? "Declare a new immutable source version" : "Declare source environment"}</summary>
+        <div className="mf-form-grid" data-testid="source-declaration">
+          <label className="mf-field"><span>Source name</span><input value={sourceName} onChange={(event) => setSourceName(event.target.value)} /></label>
+          <label className="mf-field"><span>Source ID</span><input value={sourceId} onChange={(event) => setSourceId(event.target.value)} /></label>
+          <label className="mf-field"><span>Connector</span><select value={connector} onChange={(event) => setConnector(event.target.value as SourceEnvironmentView["connector"])}>
+            <option value="FormsBuilderWorker">Oracle Forms environment</option>
+            <option value="OperatorSuppliedExport">Operator-supplied export</option>
+            <option value="OracleDatabaseReader">Oracle database reader</option>
+          </select></label>
+          <label className="mf-field"><span>Expected Forms release</span><input value={formsVersion} onChange={(event) => setFormsVersion(event.target.value)} /></label>
+          <label className="mf-field"><span>Expected database release</span><input value={databaseVersion} onChange={(event) => setDatabaseVersion(event.target.value)} /></label>
+          <label className="mf-field"><span>Server path alias</span><input value={sourceAlias} onChange={(event) => setSourceAlias(event.target.value)} /></label>
+          <label className="mf-field"><span>Allowed Oracle schemas</span><input value={schemaAllowlist} onChange={(event) => setSchemaAllowlist(event.target.value)} /></label>
+          <button type="button" className="mf-secondary" aria-busy={busy} disabled={busy} onClick={() => act(
+            () => saveSource(project.projectId), "Source environment saved.")}>Save source environment</button>
+        </div>
+      </details>
+      {source && <div className="mf-intro-actions">
+        <button type="button" className="mf-secondary" aria-busy={busy} disabled={busy} data-testid="probe-source" onClick={() => act(async () => {
+          const result = await send(`/api/workbench/projects/${project.projectId}/source-environments/${source.sourceEnvironmentId}/probe`, "POST");
+          setSourceProbe(result as unknown as SourceProbeResult);
+        }, "Source compatibility checked.")}>
+          Check connection
+        </button>
+      </div>}
+      {sourceProbe && <div className="mf-review" data-testid="source-probe-result" role="status" aria-live="polite">
+        <p><strong>Compatibility status:</strong> {sourceProbe.status}</p>
+        <dl>{sourceProbe.capabilities.map((capability) => <div className="mf-review-row" key={capability.id}>
+          <dt>{capability.id}</dt>
+          <dd>{capability.state}; prerequisite {capability.prerequisite}
+            {capability.requiredRelease ? `; release ${capability.requiredRelease}` : ""}
+            {capability.requiredArchitecture ? `; architecture ${capability.requiredArchitecture}` : ""}
+            {capability.requiredHost ? `; host ${capability.requiredHost}` : ""}
+            <small>Recovery action: {capability.remediation}</small>
+          </dd>
+        </div>)}</dl>
+      </div>}
       <h3>Target this project is bound to</h3>
       {profile
         ? <div className="mf-review" data-testid="target-profile"><dl>
