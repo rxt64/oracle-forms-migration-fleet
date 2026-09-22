@@ -63,8 +63,9 @@ import { ServiceGlyph, glyphForComponent, glyphForDatabase, glyphForHost } from 
 import { ActivityPane } from "./MatrixConsole";
 import { ArchitectureReveal } from "./ArchitectureReveal";
 import { InfoTip } from "./InfoTip";
-import { ProjectApprovals } from "./ProjectApprovals";
+import { ProjectApprovals, profileStackDifferences, type TargetProfileStack } from "./ProjectApprovals";
 import { RunHistory } from "./RunHistory";
+import { DispositionLedgerPanel } from "./DispositionLedgerPanel";
 import {
   EVIDENCE_HELP,
   EVIDENCE_NAMES,
@@ -117,6 +118,22 @@ const FORMS_VERSIONS = [
   { value: "10g", label: "Forms 10g (10.1.2)" },
   { value: "11g", label: "Forms 11g" },
   { value: "12c", label: "Forms 12c (12.2.1)" },
+];
+
+// The back-end stacks this build actually converts into. The values are the server's own enum names;
+// JavaSpringBoot stays first and stays the default, because a request that never stated a stack is
+// still the Java request the planner has always treated it as.
+const BACKEND_TARGETS = [
+  {
+    value: "JavaSpringBoot",
+    name: "Java (Spring Boot)",
+    description: "Maven project with Spring Data JPA. The long-standing default and the route the demo output was generated with.",
+  },
+  {
+    value: "AspNetCore",
+    name: ".NET (ASP.NET Core)",
+    description: "ASP.NET Core on .NET 10 with Npgsql, generated from a validated target-mapping manifest.",
+  },
 ];
 
 const DATABASE_VERSIONS = [
@@ -603,6 +620,15 @@ export default function WizardApp() {
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
   const [fields, setFields] = useState<RunFields>(queryFields);
   const [database, setDatabase] = useState("");
+  const [backEnd, setBackEnd] = useState(BACKEND_TARGETS[0].value);
+  // What the project's stored target profile says its stack is. The profile is immutable and the
+  // server owns it, so a run requesting a different stack is reported as a mismatch rather than
+  // relabelling a Java-configured profile as .NET.
+  const [profileStack, setProfileStack] = useState<TargetProfileStack | null>(null);
+  // The recorded decisions the next run generates under. A locator the operator chose, carried
+  // identically on the approval request and on the run request because the server hashes it into the
+  // run inputs an approval is issued against.
+  const [ledgerId, setLedgerId] = useState<string | null>(null);
   const [mode, setMode] = useState("PlanOnly");
   const [evidence, setEvidence] = useState<string[]>([]);
   // Ticks the workbench made on the operator's behalf after reading a copied source. They belong to
@@ -643,6 +669,7 @@ export default function WizardApp() {
   const [agentStatus, setAgentStatus] = useState("");
   const [asking, setAsking] = useState(false);
   const heading = useRef<HTMLHeadingElement>(null);
+  const databaseChosen = useRef(false);
   const activityButton = useRef<HTMLButtonElement>(null);
   const dialogBody = useRef<HTMLElement>(null);
   const dialogOpener = useRef<HTMLElement | null>(null);
@@ -669,6 +696,20 @@ export default function WizardApp() {
       .catch((error: Error) => setStatus(error.message));
     return () => { cancelled = true; };
   }, []);
+
+  // Recorded decisions belong to one project and to one source snapshot. Changing either makes the
+  // held locator a statement about something else, so it is dropped rather than carried into a run
+  // the server would refuse it for.
+  useEffect(() => { setLedgerId(null); }, [projectId, workspace?.workspaceId]);
+
+  // The database a project writes to is a deployment fact its immutable profile records, and the
+  // server refuses an approval and a run that name a different one. Offering the catalog's first
+  // entry as the default would therefore start every run on a stack the server rejects, so the
+  // configured value is preselected until the operator picks one themselves. A pick is never
+  // overwritten, and the back-end choice is left alone: it is the one the operator states.
+  useEffect(() => {
+    if (profileStack && !databaseChosen.current) setDatabase(profileStack.database);
+  }, [profileStack]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -729,7 +770,15 @@ export default function WizardApp() {
   const requiredEvidence = bootstrap.evidenceKinds.filter((item) => item.requiredForGeneration || item.alternativeRequirement);
   const optionalEvidence = bootstrap.evidenceKinds.filter((item) => !item.requiredForGeneration && !item.alternativeRequirement);
   const selectedDatabase = bootstrap.databaseTargets.find((option) => option.target === database);
+  const selectedBackEnd = BACKEND_TARGETS.find((option) => option.value === backEnd);
   const selectedMode = bootstrap.executionModes.find((option) => option.mode === mode);
+  const profileBackEnd = profileStack?.backEnd ?? null;
+  // The same comparison the server runs before it creates an approval and again before it prepares a
+  // run, both of which answer 409. Reported here so the operator reads a reason instead of a refusal.
+  const stackDifferences = profileStackDifferences({ database, frontEnd: "React", backEnd }, profileStack);
+  const stackMismatch = stackDifferences
+    .map((item) => `${item.field} is fixed at ${item.configured}`)
+    .join("; ");
   const activeAzure = bootstrap.azureComponents.filter((component) => component.state === "Active").length;
   const repository = parseRepositoryUrl(repoUrl).target;
   const sourceRoot = sourceMode === "manual"
@@ -744,11 +793,14 @@ export default function WizardApp() {
       : "";
 
   // Execution reads a copy the server holds, so it needs a workspace and at least one phase the
-  // planner actually authorized. Anything else is explained rather than silently disabled.
+  // planner actually authorized. A stack the project's immutable profile does not name is refused by
+  // the server before any phase runs, so it stops the run here too rather than at a 409.
   const plannedPhases = plan?.plan.phases.filter((phase) => phase.status === "Planned").length ?? 0;
-  const runnable = Boolean(projectId) && Boolean(workspace) && sourceMode !== "manual" && plannedPhases > 0;
+  const runnable = Boolean(projectId) && Boolean(workspace) && sourceMode !== "manual" && plannedPhases > 0 && !stackMismatch;
   const runHint = !projectId
     ? "Select or create a project before running. Project membership owns the source copy and every generated artifact."
+    : stackMismatch
+    ? `This project's target profile is immutable and this run does not match it: ${stackMismatch}. The server refuses both the sandbox approval and the run itself while they differ, so nothing would start. Use the configured destination below, or change it on the Azure destination step.`
     : sourceMode === "manual"
     ? "A typed folder path only describes where the code lives. Copy a repository or upload a zip on Your application to give the fleet something to read."
     : !workspace
@@ -756,6 +808,25 @@ export default function WizardApp() {
       : plannedPhases === 0
         ? "The planner authorized no phase, so there is nothing to run. Clear the blockers above, then generate the plan again."
         : "";
+
+  /**
+   * Applies the destination the project's profile records, on an explicit click and nowhere else.
+   *
+   * It moves the operator to the step that owns the choice rather than rewriting it out of sight, and
+   * it drops the plan, because a plan generated for the previous stack is not a plan for this one.
+   */
+  function applyConfiguredDestination() {
+    if (!profileStack) return;
+    databaseChosen.current = true;
+    setDatabase(profileStack.database);
+    setBackEnd(profileStack.backEnd);
+    setPlan(null);
+    setExecution(null);
+    setExecutionError("");
+    setView("setup");
+    setStep(1);
+    setStatus("The destination now matches this project's target profile. Generate the plan again.");
+  }
 
   /**
    * Runs a server-side clone or upload and mirrors the server's own progress lines into the
@@ -870,6 +941,7 @@ export default function WizardApp() {
     clearWorkspaceEvidence(false);
     setFields(prefill ?? emptyFields);
     setDatabase(bootstrap?.databaseTargets[0]?.target ?? "");
+    setBackEnd(BACKEND_TARGETS[0].value);
     setMode("PlanOnly");
     setSourceMode(prefill ? "manual" : "repo");
     setRepoUrl("");
@@ -953,11 +1025,15 @@ export default function WizardApp() {
       engagementId: fields.engagementId.trim(),
       applicationName: fields.applicationName.trim(),
       requestedMode: mode,
-      target: { frontEnd: "React", backEnd: "JavaSpringBoot", database },
+      target: { frontEnd: "React", backEnd, database },
       oracleFormsVersion: fields.oracleFormsVersion.trim() || "unknown",
       oracleDatabaseVersion: fields.oracleDatabaseVersion.trim() || "unknown",
       sourceRoot: sourceRoot.trim(),
       outputRoot: fields.outputRoot.trim(),
+      // A locator, never an authorization. It is part of the run inputs the server hashes, so the
+      // approval request and the run request have to carry the same value or the grant stops covering
+      // the run; both are built from this one body for exactly that reason.
+      dispositionLedgerId: ledgerId,
       evidence: evidence.map((kind, index) => {
         const detected = autoEvidence.includes(kind);
         return {
@@ -1401,7 +1477,7 @@ export default function WizardApp() {
           </p>
         </div>
 
-        <ProjectApprovals onProjectChange={setProjectId} />
+        <ProjectApprovals onProjectChange={setProjectId} onTargetProfileStackChange={setProfileStack} />
 
         <div className="mf-intro-actions">
           <button type="button" className="mf-primary" disabled={!projectId} onClick={() => beginSetup()}><Play aria-hidden="true" />New migration</button>
@@ -1424,7 +1500,7 @@ export default function WizardApp() {
         </nav>
 
         <section className="mf-page">
-          {step === 0 && <ProjectApprovals onProjectChange={setProjectId} />}
+          {step === 0 && <ProjectApprovals onProjectChange={setProjectId} onTargetProfileStackChange={setProfileStack} />}
           <div className="mf-progress"><span aria-hidden="true">Step {step + 1} of {STEPS.length}</span><progress max={STEPS.length} value={step + 1} /></div>
           <p className="mf-visually-hidden" aria-live="polite">{`Step ${step + 1} of ${STEPS.length}: ${STEPS[step]}`}</p>
 
@@ -1495,7 +1571,24 @@ export default function WizardApp() {
 
           {step === 1 && <div className="mf-step"><p className="mf-kicker">{guide.name}</p><h1 ref={heading} tabIndex={-1}>{guide.heading}</h1>
             <StepPurpose guide={guide} />
-            <div className="mf-assurance"><Info aria-hidden="true" /><div><strong>The application route is fixed</strong><p>Every plan targets a React front end and a Java Spring Boot back end, because those are the only converters implemented. Subscription, resource group and region are not offered here: no authorized Azure API is wired into this workbench, so choosing one would be a claim it could not keep.</p></div></div>
+            <div className="mf-assurance"><Info aria-hidden="true" /><div><strong>The front end is fixed; the back end is a choice</strong><p>Every plan targets a React front end, because that is the only UI converter implemented. Two back-end converters exist, and the one you pick here is the one the planner and the generator are asked for. Subscription, resource group and region are not offered here: no authorized Azure API is wired into this workbench, so choosing one would be a claim it could not keep.</p></div></div>
+            <ChoiceCards
+              legend="Application back end"
+              hint="Which server-side stack the Oracle Forms client-side logic is converted into. Java Spring Boot is the default and stays the default for any run that does not change it."
+              value={backEnd}
+              onChange={setBackEnd}
+              options={BACKEND_TARGETS.map((option) => ({ value: option.value, name: option.name, description: option.description, glyph: <ServiceGlyph id="container-apps" size={22} /> }))}
+              renderDetail={(value) => {
+                const option = BACKEND_TARGETS.find((item) => item.value === value);
+                if (!option) return null;
+                return <dl className="mf-detail-list">
+                  <div><dt>Sent as</dt><dd><code>target.backEnd = {option.value}</code></dd></div>
+                  {profileBackEnd !== null && profileBackEnd !== value && <div><dt>Project target profile</dt><dd data-testid="backend-profile-mismatch">
+                    This project's stored target profile is configured as <code>{profileBackEnd}</code>. The profile is immutable and the server owns it, so this run states a different back end than the profile records. The server refuses a sandbox approval and refuses the run itself while they differ, so neither can be started until this matches.
+                  </dd></div>}
+                </dl>;
+              }}
+            />
             <ChoiceCards
               legend="Azure database"
               hint={help("group.databaseTarget")}
@@ -1545,14 +1638,16 @@ export default function WizardApp() {
           {step === 4 && <form className="mf-step" onSubmit={generatePlan} noValidate><p className="mf-kicker">{guide.name}</p><h1 ref={heading} tabIndex={-1}>{guide.heading}</h1>
             <StepPurpose guide={guide} />
             <section className="mf-review"><header><h2>Your application</h2><button type="button" onClick={() => goToStep(0)}>Change</button></header><dl><ReviewRow label="Reference" value={fields.engagementId} onEdit={() => goToStep(0)} /><ReviewRow label="Application" value={fields.applicationName} onEdit={() => goToStep(0)} /><ReviewRow label="Source" value={sourceLabel} onEdit={() => goToStep(0)} /><ReviewRow label="Output folder" value={fields.outputRoot} onEdit={() => goToStep(0)} /><ReviewRow label="Oracle Forms release" value={FORMS_VERSIONS.find((item) => item.value === fields.oracleFormsVersion)?.label ?? fields.oracleFormsVersion} onEdit={() => goToStep(0)} /><ReviewRow label="Oracle Database release" value={DATABASE_VERSIONS.find((item) => item.value === fields.oracleDatabaseVersion)?.label ?? fields.oracleDatabaseVersion} onEdit={() => goToStep(0)} /></dl></section>
-            <section className="mf-review"><header><h2>Azure destination</h2><button type="button" onClick={() => goToStep(1)}>Change</button></header><dl><ReviewRow label="Database" value={selectedDatabase?.name ?? database} onEdit={() => goToStep(1)} /><ReviewRow label="Planning depth" value={selectedMode?.name ?? mode} onEdit={() => goToStep(1)} /></dl></section>
+            <section className="mf-review"><header><h2>Azure destination</h2><button type="button" onClick={() => goToStep(1)}>Change</button></header><dl><ReviewRow label="Database" value={selectedDatabase?.name ?? database} onEdit={() => goToStep(1)} /><ReviewRow label="Application back end" value={selectedBackEnd?.name ?? backEnd} onEdit={() => goToStep(1)} /><ReviewRow label="Planning depth" value={selectedMode?.name ?? mode} onEdit={() => goToStep(1)} /></dl></section>
             <section className="mf-review"><header><h2>Checklist and permissions</h2><button type="button" onClick={() => goToStep(2)}>Change</button></header><dl><ReviewRow label="Declared source material" value={`${evidence.length} item types (${readyGroups} of ${groups.length} requirements met)`} onEdit={() => goToStep(2)} /><ReviewRow label="Sandbox approver" value={fields.executionApprover} onEdit={() => goToStep(3)} /><ReviewRow label="Production approver" value={fields.productionApprover} onEdit={() => goToStep(3)} /></dl></section>
             {readyGroups < groups.length && <div className="mf-notice"><AlertTriangle aria-hidden="true" /><p><strong>{groups.length - readyGroups} requirement{groups.length - readyGroups === 1 ? "" : "s"} still unmet.</strong>You can still generate a plan. Each unmet requirement is listed as a blocker rather than stopping you here.</p></div>}
+            {stackMismatch && <div className="mf-notice" data-testid="stack-mismatch-review"><AlertTriangle aria-hidden="true" /><div><p><strong>This run does not match the project's immutable target profile.</strong>The profile is a deployment fact only the server writes: {stackMismatch}. The server refuses the sandbox approval and refuses the run itself while they differ, so neither would start. Planning still works, and nothing here relabels the profile.</p><button type="button" className="mf-secondary" data-testid="use-configured-destination" onClick={applyConfiguredDestination}>Use the configured destination</button></div></div>}
             <details className="mf-optional"><summary>Technical names sent to the planner</summary><dl className="mf-detail-list">
               <div><dt>requestedMode</dt><dd><code>{mode}</code></dd></div>
               <div><dt>target.frontEnd</dt><dd><code>React</code></dd></div>
-              <div><dt>target.backEnd</dt><dd><code>JavaSpringBoot</code></dd></div>
+              <div><dt>target.backEnd</dt><dd><code data-testid="review-backend">{backEnd}</code></dd></div>
               <div><dt>target.database</dt><dd><code>{database}</code></dd></div>
+              <div><dt>dispositionLedgerId</dt><dd><code data-testid="review-ledger">{ledgerId ?? "null"}</code></dd></div>
               <div><dt>evidence kinds</dt><dd><code>{evidence.join(", ") || "none"}</code></dd></div>
             </dl></details>
             <div className="mf-boundary"><LockKeyhole aria-hidden="true" /><p><strong>Generating the plan writes nothing.</strong>It creates no file, changes no repository, and touches no Azure resource. Running authorized conversion phases is a separate decision on the next screen, and writes only into your private session workspace. With separate execution approval, sandbox phases may write to the host-configured PostgreSQL target. Production release is not available here.</p></div>
@@ -1605,6 +1700,7 @@ export default function WizardApp() {
               {primaryAction.kind === "run" ? <Play aria-hidden="true" /> : <Pencil aria-hidden="true" />}{primaryAction.label}
             </button>}
           <InfoTip label={primaryAction.label.toLowerCase()}>{primaryAction.help}</InfoTip>
+          {stackMismatch && <div className="mf-notice" data-testid="stack-mismatch-results"><AlertTriangle aria-hidden="true" /><div><p><strong>Nothing can start against this destination.</strong>The project's target profile is immutable and this run does not match it: {stackMismatch}. The server answers both the sandbox approval request and the run itself with a refusal while they differ.</p><button type="button" className="mf-secondary" data-testid="use-configured-destination-results" onClick={applyConfiguredDestination}>Use the configured destination</button></div></div>}
           <p className="mf-status" role="status" aria-live="polite">{executing ? "The fleet is working. Activity shows each line the server sends." : execution ? "Run finished." : ""}</p>
           {executionError && <p className="mf-error" role="alert">{executionError}</p>}
 
@@ -1617,12 +1713,20 @@ export default function WizardApp() {
           workspaceId={workspace?.workspaceId}
           runRequest={runRequestBody()}
           onProjectChange={setProjectId}
+          onTargetProfileStackChange={setProfileStack}
         />
 
         {projectId && <RunHistory
           projectId={projectId}
           activeRunId={activeRunId}
           onOpen={(runId) => void reopenRun(runId)}
+        />}
+
+        {projectId && <DispositionLedgerPanel
+          projectId={projectId}
+          runId={activeRunId}
+          selectedLedgerId={ledgerId}
+          onSelectLedger={setLedgerId}
         />}
 
         {/* 4. The run's own results, concise. */}

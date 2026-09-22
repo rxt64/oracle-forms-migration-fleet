@@ -15,6 +15,12 @@ public sealed class PostgresPlatformStateIntegrationTests : IAsyncLifetime
     private const string Requester = "3b4c9a10-7d42-4f0e-9d51-2a61f0c4b8e3";
     private const string Approver = "9c2d7e51-0b83-4a6f-8c19-5d7e2f1a4b60";
 
+    /// <summary>A lease no sequence of round trips in one test can outlive.</summary>
+    private static readonly TimeSpan LiveLease = TimeSpan.FromSeconds(30);
+
+    /// <summary>A lease that ended before the statement granting it, expiring on the database clock.</summary>
+    private static readonly TimeSpan ExpiredLease = TimeSpan.FromSeconds(-1);
+
     private readonly string _schema = $"ofm_test_{Guid.NewGuid():N}";
     private string? _connectionString;
 
@@ -90,7 +96,8 @@ public sealed class PostgresPlatformStateIntegrationTests : IAsyncLifetime
                 "source-hash",
                 "plan-hash",
                 TimeSpan.FromHours(1),
-                "Integration request"),
+                "Integration request",
+                ProfileTarget),
             CancellationToken.None)).Value!;
         PlatformApproval approved = (await platform.DecideAsync(
             approver, requested.ApprovalId, approve: true, requested.Version, "Approved", CancellationToken.None)).Value!;
@@ -123,7 +130,8 @@ public sealed class PostgresPlatformStateIntegrationTests : IAsyncLifetime
                 "other-source",
                 "other-plan",
                 TimeSpan.FromHours(1),
-                null),
+                null,
+                ProfileTarget),
             CancellationToken.None);
         Assert.Equal(409, denied.Status);
         Assert.True((await platform.RequestAsync(
@@ -136,7 +144,8 @@ public sealed class PostgresPlatformStateIntegrationTests : IAsyncLifetime
                 "validation-source",
                 "validation-plan",
                 TimeSpan.FromMinutes(5),
-                null),
+                null,
+                ProfileTarget),
             CancellationToken.None)).Succeeded);
 
         await using PostgresPlatformStateStore restarted = CreateStore()!;
@@ -306,17 +315,21 @@ public sealed class PostgresPlatformStateIntegrationTests : IAsyncLifetime
         MigrationRunRecord run = await runs.EnqueueAsync(DurableRun(project.ProjectId, now), CancellationToken.None);
 
         MigrationRunClaim first = (await runs.ClaimAsync(
-            "node-a", "worker-a", now, TimeSpan.FromMilliseconds(250), CancellationToken.None))!;
+            "node-a", "worker-a", now, LiveLease, CancellationToken.None))!;
         Assert.Null(await runs.ClaimAsync(
-            "node-a", "worker-b", now, TimeSpan.FromSeconds(30), CancellationToken.None));
+            "node-a", "worker-b", now, LiveLease, CancellationToken.None));
         Assert.NotNull(await runs.AppendEventAsync(
             run.RunId, first.FenceToken, now, "info", "first", null, null, CancellationToken.None));
 
-        await Task.Delay(TimeSpan.FromMilliseconds(400));
+        // The lease clock is the database's own now(), so expiry is forced by renewing onto a lease that
+        // already ended rather than by outliving a short one, which the round trips above can do on their own.
+        Assert.True(await runs.RenewAsync(run.RunId, first.FenceToken, ExpiredLease, CancellationToken.None));
         Assert.False(await runs.RenewAsync(
-            run.RunId, first.FenceToken, TimeSpan.FromSeconds(30), CancellationToken.None));
+            run.RunId, first.FenceToken, LiveLease, CancellationToken.None));
+        Assert.Null(await runs.AppendEventAsync(
+            run.RunId, first.FenceToken, now, "info", "expired", null, null, CancellationToken.None));
         MigrationRunClaim second = (await runs.ClaimAsync(
-            "node-a", "worker-b", now.AddMinutes(1), TimeSpan.FromSeconds(30), CancellationToken.None))!;
+            "node-a", "worker-b", now.AddMinutes(1), LiveLease, CancellationToken.None))!;
         Assert.Equal(first.FenceToken + 1, second.FenceToken);
         Assert.Null(await runs.AppendEventAsync(
             run.RunId, first.FenceToken, now, "info", "stale", null, null, CancellationToken.None));
@@ -348,7 +361,7 @@ public sealed class PostgresPlatformStateIntegrationTests : IAsyncLifetime
         MigrationRunRecord cancelledRun = await runs.EnqueueAsync(
             DurableRun(project.ProjectId, now, "run-cancel"), CancellationToken.None);
         MigrationRunClaim cancelClaim = (await runs.ClaimAsync(
-            "node-a", "worker-c", now, TimeSpan.FromSeconds(30), CancellationToken.None))!;
+            "node-a", "worker-c", now, LiveLease, CancellationToken.None))!;
         Assert.True(await runs.MarkRunningAsync(
             cancelledRun.RunId, cancelClaim.FenceToken, now, CancellationToken.None));
         Assert.True(await runs.RequestCancellationAsync(
@@ -364,16 +377,131 @@ public sealed class PostgresPlatformStateIntegrationTests : IAsyncLifetime
         MigrationRunRecord interruptedRun = await runs.EnqueueAsync(
             DurableRun(project.ProjectId, now, "run-interrupted"), CancellationToken.None);
         MigrationRunClaim interruptedClaim = (await runs.ClaimAsync(
-            "node-a", "worker-d", now, TimeSpan.FromMilliseconds(250), CancellationToken.None))!;
+            "node-a", "worker-d", now, LiveLease, CancellationToken.None))!;
         Assert.True(await runs.MarkRunningAsync(
             interruptedRun.RunId, interruptedClaim.FenceToken, now, CancellationToken.None));
-        await Task.Delay(TimeSpan.FromMilliseconds(400));
+        Assert.True(await runs.RenewAsync(
+            interruptedRun.RunId, interruptedClaim.FenceToken, ExpiredLease, CancellationToken.None));
         Assert.Equal(1, await runs.ReconcileExpiredAsync(
             "node-b", DateTimeOffset.UtcNow, "Replica stopped.", CancellationToken.None));
         Assert.Equal(
             MigrationRunState.Interrupted,
             (await runs.GetAsync(Tenant, interruptedRun.RunId, CancellationToken.None))!.State);
         Assert.Single(await runs.EventsAsync(Tenant, interruptedRun.RunId, 0, CancellationToken.None));
+    }
+
+    /// <summary>
+    /// The all-or-nothing ledger batch, against the real transaction rather than the file store's
+    /// document gate.
+    ///
+    /// The losing row is the middle one on purpose: a loop would already have written the row before it
+    /// by the time it discovered the conflict, and in PostgreSQL that half-written state is only undone
+    /// by the rollback. The winning case then proves the same statement advances every row exactly once,
+    /// and that entering evidence against a row leaves its decision revision where it was — which is what
+    /// keeps an authorization issued over these decisions describing them afterwards.
+    /// </summary>
+    [Fact]
+    [Trait("Category", "PostgresIntegration")]
+    public async Task A_batch_of_ledger_updates_is_all_or_nothing_in_one_real_transaction()
+    {
+        PostgresPlatformStateStore? configured = CreateStore();
+        if (configured is null)
+        {
+            RequireConfiguredConnection();
+            return;
+        }
+        await using PostgresPlatformStateStore store = configured;
+        await store.InitializeAsync(CancellationToken.None);
+
+        IReadOnlyList<DispositionLedgerEntry> seeded = await SeedLedgerAsync(store, "dled-pg-batch");
+        Assert.Equal(3, seeded.Count);
+
+        // Somebody else moved the middle row after these three versions were read.
+        DispositionLedgerEntry moved = (await store.UpdateDispositionLedgerEntryAsync(
+            seeded[1] with { Rationale = "Decided elsewhere." }, seeded[1].Version, CancellationToken.None))!;
+
+        DispositionGeneratedReference reference = new(
+            "run-pg-batch", ".fleet-run/out/application", new string('d', 64), DateTimeOffset.UtcNow, new string('e', 64), 7);
+
+        Assert.Null(await store.UpdateDispositionLedgerEntriesAsync(
+            [.. seeded.Select(entry => new DispositionLedgerEntryUpdate(
+                entry with { GeneratedRefs = [reference] }, entry.Version))],
+            CancellationToken.None));
+
+        IReadOnlyList<DispositionLedgerEntry> rolledBack =
+            await store.DispositionLedgerEntriesAsync(Tenant, "dled-pg-batch", CancellationToken.None);
+
+        Assert.All(rolledBack, entry => Assert.Empty(entry.GeneratedRefs));
+        Assert.Equal(seeded[0].Version, rolledBack.Single(entry => entry.EntryId == seeded[0].EntryId).Version);
+        Assert.Equal(seeded[2].Version, rolledBack.Single(entry => entry.EntryId == seeded[2].EntryId).Version);
+        Assert.Equal(moved.Version, rolledBack.Single(entry => entry.EntryId == moved.EntryId).Version);
+
+        IReadOnlyList<DispositionLedgerEntry>? written = await store.UpdateDispositionLedgerEntriesAsync(
+            [.. rolledBack.Select(entry => new DispositionLedgerEntryUpdate(
+                entry with { GeneratedRefs = [reference] }, entry.Version))],
+            CancellationToken.None);
+
+        Assert.NotNull(written);
+        Assert.Equal(rolledBack.Count, written.Count);
+
+        IReadOnlyList<DispositionLedgerEntry> committed =
+            await store.DispositionLedgerEntriesAsync(Tenant, "dled-pg-batch", CancellationToken.None);
+
+        Assert.All(committed, entry => Assert.Equal(reference, entry.GeneratedRefs.Single()));
+        Assert.All(committed, entry => Assert.Equal(
+            rolledBack.Single(before => before.EntryId == entry.EntryId).Version + 1, entry.Version));
+
+        // The row version advanced on every row and the decision on none of them.
+        Assert.All(committed, entry => Assert.Equal(
+            rolledBack.Single(before => before.EntryId == entry.EntryId).DecisionRevision, entry.DecisionRevision));
+    }
+
+    private async Task<IReadOnlyList<DispositionLedgerEntry>> SeedLedgerAsync(
+        IPlatformStateStore store,
+        string ledgerId)
+    {
+        const string snapshot = "cafe0000000000000000000000000000000000000000000000000000000000ff";
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+
+        PlatformAccessService platform = new(store, sandbox: null);
+        PlatformProject project = (await platform.CreateProjectAsync(
+            Actor(Requester), $"Ledger batch {ledgerId}", CancellationToken.None)).Value!;
+
+        DispositionLedgerEntry[] entries =
+        [
+            .. new[] { "ORD_NO", "ORD_DATE", "ORD_TOTAL" }.Select(property => new DispositionLedgerEntry
+            {
+                LedgerId = ledgerId,
+                EntryId = $"{ledgerId}-{property}",
+                TenantId = Tenant,
+                ProjectId = project.ProjectId,
+                SourceSnapshotHash = snapshot,
+                Identity = new DispositionSourceFactIdentity(
+                    "ORDERS", "legacy/forms/ORDERS.xml", "{ns}Block[1]", "Item", property, "Data entry"),
+                ObservedValue = property,
+                ObservedEvidence = "Declared by the Forms export.",
+            }),
+        ];
+
+        Assert.NotNull(await store.CreateDispositionLedgerAsync(
+            new DispositionLedger
+            {
+                LedgerId = ledgerId,
+                TenantId = Tenant,
+                ProjectId = project.ProjectId,
+                RunId = $"run-{ledgerId}",
+                SourceSnapshotHash = snapshot,
+                SourceRoot = "legacy/forms",
+                IntermediateContentSha256 = new string('a', 64),
+                CreatedUtc = now,
+                CreatedByObjectId = Requester,
+                ModuleCount = 1,
+                EntryCount = entries.Length,
+            },
+            entries,
+            CancellationToken.None));
+
+        return await store.DispositionLedgerEntriesAsync(Tenant, ledgerId, CancellationToken.None);
     }
 
     private PostgresPlatformStateStore? CreateStore()
@@ -470,7 +598,16 @@ public sealed class PostgresPlatformStateIntegrationTests : IAsyncLifetime
             $"source-{engagementId}",
             $"plan-{engagementId}",
             TimeSpan.FromHours(1),
-            null);
+            null,
+            ProfileTarget);
+
+    /// <summary>The stack the configured profile records, which is what a compatible request names.</summary>
+    private static TargetStack ProfileTarget => new()
+    {
+        Database = DatabaseTarget.PostgreSql,
+        FrontEnd = FrontEndStack.React,
+        BackEnd = BackEndStack.JavaSpringBoot,
+    };
 
     private static PlatformApproval LegacyApproval(
         string projectId, string engagementId, DateTimeOffset requestedUtc) => new()

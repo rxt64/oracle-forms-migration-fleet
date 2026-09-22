@@ -2,6 +2,7 @@
 
 using System.Text;
 using System.Text.Json;
+using OracleFormsMigrationFleet.Fleet;
 using OracleFormsMigrationFleet.Hosting;
 
 namespace OracleFormsMigrationFleet.Tests;
@@ -431,5 +432,28 @@ public class WorkbenchAuthenticationTests
         PlatformTargetProfileEnvironment planningOnly = PlatformTargetProfileEnvironment.Read(
             Configuration(), "Production", requireSandboxCoordinates: false);
         Assert.Equal(PlatformTargetProfileEnvironment.Undeclared, planningOnly.ResourceId);
+    }
+
+    [Fact]
+    public void The_generated_back_end_stack_is_read_from_configuration_and_defaults_to_java()
+    {
+        Assert.Equal(
+            nameof(BackEndStack.JavaSpringBoot),
+            PlatformTargetProfileEnvironment.Read(Configuration(), "Development").StackBackEnd);
+
+        Assert.Equal(
+            "aspnetcore",
+            PlatformTargetProfileEnvironment.Read(
+                Configuration((PlatformTargetProfileEnvironment.BackEndVariable, " aspnetcore ")),
+                "Development").StackBackEnd);
+
+        // A stack this build cannot generate stops the host rather than silently emitting another one.
+        InvalidOperationException exception = Assert.Throws<InvalidOperationException>(() =>
+            PlatformTargetProfileEnvironment.Read(
+                Configuration((PlatformTargetProfileEnvironment.BackEndVariable, "NodeExpress")),
+                "Development"));
+
+        Assert.Contains(PlatformTargetProfileEnvironment.BackEndVariable, exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("NodeExpress", exception.Message, StringComparison.Ordinal);
     }
 }

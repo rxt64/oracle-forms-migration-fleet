@@ -357,7 +357,8 @@ internal static class WorkbenchEndpoints
                     profile.TargetProfileId,
                     profile.Version,
                     profile.CanonicalHash,
-                    PlatformIdentity.WorkspaceOwner(actor, profile.ProjectId));
+                    PlatformIdentity.WorkspaceOwner(actor, profile.ProjectId),
+                    WorkbenchTargetProfileStack.From(profile));
             }
 
             WorkbenchExecution.WorkbenchRunPreparationResult preparationResult = await WorkbenchExecution.PrepareRunAsync(
@@ -372,6 +373,33 @@ internal static class WorkbenchEndpoints
             WorkbenchExecution.WorkbenchRunPreparation preparation = preparationResult.Preparation!;
             string workspaceRoot = preparation.WorkspaceRoot;
             MigrationRunRequest prepared = preparation.Request;
+
+            // A ledger identifier in a request body is a locator and nothing else. It is resolved here,
+            // under this actor's tenant, against the project the run is bound to and the snapshot the
+            // server hashed, so a run cannot be started under another project's decisions or under
+            // decisions about source it does not read. Nothing is issued: the generation phase still asks
+            // the server at the moment it generates.
+            if (prepared.DispositionLedgerId is { Length: > 0 } ledgerId)
+            {
+                if (context.RequestServices.GetService<DispositionLedgerService>() is not { } ledgers)
+                {
+                    await WriteErrorAsync(
+                        context,
+                        503,
+                        "This deployment records no disposition ledgers, so a run cannot be bound to one.",
+                        cancellationToken);
+                    return;
+                }
+
+                PlatformResult<DispositionLedger> bound = await ledgers.BindRunAsync(
+                    actor, ledgerId, projectId!, preparation.SourceSnapshotHash, cancellationToken);
+
+                if (!bound.Succeeded)
+                {
+                    await WriteErrorAsync(context, bound.Status, bound.Error, cancellationToken);
+                    return;
+                }
+            }
 
             if (context.RequestServices.GetService<IMigrationRunStore>() is { } runStore)
             {
@@ -416,6 +444,17 @@ internal static class WorkbenchEndpoints
                     cancellationToken);
                 context.Response.StatusCode = StatusCodes.Status202Accepted;
                 await context.Response.WriteAsJsonAsync(new { runId }, cancellationToken);
+                return;
+            }
+
+            // Below this point the run has no durable identity: no run record, so no run a ledger
+            // authorization could be bound to and no artifact manifest a generation could be recorded
+            // against. Generating an Oracle Forms estate onto the .NET path needs both, and a run
+            // identifier minted here would name a run that exists nowhere. So it is refused rather than
+            // downgraded to a generation nobody recorded a decision for.
+            if (WorkbenchExecution.RequiresDurableRun(prepared, workspaceRoot, out string durableRequirement))
+            {
+                await WriteErrorAsync(context, 409, durableRequirement, cancellationToken);
                 return;
             }
 
@@ -931,10 +970,13 @@ internal static class WorkbenchEndpoints
     private static readonly JsonSerializerOptions JsonOptions =
         new(JsonSerializerDefaults.Web);
 
-    /// <summary>The console posts enum values as names, exactly as the plan endpoint accepts them.</summary>
-    private static readonly JsonSerializerOptions RequestOptions = new(JsonSerializerDefaults.Web)
+    /// <summary>
+    /// The console posts enum values as names, exactly as the plan endpoint accepts them. Integers are
+    /// refused so an out-of-range ordinal cannot name a target stack by number.
+    /// </summary>
+    internal static readonly JsonSerializerOptions RequestOptions = new(JsonSerializerDefaults.Web)
     {
-        Converters = { new JsonStringEnumConverter() },
+        Converters = { new JsonStringEnumConverter(allowIntegerValues: false) },
     };
 
     /// <summary>

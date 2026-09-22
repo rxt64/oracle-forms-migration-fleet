@@ -20,9 +20,13 @@ namespace OracleFormsMigrationFleet.Hosting;
 /// </summary>
 internal static class WorkbenchPlatformEndpoints
 {
-    private static readonly JsonSerializerOptions s_requestOptions = new(JsonSerializerDefaults.Web)
+    /// <summary>
+    /// The console posts enum values as names. Integers are refused so an out-of-range ordinal cannot
+    /// name a stack or scope by number and land as a value no name in this build matches.
+    /// </summary>
+    internal static readonly JsonSerializerOptions RequestOptions = new(JsonSerializerDefaults.Web)
     {
-        Converters = { new JsonStringEnumConverter() },
+        Converters = { new JsonStringEnumConverter(allowIntegerValues: false) },
     };
 
     public static void Map(
@@ -30,6 +34,8 @@ internal static class WorkbenchPlatformEndpoints
         IWorkbenchIdentityProvider identity,
         SourceWorkspaceService? workspaces)
     {
+        DispositionLedgerEndpoints.Map(endpoints, identity);
+
         endpoints.MapGet("/api/workbench/context", async (HttpContext context, CancellationToken cancellationToken) =>
         {
             if (!WorkbenchEndpoints.TryActor(context, identity, out WorkbenchActor actor))
@@ -352,7 +358,8 @@ internal static class WorkbenchPlatformEndpoints
                     trusted.SourceSnapshotHash,
                     trusted.PlanInputHash,
                     TimeSpan.FromMinutes(ReadInt(body, "lifetimeMinutes") ?? 60),
-                    WorkbenchEndpoints.ReadString(body, "notes")),
+                    WorkbenchEndpoints.ReadString(body, "notes"),
+                    trusted.Request.Target),
                 cancellationToken);
 
             return requested.Succeeded
@@ -452,7 +459,7 @@ internal static class WorkbenchPlatformEndpoints
     {
         try
         {
-            return element.Deserialize<MigrationRunRequest>(s_requestOptions);
+            return element.Deserialize<MigrationRunRequest>(RequestOptions);
         }
         catch (JsonException)
         {

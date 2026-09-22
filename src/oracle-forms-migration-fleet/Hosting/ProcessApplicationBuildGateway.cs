@@ -25,6 +25,12 @@ public sealed class ProcessApplicationBuildGateway : IApplicationBuildGateway
             gateway => gateway.BuildFrontendAsync(workingDirectory, cancellationToken)).ConfigureAwait(false);
     }
 
+    public Task<ApplicationBuildResult> BuildDotNetAsync(
+        string workingDirectory,
+        CancellationToken cancellationToken) => BuildAsync(
+            ".NET/ASP.NET Core",
+            gateway => gateway.BuildDotNetBackendAsync(workingDirectory, cancellationToken));
+
     private static async Task<ApplicationBuildResult> BuildAsync(
         string component,
         Func<ProcessApplicationTestGateway, Task<ApplicationTestRun>> execute)
@@ -46,7 +52,7 @@ public sealed class ProcessApplicationBuildGateway : IApplicationBuildGateway
         string[] allowed =
         [
             "PATH", "HOME", "USERPROFILE", "LANG", "LC_ALL", "TMPDIR", "TMP", "TEMP",
-            "JAVA_HOME", "SystemRoot", "WINDIR", "ComSpec", "PATHEXT", "SSL_CERT_FILE",
+            "JAVA_HOME", "DOTNET_ROOT", "SystemRoot", "WINDIR", "ComSpec", "PATHEXT", "SSL_CERT_FILE",
         ];
         Dictionary<string, string?> retained = allowed.ToDictionary(
             key => key,

@@ -1,0 +1,67 @@
+{
+  "schemaVersion": "fleet.target-mapping/1",
+  "generator": "dotnet-master-detail/1",
+  "application": "Meridian Order Entry",
+  "fixtureLabel": "synthetic-fixture-meridian-orders",
+  "sources": [
+    { "id": "sch-cust", "kind": "OracleSchemaObject", "path": "TABLE:MRD_CUSTOMER" },
+    { "id": "sch-art",  "kind": "OracleSchemaObject", "path": "TABLE:MRD_ARTICLE" },
+    { "id": "sch-head", "kind": "OracleSchemaObject", "path": "TABLE:MRD_ORDER_HEAD" },
+    { "id": "sch-item", "kind": "OracleSchemaObject", "path": "TABLE:MRD_ORDER_ITEM" }
+  ],
+  "objects": [
+    {
+      "role": "PartyLookup",
+      "table": "MRD_CUSTOMER",
+      "sourceRefs": ["sch-cust"],
+      "constants": { "ActiveFlag": "A" },
+      "fields": [
+        { "role": "Identifier",  "column": "CUST_NO" },
+        { "role": "DisplayName", "column": "CUST_NAME" },
+        { "role": "ActiveFlag",  "column": "CUST_STATE" }
+      ]
+    },
+    {
+      "role": "ItemLookup",
+      "table": "MRD_ARTICLE",
+      "sourceRefs": ["sch-art"],
+      "constants": { "ActiveFlag": "A" },
+      "fields": [
+        { "role": "Identifier",         "column": "ART_NO" },
+        { "role": "DisplayName",        "column": "ART_DESC" },
+        { "role": "UnitPrice",          "column": "ART_PRICE" },
+        { "role": "StockOnHand",        "column": "ART_ON_HAND" },
+        { "role": "ActiveFlag",         "column": "ART_STATE" },
+        { "role": "ConcurrencyVersion", "column": "ART_REV" }
+      ]
+    },
+    {
+      "role": "MasterHeader",
+      "table": "MRD_ORDER_HEAD",
+      "sourceRefs": ["sch-head"],
+      "constants": { "Status": "ENTERED" },
+      "fields": [
+        { "role": "Identifier",         "column": "ORD_NO" },
+        { "role": "PartyReference",     "column": "ORD_CUST" },
+        { "role": "TotalAmount",        "column": "ORD_VALUE" },
+        { "role": "CreatedAt",          "column": "ORD_RAISED" },
+        { "role": "Status",             "column": "ORD_STATE" },
+        { "role": "ConcurrencyVersion", "column": "ORD_REV" }
+      ]
+    },
+    {
+      "role": "DetailLine",
+      "table": "MRD_ORDER_ITEM",
+      "sourceRefs": ["sch-item"],
+      "constants": {},
+      "fields": [
+        { "role": "Identifier",      "column": "ITM_NO" },
+        { "role": "ParentReference", "column": "ITM_ORD" },
+        { "role": "ItemReference",   "column": "ITM_ART" },
+        { "role": "Quantity",        "column": "ITM_QTY" },
+        { "role": "UnitPrice",       "column": "ITM_PRICE" },
+        { "role": "LineAmount",      "column": "ITM_VALUE" }
+      ]
+    }
+  ]
+}

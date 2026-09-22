@@ -1,5 +1,6 @@
 // Copyright (c) Microsoft. All rights reserved.
 
+using System.Diagnostics;
 using OracleFormsMigrationFleet.Fleet.Execution;
 
 namespace OracleFormsMigrationFleet.Tests;
@@ -39,6 +40,56 @@ public class WorkspaceWriterTests
 
         Assert.True(writer.TryResolve("out/analysis/report.md", out string resolved, out _));
         Assert.StartsWith(writer.Root + Path.DirectorySeparatorChar, resolved, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_path_beneath_a_directory_link_is_rejected()
+    {
+        using TemporaryWorkspace workspace = new();
+        string outside = Path.Combine(Path.GetTempPath(), $"ofm-workspace-outside-{Guid.NewGuid():N}");
+        string link = Path.Combine(workspace.Root, "out");
+        Directory.CreateDirectory(outside);
+
+        try
+        {
+            CreateDirectoryLink(link, outside);
+
+            WorkspaceWriter writer = new(workspace.Root);
+
+            Assert.False(writer.TryResolve("out/report.md", out _, out string error));
+            Assert.Contains("symbolic link or junction", error, StringComparison.Ordinal);
+        }
+        finally
+        {
+            try
+            {
+                Directory.Delete(link);
+            }
+            catch (DirectoryNotFoundException)
+            {
+            }
+            Directory.Delete(outside, recursive: true);
+        }
+    }
+
+    private static void CreateDirectoryLink(string link, string target)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Directory.CreateSymbolicLink(link, target);
+            return;
+        }
+
+        ProcessStartInfo startInfo = new("cmd.exe", $"/d /c mklink /J \"{link}\" \"{target}\"")
+        {
+            UseShellExecute = false,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        };
+
+        using Process process = Process.Start(startInfo)!;
+        process.WaitForExit();
+        Assert.True(process.ExitCode == 0, process.StandardError.ReadToEnd());
     }
 
     [Fact]

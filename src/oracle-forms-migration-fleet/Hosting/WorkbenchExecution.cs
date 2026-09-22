@@ -34,6 +34,19 @@ public sealed record WorkbenchExecutionView(
     IReadOnlyList<string> Blockers);
 
 /// <summary>
+/// The generated stack an immutable target profile names, as the server recorded it from deployment
+/// configuration. It is the destination a request has to match, never something a request supplies.
+/// </summary>
+public sealed record WorkbenchTargetProfileStack(string Database, string FrontEnd, string BackEnd)
+{
+    public static WorkbenchTargetProfileStack From(PlatformTargetProfile profile)
+    {
+        ArgumentNullException.ThrowIfNull(profile);
+        return new(profile.StackDatabase, profile.StackFrontEnd, profile.StackBackEnd);
+    }
+}
+
+/// <summary>
 /// Authorization and path safety for the execution endpoints, kept separate from the HTTP plumbing so
 /// the rules are testable on their own.
 ///
@@ -60,6 +73,22 @@ public static class WorkbenchExecution
         !string.IsNullOrEmpty(path)
         && !path.EndsWith("/forms-ir.json", StringComparison.OrdinalIgnoreCase)
         && s_previewable.Contains(System.IO.Path.GetExtension(path));
+
+    /// <summary>Longest disposition-ledger locator this console accepts from a request body.</summary>
+    public const int MaxLedgerLocatorLength = 64;
+
+    /// <summary>
+    /// Whether a request body's disposition-ledger identifier is shaped like a locator at all.
+    ///
+    /// It authorizes nothing and resolves nothing: the ledger is looked up by the server, under the
+    /// signed-in actor's tenant, and every fact about it comes from the stored row. This exists so a
+    /// value that is not an identifier at all is refused at the edge rather than carried into a store
+    /// lookup, a path, or a log line.
+    /// </summary>
+    public static bool IsLedgerLocator(string value) =>
+        value.Length is > 0 and <= MaxLedgerLocatorLength
+        && value.All(character =>
+            char.IsAsciiLetterOrDigit(character) || character is '-' || character is '_');
 
     /// <summary>
     /// Resolves an owned workspace and rewrites the request so generated artifacts land under
@@ -116,11 +145,20 @@ public static class WorkbenchExecution
             return false;
         }
 
+        string? ledgerId = request.DispositionLedgerId?.Trim();
+        if (ledgerId is { Length: > 0 } && !IsLedgerLocator(ledgerId))
+        {
+            status = 400;
+            error = "The disposition ledger identifier is not shaped like one. Name a ledger this project holds.";
+            return false;
+        }
+
         string requested = WorkspacePath.Normalize(request.OutputRoot);
         workspaceRoot = root;
         prepared = request with
         {
             OutputRoot = requested is "" or "." ? OutputRoot : $"{OutputRoot}/{requested}",
+            DispositionLedgerId = ledgerId is { Length: > 0 } ? ledgerId : null,
         };
 
         status = 200;
@@ -150,7 +188,67 @@ public static class WorkbenchExecution
         string TargetProfileId,
         int TargetProfileVersion,
         string TargetProfileHash,
-        string WorkspaceOwnerId);
+        string WorkspaceOwnerId,
+        WorkbenchTargetProfileStack ProfileStack);
+
+    /// <summary>
+    /// Refuses a run whose requested stack is not the one the project's immutable target profile names.
+    ///
+    /// The plan-input hash only catches drift between an approval and the run it was issued for; when
+    /// both name the same stack it cannot tell that neither is the stack the deployment is configured
+    /// for. Without this check a caller could post <c>target.backEnd = AspNetCore</c> against a project
+    /// whose profile records <c>JavaSpringBoot</c>, obtain a valid approval, and execute against a
+    /// destination identity nobody approved. So the request is compared against the profile before an
+    /// approval is created and again before a run is prepared.
+    ///
+    /// An undefined enum value fails the comparison too, so a numeric or out-of-range stack cannot slip
+    /// past by not matching any name.
+    /// </summary>
+    public static bool TryMatchTargetProfile(
+        TargetStack? requested,
+        WorkbenchTargetProfileStack profile,
+        out string error)
+    {
+        ArgumentNullException.ThrowIfNull(profile);
+
+        if (requested is null)
+        {
+            error = "A run is bound to the target stack its project profile records. This request named none.";
+            return false;
+        }
+
+        List<string> differences = [];
+        if (!Matches(requested.Database, profile.Database))
+        {
+            differences.Add($"database is fixed at {profile.Database}");
+        }
+
+        if (!Matches(requested.FrontEnd, profile.FrontEnd))
+        {
+            differences.Add($"front end is fixed at {profile.FrontEnd}");
+        }
+
+        if (!Matches(requested.BackEnd, profile.BackEnd))
+        {
+            differences.Add($"back end is fixed at {profile.BackEnd}");
+        }
+
+        if (differences.Count == 0)
+        {
+            error = string.Empty;
+            return true;
+        }
+
+        // The profile values are named because a project member can already read them; the rejected
+        // request value is not echoed back.
+        error =
+            $"This project's target profile is immutable and this request does not match it: {string.Join("; ", differences)}. " +
+            "The target stack is a deployment fact, not a request field.";
+        return false;
+    }
+
+    private static bool Matches<TEnum>(TEnum requested, string profile) where TEnum : struct, Enum =>
+        Enum.IsDefined(requested) && string.Equals(requested.ToString(), profile, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Outcome of preparing a run, shaped so the endpoint can answer without out-parameters.</summary>
     public sealed record WorkbenchRunPreparationResult(
@@ -237,6 +335,14 @@ public static class WorkbenchExecution
         }
 
         WorkbenchRequestPreparation trusted = preparation!.Trusted;
+
+        // The profile is the destination identity; a request that asks for a different one is refused
+        // here, before any authorizer is built and before any phase can mutate anything.
+        if (binding is not null &&
+            !TryMatchTargetProfile(trusted.Request.Target, binding.ProfileStack, out string incompatible))
+        {
+            return new WorkbenchRunPreparationResult(false, null, 409, incompatible);
+        }
 
         // A persisted target profile names the target, so the binding hash replaces the stack-enum one:
         // two engagements pointed at different databases must not share a target identity because they
@@ -367,10 +473,64 @@ public static class WorkbenchExecution
         return true;
     }
 
+    /// <summary>
+    /// Whether this run may only be executed as a durable run, and why.
+    ///
+    /// Generating an Oracle Forms estate onto the .NET path is bound to a disposition ledger and to the
+    /// run the ledger authorizes, and the generation it produces is recorded against that run's stored
+    /// artifact manifest. A synchronous stream has neither: there is no run record to bind to and no
+    /// manifest to record against. The honest answer is that this deployment cannot run it, not a run
+    /// identifier invented for the occasion.
+    ///
+    /// A run that names a ledger is included whatever its target, because naming one is a request to
+    /// generate under recorded decisions and nothing here can answer it.
+    ///
+    /// The schema-only and Java paths are untouched: they carry no ledger binding and are not refused.
+    /// </summary>
+    public static bool RequiresDurableRun(MigrationRunRequest request, string workspaceRoot, out string reason)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        const string Durable =
+            "This deployment is running without a durable run store, so it has no run identity to bind that to. Enable the " +
+            "durable run store and start the run from the console's run history, which issues the run identifier the ledger " +
+            "and the recorded generation are both bound to.";
+
+        if (request.DispositionLedgerId is { Length: > 0 })
+        {
+            reason = $"This run names a disposition ledger. {Durable}";
+            return true;
+        }
+
+        if (request.Target?.BackEnd != BackEndStack.AspNetCore)
+        {
+            reason = string.Empty;
+            return false;
+        }
+
+        bool forms;
+        try
+        {
+            forms = FormsSourcePresence.Applies(
+                request, new WorkspaceWriter(workspaceRoot), WorkspacePath.Normalize(request.SourceRoot));
+        }
+        catch (WorkspaceLimitExceededException)
+        {
+            // Whether this estate has Forms source could not be established, and an unestablished answer
+            // is not a licence to generate as though it were absent.
+            forms = true;
+        }
+
+        reason = forms
+            ? "This run has Oracle Forms source and targets ASP.NET Core, so it generates only under the decisions a disposition " +
+              $"ledger records, and only as a run those decisions can be bound to. {Durable}"
+            : string.Empty;
+        return forms;
+    }
+
     /// <summary>Drops the previous run's output so a run never analyses or reports its own earlier artifacts.</summary>
     public static void ResetOutput(string workspaceRoot)
         => ResetOutput(workspaceRoot, OutputRoot);
-
     public static void ResetOutput(string workspaceRoot, string outputRoot)
     {
         string normalized = WorkspacePath.Normalize(outputRoot);

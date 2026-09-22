@@ -3,6 +3,7 @@
 using System.IO.Compression;
 using System.Text;
 using OracleFormsMigrationFleet.Fleet;
+using OracleFormsMigrationFleet.Fleet.Execution;
 using OracleFormsMigrationFleet.Hosting;
 
 namespace OracleFormsMigrationFleet.Tests;
@@ -131,9 +132,117 @@ public class WorkbenchExecutionTests : IDisposable
         Assert.True(Path.IsPathRooted(root));
     }
 
-    [Fact]
-    public async Task Artifact_preview_rejects_a_workspace_owned_by_someone_else()
+    [Theory]
+    [InlineData("dled-../../etc")]
+    [InlineData("dled 0001")]
+    [InlineData("dled-0001;drop")]
+    public async Task A_ledger_identifier_that_is_not_a_locator_is_refused_before_anything_resolves(string ledgerId)
     {
+        (SourceWorkspaceService service, string workspaceId) = await SeedAsync();
+        using SourceWorkspaceService owned = service;
+
+        Assert.False(WorkbenchExecution.TryPrepare(
+            service,
+            Owner,
+            workspaceId,
+            Request() with { DispositionLedgerId = ledgerId },
+            out _,
+            out MigrationRunRequest? prepared,
+            out int status,
+            out _));
+
+        Assert.Equal(400, status);
+        Assert.Null(prepared);
+    }
+
+    [Fact]
+    public async Task A_blank_ledger_identifier_carries_no_binding_rather_than_an_empty_one()
+    {
+        (SourceWorkspaceService service, string workspaceId) = await SeedAsync();
+        using SourceWorkspaceService owned = service;
+
+        Assert.True(WorkbenchExecution.TryPrepare(
+            service,
+            Owner,
+            workspaceId,
+            Request() with { DispositionLedgerId = "   " },
+            out _,
+            out MigrationRunRequest? prepared,
+            out _,
+            out _));
+
+        Assert.Null(prepared!.DispositionLedgerId);
+    }
+
+    /// <summary>
+    /// The synchronous stream mints no run identifier, so a Forms estate on the .NET path has nothing to
+    /// bind a ledger authorization to and nothing to record a generation against. It is refused with the
+    /// requirement stated, not downgraded to an unauthorized generation.
+    /// </summary>
+    [Fact]
+    public async Task Forms_source_on_the_dotnet_path_is_refused_where_there_is_no_durable_run_identity()
+    {
+        (SourceWorkspaceService service, string workspaceId) = await SeedAsync();
+        using SourceWorkspaceService owned = service;
+        string root = service.ResolveRoot(Owner, workspaceId)!;
+
+        MigrationRunRequest dotnet = Request() with
+        {
+            Target = new TargetStack { Database = DatabaseTarget.PostgreSql, BackEnd = BackEndStack.AspNetCore },
+        };
+
+        Assert.True(WorkbenchExecution.RequiresDurableRun(dotnet, root, out string reason));
+        Assert.Contains("durable run store", reason, StringComparison.Ordinal);
+        Assert.Contains("run history", reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_named_ledger_is_refused_where_there_is_no_durable_run_identity()
+    {
+        (SourceWorkspaceService service, string workspaceId) = await SeedAsync();
+        using SourceWorkspaceService owned = service;
+        string root = service.ResolveRoot(Owner, workspaceId)!;
+
+        Assert.True(WorkbenchExecution.RequiresDurableRun(
+            Request() with { DispositionLedgerId = "dled-0001" }, root, out string reason));
+        Assert.Contains("disposition ledger", reason, StringComparison.Ordinal);
+    }
+
+    /// <summary>The Java and schema-only paths are untouched: neither binds a ledger.</summary>
+    [Theory]
+    [InlineData(BackEndStack.JavaSpringBoot)]
+    public async Task The_java_path_still_runs_without_a_durable_run_identity(BackEndStack backEnd)
+    {
+        (SourceWorkspaceService service, string workspaceId) = await SeedAsync();
+        using SourceWorkspaceService owned = service;
+        string root = service.ResolveRoot(Owner, workspaceId)!;
+
+        MigrationRunRequest java = Request() with
+        {
+            Target = new TargetStack { Database = DatabaseTarget.PostgreSql, BackEnd = backEnd },
+        };
+
+        Assert.False(WorkbenchExecution.RequiresDurableRun(java, root, out string reason));
+        Assert.Equal(string.Empty, reason);
+    }
+
+    [Fact]
+    public void A_schema_only_dotnet_run_still_runs_without_a_durable_run_identity()
+    {
+        string root = Path.Combine(_root, "schema-only");
+        new WorkspaceWriter(root).WriteText("forms/schema.sql", "CREATE TABLE ORDERS (ID NUMBER);");
+
+        MigrationRunRequest dotnet = Request() with
+        {
+            Target = new TargetStack { Database = DatabaseTarget.PostgreSql, BackEnd = BackEndStack.AspNetCore },
+        };
+
+        Assert.False(WorkbenchExecution.RequiresDurableRun(dotnet, root, out string reason));
+        Assert.Equal(string.Empty, reason);
+    }
+
+    [Fact]
+    public async Task Artifact_preview_rejects_a_workspace_owned_by_someone_else()    {
         (SourceWorkspaceService service, string workspaceId) = await SeedAsync();
         using SourceWorkspaceService owned = service;
 

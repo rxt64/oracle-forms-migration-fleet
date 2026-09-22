@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Trusted seed for the offline NuGet folder feed the generated-application verification leg restores
+    from. It compiles nothing. Its only job is to make a restore resolve the exact dependency closure the
+    generated backend asks for, so the packages can be copied into a read-only .nupkg feed and the
+    sandboxed `dotnet restore` can run with that feed as its single source.
+
+    Every PackageReference below must match DotNetBackendEmitter. A version that drifts is not a warning:
+    the sandbox has no network, so the generated restore simply fails and the verification leg reports a
+    setup failure rather than a result.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <EnableDefaultItems>false</EnableDefaultItems>
+    <IsPackable>false</IsPackable>
+    <NoWarn>$(NoWarn);NU1903</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The generated API is Microsoft.NET.Sdk.Web and its suite framework-references ASP.NET Core. -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- backend/Api/Api.csproj -->
+    <PackageReference Include="Npgsql" Version="9.0.3" />
+    <PackageReference Include="Azure.Identity" Version="1.13.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- backend/Api.Tests/Api.Tests.csproj -->
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+</Project>

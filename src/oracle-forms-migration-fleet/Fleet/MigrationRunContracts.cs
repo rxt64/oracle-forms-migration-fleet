@@ -10,10 +10,19 @@ public enum FrontEndStack
     React,
 }
 
-/// <summary>Back-end framework the fleet converts Oracle Forms client-side logic into.</summary>
+/// <summary>
+/// Back-end framework the fleet converts Oracle Forms client-side logic into.
+///
+/// Values are appended, never reordered: a stack is persisted in run reports and stored plans, so an old
+/// report has to keep decoding as the stack it was written with. <see cref="JavaSpringBoot"/> stays the
+/// default for that reason too — a run that never stated a stack is still the Java run it was planned as.
+/// </summary>
 public enum BackEndStack
 {
     JavaSpringBoot,
+
+    /// <summary>ASP.NET Core on .NET 10 with Npgsql, generated from a validated target-mapping manifest.</summary>
+    AspNetCore,
 }
 
 /// <summary>Database engine the Oracle schema, PL/SQL, and data are converted to.</summary>
@@ -176,6 +185,9 @@ public sealed record MigrationRunRequest
 
     [Description("Workspace-relative directory the run writes generated artifacts into.")]
     public required string OutputRoot { get; init; }
+
+    [Description("Identifier of the disposition ledger this run generates under, or null. It is a locator and nothing else: the server resolves the ledger, its project, its tenant and its source snapshot itself, and a phase is answered from the stored rows rather than from anything named here.")]
+    public string? DispositionLedgerId { get; init; }
 
     [Description("Supplied source artifacts. Generation requires Forms source or XML, PL/SQL, schema, and a regression baseline.")]
     public IReadOnlyList<EvidenceItem> Evidence { get; init; } = [];

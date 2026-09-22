@@ -2,6 +2,7 @@
 
 using System.IO.Compression;
 using System.Text;
+using System.Text.Json;
 using OracleFormsMigrationFleet.Fleet;
 using OracleFormsMigrationFleet.Fleet.Execution;
 using OracleFormsMigrationFleet.Hosting;
@@ -510,7 +511,8 @@ public class WorkbenchTrustBoundaryTests : IDisposable
                 trusted.Trusted.SourceSnapshotHash,
                 trusted.Trusted.PlanInputHash,
                 TimeSpan.FromHours(1),
-                null),
+                null,
+                trusted.Trusted.Request.Target),
             CancellationToken.None)).Value!;
         await platform.DecideAsync(
             approver, requested.ApprovalId, approve: true, requested.Version, null, CancellationToken.None);
@@ -526,13 +528,16 @@ public class WorkbenchTrustBoundaryTests : IDisposable
                 profile.TargetProfileId,
                 profile.Version,
                 profile.CanonicalHash,
-                workspaceOwner));
+                workspaceOwner,
+                WorkbenchTargetProfileStack.From(profile)));
 
         Assert.True(execution.Succeeded, execution.Error);
         Assert.Equal(".fleet-run/out", execution.Preparation!.Request.OutputRoot);
         Assert.Equal(ApprovalDecision.Approved, execution.Preparation.Request.ExecutionApproval.Decision);
         Assert.Equal(approver.ObjectId, execution.Preparation.Request.ExecutionApproval.ApproverId);
 
+        // A request naming a target the profile does not is refused outright now, rather than being
+        // prepared with a pending approval and left to the plan-input hash to catch.
         WorkbenchExecution.WorkbenchRunPreparationResult changedTarget = await WorkbenchExecution.PrepareRunAsync(
             service,
             requester,
@@ -544,11 +549,247 @@ public class WorkbenchTrustBoundaryTests : IDisposable
                 profile.TargetProfileId,
                 profile.Version,
                 profile.CanonicalHash,
-                workspaceOwner));
+                workspaceOwner,
+                WorkbenchTargetProfileStack.From(profile)));
 
-        Assert.True(changedTarget.Succeeded, changedTarget.Error);
-        Assert.Equal(ApprovalDecision.Pending, changedTarget.Preparation!.Request.ExecutionApproval.Decision);
+        Assert.False(changedTarget.Succeeded);
+        Assert.Equal(409, changedTarget.Status);
+        Assert.Null(changedTarget.Preparation);
     }
+
+    /// <summary>
+    /// The plan-input hash only catches drift between an approval and the run it was issued for. An
+    /// approval requested for a stack the deployment does not generate hashes that stack consistently,
+    /// so it matched, and the run executed against a destination identity nobody approved. The approval
+    /// route now refuses to record one, and the execute route refuses the run even while holding a live
+    /// grant that is correctly bound in every other respect.
+    /// </summary>
+    [Fact]
+    public async Task A_back_end_the_target_profile_does_not_name_is_refused_at_approval_and_again_at_execution()
+    {
+        WorkbenchActor requester = WorkbenchActor.ForTenant(
+            WorkbenchAuthenticationOptions.DevelopmentTenantId, "requester", []);
+        WorkbenchActor approver = WorkbenchActor.ForTenant(
+            WorkbenchAuthenticationOptions.DevelopmentTenantId, "approver", []);
+        ConfiguredSandboxTargetBinding sandbox = new(
+            "pg-sandbox.postgres.database.azure.com", "ofm_sandbox", "id-ofmfleet-web-dev", CanWrite: false);
+
+        FilePlatformStateStore store = new(Path.Combine(_root, "platform-state.json"));
+        await store.InitializeAsync(CancellationToken.None);
+        PlatformAccessService platform = new(store, sandbox);
+        PlatformProject project = (await platform.CreateProjectAsync(
+            requester, "Orders migration", CancellationToken.None)).Value!;
+        await platform.AddMemberAsync(
+            requester,
+            project.ProjectId,
+            approver.ObjectId,
+            [WorkbenchRoles.MigrationOperator, WorkbenchRoles.SandboxApprover],
+            CancellationToken.None);
+
+        PlatformTargetProfile profile = (await platform.EnsureConfiguredTargetProfileAsync(
+            requester, project.ProjectId, DevelopmentEnvironment, CancellationToken.None)).Value!;
+        Assert.Equal(nameof(BackEndStack.JavaSpringBoot), profile.StackBackEnd);
+
+        string workspaceOwner = PlatformIdentity.WorkspaceOwner(requester, project.ProjectId);
+        (SourceWorkspaceService service, string workspaceId) = await SeedAsync(owner: workspaceOwner);
+        using SourceWorkspaceService owned = service;
+
+        MigrationRunRequest dotnet = ForgedRequest(mode: ExecutionMode.SandboxMigration) with
+        {
+            Target = new TargetStack { Database = DatabaseTarget.PostgreSql, BackEnd = BackEndStack.AspNetCore },
+        };
+
+        Assert.True(WorkbenchExecution.TryPrepareTrusted(
+            service,
+            workspaceOwner,
+            workspaceId,
+            dotnet,
+            out WorkbenchExecution.WorkbenchTrustedPreparation? trusted,
+            out _,
+            out _));
+
+        PlatformResult<PlatformApproval> refused = await platform.RequestAsync(
+            requester,
+            new PlatformApprovalRequestInput(
+                project.ProjectId,
+                profile.TargetProfileId,
+                WorkbenchMutationScope.SandboxDatabaseWrite,
+                trusted!.Trusted.Request.EngagementId,
+                trusted.Trusted.SourceSnapshotHash,
+                trusted.Trusted.PlanInputHash,
+                TimeSpan.FromHours(1),
+                null,
+                trusted.Trusted.Request.Target),
+            CancellationToken.None);
+
+        Assert.False(refused.Succeeded);
+        Assert.Equal(409, refused.Status);
+        Assert.Contains(nameof(BackEndStack.JavaSpringBoot), refused.Error, StringComparison.Ordinal);
+        Assert.Empty(await store.ApprovalsForProjectAsync(
+            requester.TenantId, project.ProjectId, CancellationToken.None));
+
+        // Give the run the approval it would have held before this fix: bound to this exact source,
+        // plan input, and profile version, decided by a real approver, and unexpired.
+        await store.BindSandboxProjectAsync(requester.TenantId, project.ProjectId, CancellationToken.None);
+        PlatformApproval planted = await store.CreateApprovalAsync(
+            new PlatformApproval
+            {
+                ApprovalId = "apr-preexisting",
+                ProjectId = project.ProjectId,
+                TenantId = requester.TenantId,
+                RequestedByObjectId = requester.ObjectId,
+                RequestedUtc = DateTimeOffset.UtcNow,
+                State = PlatformApprovalState.Requested,
+                Scope = WorkbenchMutationScope.SandboxDatabaseWrite,
+                RequiredRole = WorkbenchRoles.MigrationOperator,
+                EngagementId = trusted.Trusted.Request.EngagementId,
+                SourceSnapshotHash = trusted.Trusted.SourceSnapshotHash,
+                PlanInputHash = WorkbenchTrustBoundary.PlanInputHash(trusted.Trusted.Request),
+                TargetProfileId = profile.TargetProfileId,
+                TargetProfileVersion = profile.Version,
+                TargetProfileHash = profile.CanonicalHash,
+                ExpiresUtc = DateTimeOffset.UtcNow.AddHours(1),
+            },
+            CancellationToken.None);
+
+        Assert.True((await platform.DecideAsync(
+            approver, planted.ApprovalId, approve: true, planted.Version, null, CancellationToken.None)).Succeeded);
+
+        // The grant really is live, so the refusal below is the profile check and nothing else.
+        Assert.NotEmpty(await new PlatformAuthorizationStore(store, sandbox)
+            .ForOwnerAsync(requester.OwnerId, CancellationToken.None));
+
+        WorkbenchExecution.WorkbenchRunPreparationResult execution = await WorkbenchExecution.PrepareRunAsync(
+            service,
+            requester,
+            workspaceId,
+            dotnet,
+            new WorkbenchAuthorizationService(new PlatformAuthorizationStore(store, sandbox)),
+            new WorkbenchExecution.WorkbenchRunBinding(
+                project.ProjectId,
+                profile.TargetProfileId,
+                profile.Version,
+                profile.CanonicalHash,
+                workspaceOwner,
+                WorkbenchTargetProfileStack.From(profile)));
+
+        Assert.False(execution.Succeeded);
+        Assert.Equal(409, execution.Status);
+        Assert.Null(execution.Preparation);
+        Assert.Contains(nameof(BackEndStack.JavaSpringBoot), execution.Error, StringComparison.Ordinal);
+
+        // The same run against the stack the profile does name still prepares, so the check refuses the
+        // mismatch and not the feature.
+        MigrationRunRequest java = dotnet with { Target = dotnet.Target with { BackEnd = BackEndStack.JavaSpringBoot } };
+        Assert.True((await WorkbenchExecution.PrepareRunAsync(
+            service,
+            requester,
+            workspaceId,
+            java,
+            new WorkbenchAuthorizationService(new PlatformAuthorizationStore(store, sandbox)),
+            new WorkbenchExecution.WorkbenchRunBinding(
+                project.ProjectId,
+                profile.TargetProfileId,
+                profile.Version,
+                profile.CanonicalHash,
+                workspaceOwner,
+                WorkbenchTargetProfileStack.From(profile)))).Succeeded);
+    }
+
+    /// <summary>
+    /// An undefined stack cannot match a profile name, so it is refused for the same reason a wrong one
+    /// is. This is the backstop behind the serializer refusing integers at the boundary.
+    /// </summary>
+    [Fact]
+    public void An_undefined_stack_value_matches_no_profile_and_is_refused()
+    {
+        WorkbenchTargetProfileStack profile = new(
+            nameof(DatabaseTarget.PostgreSql), nameof(FrontEndStack.React), nameof(BackEndStack.JavaSpringBoot));
+
+        Assert.False(WorkbenchExecution.TryMatchTargetProfile(null, profile, out string missing));
+        Assert.NotEqual(string.Empty, missing);
+
+        Assert.False(WorkbenchExecution.TryMatchTargetProfile(
+            new TargetStack { Database = DatabaseTarget.PostgreSql, BackEnd = (BackEndStack)999 },
+            profile,
+            out string undefinedBackEnd));
+        Assert.Contains(nameof(BackEndStack.JavaSpringBoot), undefinedBackEnd, StringComparison.Ordinal);
+
+        Assert.False(WorkbenchExecution.TryMatchTargetProfile(
+            new TargetStack { Database = (DatabaseTarget)77 },
+            profile,
+            out string undefinedDatabase));
+        Assert.Contains(nameof(DatabaseTarget.PostgreSql), undefinedDatabase, StringComparison.Ordinal);
+
+        Assert.True(WorkbenchExecution.TryMatchTargetProfile(
+            new TargetStack { Database = DatabaseTarget.PostgreSql },
+            profile,
+            out string matched));
+        Assert.Equal(string.Empty, matched);
+    }
+
+    private static string RequestJson(
+        string database = "\"PostgreSql\"",
+        string backEnd = "\"JavaSpringBoot\"",
+        string mode = "\"GenerateArtifacts\"") =>
+        $$"""
+        {
+          "engagementId": "ENG-ENUM",
+          "applicationName": "ORDERS",
+          "requestedMode": {{mode}},
+          "target": { "database": {{database}}, "frontEnd": "React", "backEnd": {{backEnd}} },
+          "sourceRoot": ".",
+          "outputRoot": "out"
+        }
+        """;
+
+    /// <summary>
+    /// Both HTTP request readers accept enum names only. An ordinal would let a caller name a stack by
+    /// number and land on whichever value sits there, or on no value at all.
+    /// </summary>
+    [Theory]
+    [InlineData("1", "\"JavaSpringBoot\"", "\"GenerateArtifacts\"")]
+    [InlineData("\"PostgreSql\"", "1", "\"GenerateArtifacts\"")]
+    [InlineData("\"PostgreSql\"", "999", "\"GenerateArtifacts\"")]
+    [InlineData("\"PostgreSql\"", "\"NodeExpress\"", "\"GenerateArtifacts\"")]
+    [InlineData("\"PostgreSql\"", "\"JavaSpringBoot\"", "2")]
+    [InlineData("\"AzureCosmosDb\"", "\"JavaSpringBoot\"", "\"GenerateArtifacts\"")]
+    public void Both_request_boundaries_refuse_an_enum_value_that_is_not_a_name_this_build_defines(
+        string database, string backEnd, string mode)
+    {
+        string json = RequestJson(database, backEnd, mode);
+
+        Assert.Throws<JsonException>(
+            () => JsonSerializer.Deserialize<MigrationRunRequest>(json, WorkbenchEndpoints.RequestOptions));
+        Assert.Throws<JsonException>(
+            () => JsonSerializer.Deserialize<MigrationRunRequest>(json, WorkbenchPlatformEndpoints.RequestOptions));
+    }
+
+    [Fact]
+    public void Both_request_boundaries_still_accept_the_enum_names_the_console_posts()
+    {
+        foreach (JsonSerializerOptions options in
+            new[] { WorkbenchEndpoints.RequestOptions, WorkbenchPlatformEndpoints.RequestOptions })
+        {
+            MigrationRunRequest parsed = JsonSerializer.Deserialize<MigrationRunRequest>(RequestJson(), options)!;
+
+            Assert.Equal(DatabaseTarget.PostgreSql, parsed.Target.Database);
+            Assert.Equal(FrontEndStack.React, parsed.Target.FrontEnd);
+            Assert.Equal(BackEndStack.JavaSpringBoot, parsed.Target.BackEnd);
+            Assert.Equal(ExecutionMode.GenerateArtifacts, parsed.RequestedMode);
+        }
+    }
+
+    private static PlatformTargetProfileEnvironment DevelopmentEnvironment => new()
+    {
+        AzureTenantId = "11111111-1111-1111-1111-111111111111",
+        SubscriptionId = "22222222-2222-2222-2222-222222222222",
+        ResourceGroup = "rg-ofm-dev",
+        ResourceId = "/subscriptions/22222222-2222-2222-2222-222222222222/resourceGroups/rg-ofm-dev/providers/Microsoft.DBforPostgreSQL/flexibleServers/pg-sandbox",
+        Region = "eastus2",
+        SchemaName = "public",
+        EnvironmentName = "Development",
+    };
 
     [Fact]
     public async Task A_valid_grant_is_not_hidden_by_an_older_expired_matching_record()
@@ -727,6 +968,31 @@ public class WorkbenchTrustBoundaryTests : IDisposable
         Assert.Equal(
             WorkbenchTrustBoundary.PlanInputHash(request),
             WorkbenchTrustBoundary.PlanInputHash(request with { Evidence = [.. request.Evidence.Reverse()] }));
+    }
+
+    /// <summary>
+    /// A grant issued over no recorded decisions does not cover a run that generates under some, and a
+    /// grant issued over one ledger does not cover a run that moved to another. Both have to be a
+    /// different binding, or an approval taken before a ledger existed would still authorize generating
+    /// under it.
+    /// </summary>
+    [Fact]
+    public void Naming_or_changing_a_disposition_ledger_produces_a_different_binding()
+    {
+        MigrationRunRequest request = ForgedRequest();
+
+        Assert.NotEqual(
+            WorkbenchTrustBoundary.PlanInputHash(request),
+            WorkbenchTrustBoundary.PlanInputHash(request with { DispositionLedgerId = "dled-0001" }));
+
+        Assert.NotEqual(
+            WorkbenchTrustBoundary.PlanInputHash(request with { DispositionLedgerId = "dled-0001" }),
+            WorkbenchTrustBoundary.PlanInputHash(request with { DispositionLedgerId = "dled-0002" }));
+
+        // Absent and blank are the same statement: this run names no ledger.
+        Assert.Equal(
+            WorkbenchTrustBoundary.PlanInputHash(request),
+            WorkbenchTrustBoundary.PlanInputHash(request with { DispositionLedgerId = string.Empty }));
     }
 
     /// <summary>

@@ -143,6 +143,47 @@ jobs:
       - name: Restore
         run: dotnet restore
 
+      - name: Validate deployment infrastructure syntax
+        shell: pwsh
+        env:
+          WORKBENCH_OPERATOR_PRINCIPAL_OBJECT_IDS: 00000000-0000-0000-0000-000000000000
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $templates = @(
+            'infra/workbench/main.bicep',
+            'infra/dotnet-pilot/main.bicep'
+          )
+          foreach ($template in $templates) {
+            $output = Join-Path $env:RUNNER_TEMP "$([IO.Path]::GetFileNameWithoutExtension($template))-$([Guid]::NewGuid().ToString('N')).json"
+            az bicep build --file $template --outfile $output --only-show-errors
+            if ($LASTEXITCODE -ne 0) { throw "Bicep compilation failed for $template." }
+          }
+
+          $parameterFiles = @(
+            'infra/workbench/dev.bicepparam',
+            'infra/dotnet-pilot/dev.bicepparam'
+          )
+          foreach ($parameterFile in $parameterFiles) {
+            $output = Join-Path $env:RUNNER_TEMP "params-$([Guid]::NewGuid().ToString('N')).json"
+            az bicep build-params --file $parameterFile --outfile $output --only-show-errors
+            if ($LASTEXITCODE -ne 0) { throw "Bicep parameter compilation failed for $parameterFile." }
+          }
+
+          $scripts = @(
+            'infra/workbench/Deploy-Workbench.ps1',
+            'infra/workbench/Preview-WorkbenchInfrastructure.ps1',
+            'infra/dotnet-pilot/Setup-DotNetPilot.ps1'
+          )
+          foreach ($script in $scripts) {
+            $tokens = $null
+            $errors = $null
+            [void] [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $script), [ref] $tokens, [ref] $errors)
+            if ($errors.Count -gt 0) {
+              throw "PowerShell parsing failed for $script`: $($errors.Message -join '; ')"
+            }
+          }
+
       - name: Prime trusted generated-app dependency caches
         shell: bash
         run: |
@@ -173,8 +214,26 @@ jobs:
           rm -rf \
             src/oracle-forms-migration-fleet/Fleet/Execution/Templates/Verification/Generic/node_modules \
             src/oracle-forms-migration-fleet/Fleet/Execution/Templates/Verification/Northstar/node_modules
+          # The NuGet leg is a folder feed built from a trusted restore, not from anything checked in:
+          # the seed project is copied out of the tree first so its obj/ never lands in the embedded
+          # template resources, then every .nupkg NuGet resolved is copied into the feed.
+          SEED="$RUNNER_TEMP/dotnet-verification-seed"
+          mkdir -p "$SEED" "$CACHE_ROOT/nuget"
+          cp src/oracle-forms-migration-fleet/Fleet/Execution/Templates/Verification/DotNet/VerificationCache.csproj "$SEED/"
+          dotnet restore "$SEED/VerificationCache.csproj" \
+            --packages "$RUNNER_TEMP/ofm-nuget-packages" --verbosity minimal
+          find "$RUNNER_TEMP/ofm-nuget-packages" -type f -name '*.nupkg' \
+            -exec cp --no-clobber --target-directory="$CACHE_ROOT/nuget" {} +
+          for package in npgsql.9.0.3 azure.identity.1.13.2 microsoft.net.test.sdk.17.14.1 \
+            xunit.2.9.3 xunit.runner.visualstudio.3.1.4; do
+            if [ ! -f "$CACHE_ROOT/nuget/$package.nupkg" ]; then
+              echo "Offline NuGet feed is missing $package.nupkg; the seed project has drifted from DotNetBackendEmitter."
+              exit 1
+            fi
+          done
           echo "WORKBENCH_VERIFICATION_MAVEN_REPOSITORY=$CACHE_ROOT/m2" >> "$GITHUB_ENV"
           echo "WORKBENCH_VERIFICATION_NPM_CACHE=$CACHE_ROOT/npm" >> "$GITHUB_ENV"
+          echo "WORKBENCH_VERIFICATION_NUGET_CACHE=$CACHE_ROOT/nuget" >> "$GITHUB_ENV"
 
       - name: Build
         run: dotnet build --no-restore -c Release -p:SkipClientBuild=true
@@ -196,18 +255,72 @@ jobs:
         env:
           PLATFORM_POSTGRES_INTEGRATION_CONNECTION: Host=localhost;Port=5432;Database=ofm_integration;Username=postgres;Password=postgres;SSL Mode=Disable;Pooling=false
           REQUIRE_POSTGRES_INTEGRATION: 'true'
+          GENERATED_APP_INTEGRATION_EVIDENCE: ${{ runner.temp }}/generated-app-evidence
         run: >-
           dotnet test --no-build -c Release -p:SkipClientBuild=true
           --filter "Category=PostgresIntegration"
           --logger "console;verbosity=normal"
 
+      # The Java generated-application legs. The .NET class carries the same trait but is excluded here and
+      # run by the step below, which is the one that has a database and declares itself required.
       - name: Execute independently generated applications
         env:
           RUN_GENERATED_APP_INTEGRATION: 'true'
         run: >-
           dotnet test --no-build -c Release -p:SkipClientBuild=true
-          --filter "Category=GeneratedApplicationIntegration"
+          --filter "Category=GeneratedApplicationIntegration&FullyQualifiedName!~DotNetGeneratedApplicationPostgresTests"
           --logger "console;verbosity=normal"
+
+      # Real execution of the generated .NET application: its acceptance suite over HTTP against the
+      # PostgreSQL service, the no-target leg that must fail every case, and the generated front end.
+      # REQUIRE_GENERATED_DOTNET_INTEGRATION turns any missing prerequisite into a failure, so none of
+      # these legs can pass by skipping.
+      - name: Execute generated .NET application against PostgreSQL
+        env:
+          PLATFORM_POSTGRES_INTEGRATION_CONNECTION: Host=localhost;Port=5432;Database=ofm_integration;Username=postgres;Password=postgres;SSL Mode=Disable;Pooling=false
+          RUN_GENERATED_DOTNET_INTEGRATION: 'true'
+          RUN_GENERATED_NPM_INTEGRATION: 'true'
+          REQUIRE_GENERATED_DOTNET_INTEGRATION: 'true'
+          GENERATED_APP_INTEGRATION_EVIDENCE: ${{ runner.temp }}/generated-app-evidence
+        run: >-
+          dotnet test --no-build -c Release -p:SkipClientBuild=true
+          --filter "FullyQualifiedName~DotNetGeneratedApplicationPostgresTests"
+          --results-directory ${{ runner.temp }}/generated-app-evidence/host
+          --logger "trx;LogFileName=generated-dotnet-host.trx"
+          --logger "console;verbosity=normal"
+
+      # A passing test count does not prove a leg executed: each sentinel below is written by the test
+      # itself, after its assertions held, and each report is the generated runner's own output.
+      - name: Verify per-fixture generated execution evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          EVIDENCE="$RUNNER_TEMP/generated-app-evidence"
+          missing=0
+            for fixture in meridian kestrel meridian-unbound; do
+            for sentinel in sql sql-concurrency compile no-target postgres frontend; do
+              if [ ! -f "$EVIDENCE/$sentinel-$fixture.passed" ]; then
+                echo "Missing sentinel $sentinel-$fixture.passed: that leg did not finish asserting."
+                missing=1
+              fi
+            done
+            for report in no-target-$fixture.trx postgres-$fixture.trx frontend-$fixture.xml; do
+              if [ ! -s "$EVIDENCE/$report" ]; then
+                echo "Missing or empty generated report $report."
+                missing=1
+              fi
+            done
+          done
+          exit "$missing"
+
+      - name: Upload generated execution evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-app-evidence-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: ${{ runner.temp }}/generated-app-evidence/
 
       - name: Test
         run: dotnet test --no-build -c Release -p:SkipClientBuild=true --logger "console;verbosity=normal"

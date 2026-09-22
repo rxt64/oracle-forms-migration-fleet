@@ -68,20 +68,29 @@ public sealed class MigrationExecutor
     private readonly WorkspaceWriter _workspace;
     private readonly Dictionary<MigrationPhase, IPhaseAdapter> _adapters = [];
     private readonly IPhaseMutationAuthorizer? _mutationAuthorizer;
+    private readonly IGenerationAuthorizationProvider? _authorizationProvider;
 
     /// <summary>
     /// <paramref name="mutationAuthorizer"/> is consulted immediately before any phase that writes
     /// outside the session workspace. Omitting it keeps the planner's decision as the only gate, which
     /// is the contract in-process callers already have; a host that serves an untrusted caller supplies
     /// one, and supplies one that denies when it cannot establish authority.
+    ///
+    /// <paramref name="authorizationProvider"/> is the server's authority over generating from this run's
+    /// source. The executor carries it to every phase and adjudicates none of it: the generation phase
+    /// asks it at the moment it is about to emit and re-derives whether the answer covers what it would
+    /// write. Omitting it leaves a generation phase with Forms source nothing to generate under, which is
+    /// a refusal and not a weaker check.
     /// </summary>
     public MigrationExecutor(
         string workspaceRoot,
         IEnumerable<IPhaseAdapter>? adapters = null,
-        IPhaseMutationAuthorizer? mutationAuthorizer = null)
+        IPhaseMutationAuthorizer? mutationAuthorizer = null,
+        IGenerationAuthorizationProvider? authorizationProvider = null)
     {
         _workspace = new WorkspaceWriter(workspaceRoot);
         _mutationAuthorizer = mutationAuthorizer;
+        _authorizationProvider = authorizationProvider;
 
         foreach (IPhaseAdapter adapter in adapters ?? DefaultAdapters())
         {
@@ -384,6 +393,7 @@ public sealed class MigrationExecutor
                 Report)
             {
                 CompletedPhases = [.. outcomes],
+                AuthorizationProvider = _authorizationProvider,
             };
 
             PhaseExecutionResult result;

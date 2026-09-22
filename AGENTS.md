@@ -20,7 +20,7 @@ It implements the **Oracle Forms Migration Fleet**: a service that plans **and p
 
 ## Design rules
 
-- All stage transitions and the platform recommendation live in `Fleet/` and stay pure: no network, no Azure SDK, no model call. The model reaches them only as tools.
+- Planning, authorization transitions and platform recommendation stay pure: no network, Azure SDK or model call. Scoped adapters beneath `Fleet/Execution/` perform authorized I/O; directory naming does not prohibit execution.
 - Domain types are immutable records and enums in `Fleet/FleetContracts.cs`. Add new state there, not as mutable fields.
 - The human approval gate is the only path to `MigrationPlan.IsAccepted == true`. Do not add a bypass.
 - The execution lifecycle in `Fleet/MigrationRunPlanner.cs` stays deterministic too: it authorizes phases, it never runs one. Sandbox mutation needs its own execution approval and production cutover needs its own production approval plus successful attestations. Do not collapse those gates into the assessment plan approval.
@@ -31,16 +31,17 @@ It implements the **Oracle Forms Migration Fleet**: a service that plans **and p
 
 ## Development workflow
 
-The **Azure Developer CLI (`azd`)** manages the full lifecycle:
+Use the existing trusted GitHub CI/release workflows for shipping artifacts and Azure deployment.
+Local commands below are development diagnostics, not release evidence; consult the deployment plan
+before infrastructure changes. Current delivery state is in `docs/DELIVERY_TRACKER.md`.
 
 ```bash
 azd ai agent run --no-client               # Run locally on http://localhost:8088
 azd ai agent invoke --local "your message" # Test the local agent
-azd deploy                                 # Deploy to Foundry
 azd ai agent invoke "your message"         # Invoke the deployed agent
 ```
 
-Build and test locally (no Azure access required for the test suite):
+Build and test locally (offline tests require no Azure; opt-in integration requires explicit targets):
 
 ```bash
 dotnet build
