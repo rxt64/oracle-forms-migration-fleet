@@ -181,7 +181,7 @@ public class SourceNormalizationAdapterTests
 
         using JsonDocument ir = JsonDocument.Parse(workspace.Read(IrPath));
         Assert.Equal("oracle-forms-migration-fleet/source-normalization", ir.RootElement.GetProperty("generator").GetString());
-        Assert.Equal("2", ir.RootElement.GetProperty("schemaVersion").GetString());
+        Assert.Equal("3", ir.RootElement.GetProperty("schemaVersion").GetString());
         Assert.True(ir.RootElement.GetProperty("normalized").GetBoolean());
         Assert.Equal("declared by the export and matching the run", ir.RootElement.GetProperty("versionAuthority").GetString());
         Assert.Equal(expectedFamily, ir.RootElement.GetProperty("formsFamily").GetString());
@@ -237,6 +237,232 @@ public class SourceNormalizationAdapterTests
         Assert.Equal(PhaseExecutionState.Failed, outcome.State);
         Assert.Contains("refused rather than writing an IR", outcome.Detail!, StringComparison.Ordinal);
         Assert.False(workspace.Exists(IrPath));
+    }
+
+    /// <summary>
+    /// Two independently authored exports, each under its own module name. The wrapper carries a release
+    /// the catalog interprets, because these tests are about what normalization retains rather than about
+    /// how it adjudicates a release.
+    /// </summary>
+    private static TemporaryWorkspace IndependentEstate() => Workspace(space =>
+    {
+        space.WriteFile("legacy/forms/ui/WAREHOUSE_PICKING.xml", OracleSamples.MasterDetailExport("12.2.1.4"));
+        space.WriteFile("legacy/forms/ui/STOCK_LOOKUP.xml", OracleSamples.LookupExport);
+    });
+
+    /// <summary>
+    /// The facts the phase writes are the facts its own strict reader accepts. Writing a representation the
+    /// next phase refuses would turn a retained estate into a late conversion failure.
+    /// </summary>
+    [Fact]
+    public async Task Retained_source_facts_survive_normalization_and_are_read_back_by_the_strict_reader()
+    {
+        using TemporaryWorkspace workspace = IndependentEstate();
+
+        PhaseOutcome outcome = await NormalizeAsync(workspace, Request("12c"));
+        Assert.True(outcome.State == PhaseExecutionState.Executed, outcome.Detail);
+
+        FormsIntermediateRead read = FormsIntermediateReader.Read(workspace.Read(IrPath), "legacy/forms");
+
+        Assert.Null(read.Error);
+        Assert.Equal(2, read.Modules!.Count);
+
+        FormsModule picking = Assert.Single(read.Modules!, module => module.Name == "WAREHOUSE_PICKING");
+        FormsSourceFactSet facts = picking.SourceFacts!;
+
+        Assert.Equal("12.2.1.4", facts.WrapperDeclaredVersion);
+        Assert.Equal(64, facts.TextDigest.Length);
+
+        // The constructs the interpreted structure above never carried are still here, as declared facts.
+        FormsSourceFact relation = Assert.Single(facts.Facts, fact => fact.LocalName == "Relation");
+        Assert.Equal(
+            "PICK_HEADER.PICK_ID = PICK_LINE.PICK_ID",
+            Assert.Single(relation.Attributes, attribute => attribute.Name == "JoinCondition").Value);
+        Assert.Equal(2, facts.Facts.Count(fact => fact.LocalName == "RadioButton"));
+        Assert.Single(facts.Facts, fact => fact.LocalName == "RecordGroup");
+        Assert.All(facts.Facts, fact => Assert.Equal(FormsSourceFactKind.Declared, fact.Kind));
+
+        FormsSourceFactSet lookup = Assert.Single(read.Modules!, module => module.Name == "STOCK_LOOKUP").SourceFacts!;
+        Assert.Null(lookup.WrapperDeclaredVersion);
+        Assert.NotEqual(facts.TextDigest, lookup.TextDigest);
+    }
+
+    /// <summary>
+    /// The retained facts have to be an inventory of the whole export, so an element the retention stops
+    /// writing is detected here rather than reappearing as an absence the estate never declared.
+    /// </summary>
+    [Fact]
+    public async Task The_retained_inventory_of_a_module_matches_an_independently_written_expectation()
+    {
+        using TemporaryWorkspace workspace = IndependentEstate();
+
+        Assert.Equal(PhaseExecutionState.Executed, (await NormalizeAsync(workspace, Request("12c"))).State);
+
+        FormsSourceFactSet facts = Assert.Single(
+            FormsIntermediateReader.Read(workspace.Read(IrPath), "legacy/forms").Modules!,
+            module => module.Name == "STOCK_LOOKUP").SourceFacts!;
+
+        Assert.Equal(
+            [
+                "{http://xmlns.oracle.com/Forms}FormModule[1]",
+                "{http://xmlns.oracle.com/Forms}FormModule[1]/{urn:contoso:forms-annotations}Annotation[1]",
+                "{http://xmlns.oracle.com/Forms}FormModule[1]/{http://xmlns.oracle.com/Forms}Block[1]",
+                "{http://xmlns.oracle.com/Forms}FormModule[1]/{http://xmlns.oracle.com/Forms}Block[1]/{http://xmlns.oracle.com/Forms}Item[1]",
+                "{http://xmlns.oracle.com/Forms}FormModule[1]/{http://xmlns.oracle.com/Forms}Block[1]/{http://xmlns.oracle.com/Forms}Item[2]",
+            ],
+            facts.Facts.Select(fact => fact.Id));
+    }
+
+    /// <summary>
+    /// The build number an Oracle export writes on its Module wrapper is not a release this catalog reads,
+    /// and it is not silently reshaped into one. The refusal quotes the string the file carried, because a
+    /// run attributed to a release nobody declared is exactly the outcome this gate exists to prevent.
+    /// Retention has no opinion about releases, so the same string is still retained verbatim.
+    /// </summary>
+    [Fact]
+    public async Task An_oracle_wrapper_build_number_is_refused_verbatim_and_is_still_retained_as_declared()
+    {
+        using TemporaryWorkspace workspace = Workspace(space =>
+            space.WriteFile("legacy/forms/ui/WAREHOUSE_PICKING.xml", OracleSamples.MasterDetailExport()));
+
+        PhaseOutcome outcome = await NormalizeAsync(workspace, Request("12c"));
+
+        Assert.Equal(PhaseExecutionState.Failed, outcome.State);
+        Assert.Contains("declares version '122010400'", outcome.Detail!, StringComparison.Ordinal);
+        Assert.Contains("matches no Oracle Forms release this catalog knows", outcome.Detail!, StringComparison.Ordinal);
+        Assert.False(workspace.Exists(IrPath));
+
+        // The diagnostics repeat the declared string, never a release rewritten from it.
+        string report = workspace.Read(ReportPath);
+        Assert.Contains("122010400", report, StringComparison.Ordinal);
+        Assert.DoesNotContain("12.2.1.400", report, StringComparison.Ordinal);
+        Assert.Contains("122010400", workspace.Read(ManifestPath), StringComparison.Ordinal);
+
+        // The same unmodified export still retains the wrapper string as a fact about the file.
+        Assert.Equal(
+            "122010400",
+            Assert.Single(FormsModuleParser.Parse(OracleSamples.MasterDetailExport()).Modules).SourceFacts!.WrapperDeclaredVersion);
+    }
+
+    /// <summary>
+    /// Elements repeated under three different namespaces, an element in no namespace, and preserved
+    /// whitespace: the retention writes these and its own strict reader has to accept them unchanged, or a
+    /// retained estate becomes a conversion failure one phase later.
+    /// </summary>
+    [Fact]
+    public async Task Unusual_names_and_preserved_whitespace_round_trip_through_the_strict_reader()
+    {
+        const string Odd = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <FormModule xmlns="http://xmlns.oracle.com/Forms" xmlns:ext="urn:contoso:forms-annotations" Name="ODD_NAMES" Title="Odd names">
+              <Note xml:space="preserve">   </Note>
+              <ext:Note Origin="first"/>
+              <ext:Note Origin="second"/>
+              <Note xmlns="" Origin="no-namespace"/>
+              <Block Name="ODD" QueryDataSourceName="ODD_T" RecordsDisplayed="1">
+                <Item Name="A" ItemType="Text Item" Prompt="A:" Required="Yes"/>
+              </Block>
+            </FormModule>
+            """;
+
+        using TemporaryWorkspace workspace = Workspace(space =>
+            space.WriteFile("legacy/forms/ui/ODD_NAMES.xml", Odd));
+
+        PhaseOutcome outcome = await NormalizeAsync(workspace, Request("12c"));
+        Assert.True(outcome.State == PhaseExecutionState.Executed, outcome.Detail);
+
+        FormsIntermediateRead read = FormsIntermediateReader.Read(workspace.Read(IrPath), "legacy/forms");
+        Assert.Null(read.Error);
+
+        FormsSourceFactSet facts = Assert.Single(read.Modules!).SourceFacts!;
+        const string Forms = "{http://xmlns.oracle.com/Forms}";
+        const string Ext = "{urn:contoso:forms-annotations}";
+
+        Assert.Equal(
+            [
+                $"{Forms}FormModule[1]",
+                $"{Forms}FormModule[1]/{Forms}Note[1]",
+                $"{Forms}FormModule[1]/{Ext}Note[1]",
+                $"{Forms}FormModule[1]/{Ext}Note[2]",
+                $"{Forms}FormModule[1]/{{}}Note[1]",
+                $"{Forms}FormModule[1]/{Forms}Block[1]",
+                $"{Forms}FormModule[1]/{Forms}Block[1]/{Forms}Item[1]",
+            ],
+            facts.Facts.Select(fact => fact.Id));
+
+        Assert.Equal([0, 0, 1, 2, 3, 4, 0], facts.Facts.Select(fact => fact.ChildIndex));
+        Assert.Equal("   ", facts.Facts[1].Text);
+        Assert.Equal("second", Assert.Single(facts.Facts[3].Attributes, attribute => attribute.Name == "Origin").Value);
+    }
+
+    [Fact]
+    public async Task The_manifest_counts_retained_facts_without_claiming_coverage()
+    {
+        using TemporaryWorkspace workspace = IndependentEstate();
+
+        Assert.Equal(PhaseExecutionState.Executed, (await NormalizeAsync(workspace, Request("12c"))).State);
+
+        using JsonDocument manifest = JsonDocument.Parse(workspace.Read(ManifestPath));
+        JsonElement export = Assert.Single(
+            manifest.RootElement.GetProperty("files").EnumerateArray(),
+            file => file.GetProperty("path").GetString() == "legacy/forms/ui/WAREHOUSE_PICKING.xml");
+
+        Assert.True(export.GetProperty("retainedSourceFacts").GetInt32() > 20);
+
+        string notes = string.Join(" ", manifest.RootElement.GetProperty("notes").EnumerateArray().Select(note => note.GetString()));
+        Assert.Contains("not a coverage measure", notes, StringComparison.Ordinal);
+        Assert.Contains("no fact retained is a statement about Oracle Forms runtime behaviour", notes, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Retaining what an export declared says nothing about a module nobody opened. A binary beside the
+    /// exports still refuses the estate, so no native extraction route is treated as having run.
+    /// </summary>
+    [Fact]
+    public async Task Retained_facts_do_not_promote_a_module_that_was_never_opened()
+    {
+        using TemporaryWorkspace workspace = Workspace(space =>
+        {
+            space.WriteFile("legacy/forms/ui/WAREHOUSE_PICKING.xml", OracleSamples.MasterDetailExport("12.2.1.4"));
+            space.WriteBytes("legacy/forms/ui/STOCK_LOOKUP.fmb", [0x0A, 0x46, 0x4F, 0x52, 0x4D]);
+        });
+
+        PhaseOutcome outcome = await NormalizeAsync(workspace, Request("12c"));
+
+        Assert.Equal(PhaseExecutionState.Failed, outcome.State);
+        Assert.False(workspace.Exists(IrPath));
+        Assert.Contains("STOCK_LOOKUP.fmb", workspace.Read(ManifestPath), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Editing_one_property_changes_that_module_text_digest()
+    {
+        using TemporaryWorkspace original = IndependentEstate();
+        using TemporaryWorkspace edited = Workspace(space =>
+        {
+            space.WriteFile(
+                "legacy/forms/ui/WAREHOUSE_PICKING.xml",
+                OracleSamples.MasterDetailExport("12.2.1.4").Replace("Label=\"Urgent\"", "Label=\"Priority\"", StringComparison.Ordinal));
+            space.WriteFile("legacy/forms/ui/STOCK_LOOKUP.xml", OracleSamples.LookupExport);
+        });
+
+        Assert.Equal(PhaseExecutionState.Executed, (await NormalizeAsync(original, Request("12c"))).State);
+        Assert.Equal(PhaseExecutionState.Executed, (await NormalizeAsync(edited, Request("12c"))).State);
+
+        static (string Picking, string Lookup) Digests(TemporaryWorkspace workspace)
+        {
+            IReadOnlyList<FormsModule> modules = FormsIntermediateReader.Read(workspace.Read(IrPath), "legacy/forms").Modules!;
+
+            return (
+                Assert.Single(modules, module => module.Name == "WAREHOUSE_PICKING").SourceFacts!.TextDigest,
+                Assert.Single(modules, module => module.Name == "STOCK_LOOKUP").SourceFacts!.TextDigest);
+        }
+
+        (string picking, string lookup) = Digests(original);
+        (string changedPicking, string unchangedLookup) = Digests(edited);
+
+        Assert.NotEqual(picking, changedPicking);
+        Assert.Equal(lookup, unchangedLookup);
     }
 
     [Fact]

@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "inspectedOn": "2026-09-21",
+  "upstreamUrl": "https://github.com/jcgueriaud1/forms-summit-migration",
+  "upstreamCommit": "258c82b4a22fd7ccc517e3be6a05f25e52e31a0d",
+  "artifactUrlTemplate": "https://github.com/jcgueriaud1/forms-summit-migration/blob/258c82b4a22fd7ccc517e3be6a05f25e52e31a0d/{path}",
+  "hashAlgorithm": "SHA-256 original upstream bytes",
+  "qualification": "StaticInspectionOnly",
+  "productImport": "PendingOperatorAuthorization",
+  "nativeRuntimeVerification": "BlockedPrerequisite",
+  "usage": {
+    "licenseApi": "null; license endpoint 404",
+    "noticeInventory": "No LICENSE, LICENCE, COPYING, NOTICE, or COPYRIGHT file found at pin; no applicable grant identified in inspected text",
+    "permissionEstablished": false,
+    "requiredAction": "Operator must establish applicable rights for repository-authored and Oracle demo material before product use or redistribution",
+    "vendoredSourceFiles": 0
+  },
+  "observedVersions": {
+    "xmlWrapperVersionLiteral": "122010400",
+    "xmlNamespace": "http://xmlns.oracle.com/Forms",
+    "fmbAuthoringRelease": null,
+    "formsRuntimeRelease": null,
+    "dumpHeaderLiteral": "EXPORT:V10.02.01",
+    "interpretation": "No native Forms 6i claim; numeric XML token not converted to a release by this increment"
+  },
+  "artifacts": [
+    { "path": "forms-summit-example/ORDERS.fmb", "bytes": 376832, "sha256": "1c2fa8f35fc9e8e229af0a7662ad9bc53e59f612f61acd633b09a07c27353af5", "classification": "OpaqueFormsBinary", "dependencyStatus": "PresentNotOpened" },
+    { "path": "forms-summit-example/ORDERS_fmb.xml", "bytes": 61387, "sha256": "17b46aa93d71adb5ac96e97aacb0c7a396824f36191c1aead9e6aa23ac308979", "classification": "ExistingFormsExport", "dependencyStatus": "InspectedNotImported", "declaredModule": "ORDERS", "declaredVersion": "122010400" },
+    { "path": "forms-summit-example/init-summit.sql", "bytes": 8108264, "sha256": "3e77edeedc3822c1572828dce23062d011a26a0207fe04c83f4f571a9199a121", "classification": "WholeSchemaAndDataSql", "dependencyStatus": "ClosureNotProvenNoExecution" },
+    { "path": "forms-summit-example/summit.dmp", "bytes": 13135872, "sha256": "fed218382814c404b47cb8a5aaae154f8d46a38fdd495bd8deff00bd737e54ab", "classification": "OpaqueDatabaseDump", "dependencyStatus": "HeaderInspectedNoImport" },
+    { "path": "forms-summit-example/m_summit_mmb.xml", "bytes": 4681, "sha256": "54a7f7386b77de4293442b7acd4e910f68cf25e0c5a087414f6d7fb31dbdd108", "classification": "MenuExport", "dependencyStatus": "PresentNotConverted" },
+    { "path": "forms-summit-example/calendar.pld", "bytes": 7992, "sha256": "e4267f64bc2437d046c31f7c2e52ccff5a1795e5eef02a9425b280c9e02b4e51", "classification": "LibraryTextExport", "dependencyStatus": "PresentNotConverted" },
+    { "path": "forms-summit-example/calendar.pll", "bytes": 65536, "sha256": "a548febc8eb637f95bf624ca5c29dfdfee36ef5a4a9f924d536e1419b1a8cbd1", "classification": "OpaqueLibraryBinary", "dependencyStatus": "PresentNotOpened" },
+    { "path": "forms-summit-example/Form_Builder_II.olb", "bytes": 135168, "sha256": "36d56a1d27c41ff588d348f5a5680591f4c4657fd53ad90ba5e5da5277caae2d", "classification": "OpaqueObjectLibrary", "dependencyStatus": "PresentUnresolvedContents" },
+    { "path": "forms-summit-example/pick_fmb.xml", "bytes": 18671, "sha256": "2f27024dd11f99125aca8699af78d524494bdea46e368653a8355813c70632ba", "classification": "CalledFormExport", "dependencyStatus": "PresentNotConverted" },
+    { "path": "forms-summit-example/Readme.html", "bytes": 6735, "sha256": "20d8ac7a2405b6443591b0b361fb0d9939a28094e129270f9114ba88f5b83cf3", "classification": "UpstreamSetupDocumentation", "dependencyStatus": "InspectedNoLicenseGrantFound" },
+    { "path": "docs/migration-process.md", "bytes": 11344, "sha256": "85b41f55e50f4e8e7a5226274b0b333f1b6859a4690b98489f514fa31c608ea1", "classification": "ThirdPartyMethod", "dependencyStatus": "ReferenceOnly" },
+    { "path": "docs/migration-rules.yaml", "bytes": 144264, "sha256": "e175617303684a5c4da834379fc36f6b2d1d665303f7f8311d988ef993de1d51", "classification": "ThirdPartyTargetRules", "dependencyStatus": "NotAdoptedVaadinOracleTarget" },
+    { "path": "docs/generated/ORDERS.spec.json", "bytes": 88507, "sha256": "90d33e38608cec4281aee2a27b65ce6578ea63ed4ea73eff437d9c9b72e56631", "classification": "ThirdPartyAnalysisClaim", "dependencyStatus": "NotIndependentEvidence" },
+    { "path": "docs/generated/ORDERS.ledger.json", "bytes": 48029, "sha256": "769c66cb8acfb8f6f075708bcf69b1fd3a52f4b426c3004c28d0105ccba238cc", "classification": "ThirdPartyDecisionClaim", "dependencyStatus": "NotProductDecisions" },
+    { "path": "docs/images/forms-orders.png", "bytes": 131131, "sha256": "f36ec3e00631db80ed5e8d5f3c4b6993ff7986ef87686c74d28c3daf257ae720", "classification": "Screenshot", "dependencyStatus": "CaptureProvenanceUnverified" },
+    { "path": "docs/images/vaadin-orders.png", "bytes": 90153, "sha256": "f20f9df86729cf3d03777c7c1e01e85249e22c23d0023d20c3b24b3a08e7ce9f", "classification": "Screenshot", "dependencyStatus": "NotRuntimeEquivalence" }
+  ],
+  "dependencies": [
+    { "id": "m_summit", "kind": "Menu", "status": "ExportPresentNotConverted" },
+    { "id": "calendar/date_lov.get_date", "kind": "Library", "status": "TextExportPresentRuntimeUnverified" },
+    { "id": "Form_Builder_II.olb", "kind": "ObjectInheritance", "status": "OpaqueUnresolved" },
+    { "id": "pick", "kind": "CalledForm", "status": "ExportPresentNotConverted" },
+    { "id": "lov_product", "kind": "CalledForm", "status": "MissingArtifact" },
+    { "id": ":GLOBAL references", "kind": "RuntimeState", "status": "UnresolvedContract", "observedDistinctNames": 9 },
+    { "id": "gen.pll", "kind": "BuildDependency", "status": "MissingArtifact" },
+    { "id": "wizard.pll", "kind": "BuildDependency", "status": "BinaryPresentTextExportAbsent" },
+    { "id": "GET_PRODUCT_IMAGE", "kind": "DatabaseFunction", "status": "DefinitionPresentTransitiveDependenciesNotProven" },
+    { "id": "S_ORD_ID", "kind": "DatabaseSequence", "status": "DefinitionPresentNotExecuted" }
+  ],
+  "databaseSlice": {
+    "directTables": ["S_ORD", "S_ITEM", "S_INVENTORY", "S_PRODUCT", "S_CUSTOMER", "S_EMP"],
+    "additionalObservedDependencies": ["S_WAREHOUSE", "S_REGION", "S_DEPT", "S_TITLE", "S_IMAGE", "S_LONGTEXT", "S_ITEM_AUDIT", "AUDIT_S_ITEM", "GET_PRODUCT_IMAGE", "S_ORD_ID"],
+    "dependencyComplete": false,
+    "unresolved": ["Complete foreign-key closure", "Reachable routine-body dependencies", "Opaque library dependencies", "Dump versus SQL consistency", "Self-referencing employee load ordering"],
+    "execution": "NotExecuted",
+    "originalModified": false,
+    "compatibilityChanges": [],
+    "approvedExclusions": [],
+    "policy": "No whole-estate import and no SQL error suppression; required failed imports must block success"
+  },
+  "methodReferences": [
+    "https://vaadin.com/blog/oracle-forms-to-java-a-two-week-ai-migration-experiment",
+    "https://github.com/jcgueriaud1/forms-summit-migration/blob/258c82b4a22fd7ccc517e3be6a05f25e52e31a0d/docs/migration-process.md"
+  ]
+}

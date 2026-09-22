@@ -42,7 +42,8 @@ public sealed record FormsModule(
     IReadOnlyList<FormsTrigger> Triggers,
     IReadOnlyList<string> ProgramUnits,
     IReadOnlyList<string> Lovs,
-    string? SourcePath = null)
+    string? SourcePath = null,
+    FormsSourceFactSet? SourceFacts = null)
 {
     /// <summary>
     /// The module's name qualified by the directory its export was supplied from, which is the identity
@@ -168,22 +169,54 @@ public static class FormsModuleParser
             return new FormsModuleParse(modules, findings);
         }
 
-        HashSet<string> moduleNames = new(StringComparer.OrdinalIgnoreCase);
+        // Retention runs before interpretation so a module whose facts cannot be written down in full is
+        // refused as a document, rather than normalizing to the small structure the parser happens to read.
+        string digest = FormsSourceFactReader.TextDigest(xml);
+        string? wrapperVersion = FormsSourceFactReader.WrapperDeclaredVersion(root);
+        List<FormsSourceFactSet> factSets = [];
+
         foreach (XElement module in load.FormModules)
         {
+            (FormsSourceFactSet? facts, string? factRejection) = FormsSourceFactReader.Read(module, digest, wrapperVersion);
+
+            if (facts is null)
+            {
+                findings.Add(new ConversionFinding(
+                    ConversionSeverity.Unsupported,
+                    "Forms module",
+                    Attribute(module, "Name") ?? "UNNAMED",
+                    factRejection!));
+
+                return new FormsModuleParse([], findings);
+            }
+
+            factSets.Add(facts);
+        }
+
+        HashSet<string> moduleNames = new(StringComparer.OrdinalIgnoreCase);
+        for (int index = 0; index < load.FormModules.Count; index++)
+        {
+            XElement module = load.FormModules[index];
             string moduleName = Attribute(module, "Name") ?? "UNNAMED";
             if (!moduleNames.Add(moduleName))
             {
                 findings.Add(DuplicateFinding("Forms export", "module", moduleName));
             }
 
-            modules.Add(ReadModule(module, findings));
+            modules.Add(Project(module, factSets[index], findings));
         }
 
         return new FormsModuleParse(modules, findings);
     }
 
-    private static FormsModule ReadModule(XElement module, List<ConversionFinding> findings)
+    /// <summary>
+    /// Interprets one module element into the structure this fleet generates from.
+    ///
+    /// It is reachable from outside the parse so the intermediate reader can put a module element rebuilt
+    /// from retained facts through the same interpretation the export itself went through. A second
+    /// projection written to check the first would only establish that two pieces of code agree.
+    /// </summary>
+    internal static FormsModule Project(XElement module, FormsSourceFactSet facts, List<ConversionFinding> findings)
     {
         string name = Attribute(module, "Name") ?? "UNNAMED";
         List<FormsBlock> blocks = [];
@@ -192,7 +225,7 @@ public static class FormsModuleParser
         if (declaredBlocks.Count > FormsIntermediateReader.MaxChildren)
         {
             findings.Add(LimitFinding(name, "block", declaredBlocks.Count, FormsIntermediateReader.MaxChildren));
-            return new FormsModule(name, Attribute(module, "Title"), blocks, [], [], []);
+            return new FormsModule(name, Attribute(module, "Title"), blocks, [], [], [], null, facts);
         }
 
         HashSet<string> blockNames = new(StringComparer.OrdinalIgnoreCase);
@@ -315,7 +348,7 @@ public static class FormsModuleParser
         ReportBehaviour(name, blocks, moduleTriggers, programUnits, lovs, findings);
         ReportAttachments(name, module, findings);
 
-        return new FormsModule(name, Attribute(module, "Title"), blocks, moduleTriggers, programUnits, lovs);
+        return new FormsModule(name, Attribute(module, "Title"), blocks, moduleTriggers, programUnits, lovs, null, facts);
     }
 
     private static ConversionFinding DuplicateFinding(string scope, string kind, string name) => new(

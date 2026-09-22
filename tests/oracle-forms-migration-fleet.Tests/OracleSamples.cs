@@ -22,6 +22,75 @@ internal static class OracleSamples
          </Module>
          """;
 
+    /// <summary>
+    /// An independently authored master/detail export with a lookup, written for these tests rather than
+    /// taken from any Oracle sample application. It carries the constructs the interpreting parser does not
+    /// read — radio buttons, a relation join condition, a program unit body, a record group query, a
+    /// formula, canvas text, a menu and library reference, and a site-specific property — so an omission in
+    /// what is retained can be detected rather than assumed.
+    ///
+    /// <paramref name="wrapperVersion"/> defaults to the internal build number an Oracle export writes on
+    /// the Module wrapper. The release catalog does not interpret that form, so a test that has to reach
+    /// the release-adjudicating phases supplies a release instead.
+    /// </summary>
+    public static string MasterDetailExport(string wrapperVersion = "122010400") =>
+        $"""
+        <?xml version="1.0" encoding="UTF-8"?>
+        <Module xmlns="http://xmlns.oracle.com/Forms" version="{wrapperVersion}" FormsVersion="12.2.1.4">
+          <FormModule Name="WAREHOUSE_PICKING" Title="Warehouse picking" MenuModule="WAREHOUSE_MENU" FirstNavigationBlock="PICK_HEADER" ContosoAuditFlag="Y">
+            <AttachedLibrary Name="WAREHOUSE_COMMON" LibrarySource="File"/>
+            <Trigger Name="WHEN-NEW-FORM-INSTANCE" TriggerText="BEGIN :GLOBAL.PICK_SESSION := 'OPEN'; END;"/>
+            <ProgramUnit Name="RECALCULATE_TOTALS" ProgramUnitType="Procedure" ProgramUnitText="PROCEDURE RECALCULATE_TOTALS IS&amp;#10;BEGIN&amp;#10;  NULL;&amp;#10;END;"/>
+            <RecordGroup Name="BIN_RG" RecordGroupType="Query" RecordGroupQuery="SELECT BIN_CODE, BIN_LABEL FROM WAREHOUSE.BIN ORDER BY BIN_CODE"/>
+            <LOV Name="BIN_LOV" RecordGroupName="BIN_RG" Title="Pick a bin">
+              <LOVColumnMapping Name="BIN_CODE" ReturnItem="PICK_LINE.BIN_CODE" DisplayWidth="60"/>
+              <LOVColumnMapping Name="BIN_LABEL" DisplayWidth="180"/>
+            </LOV>
+            <Canvas Name="MAIN_CANVAS" CanvasType="Content" Width="800" Height="600">
+              <Graphics Name="HEADER_TEXT" GraphicsType="Text" GraphicsFontName="Tahoma">
+                <CompoundText>
+                  <TextSegment TextSegmentString="Warehouse picking" TextSegmentFontSize="1000"/>
+                </CompoundText>
+              </Graphics>
+            </Canvas>
+            <Block Name="PICK_HEADER" QueryDataSourceName="WAREHOUSE.PICK_HEADER" DMLDataTargetName="WAREHOUSE.PICK_HEADER" RecordsDisplayed="1">
+              <Item Name="PICK_ID" ItemType="Text Item" DataType="Number" ColumnName="PICK_ID" Prompt="Pick:" Required="Yes" Enabled="Yes" UpdateAllowed="No" InsertAllowed="No" FormatMask="9999999" DatabaseItem="Yes" PrimaryKey="Yes"/>
+              <Item Name="REQUESTED_ON" ItemType="Text Item" DataType="Date" ColumnName="REQUESTED_ON" Prompt="Requested:" FormatMask="DD-MON-YYYY" Required="No" Enabled="Yes" UpdateAllowed="Yes"/>
+              <Item Name="PRIORITY" ItemType="Radio Group" DataType="Char" ColumnName="PRIORITY" Prompt="Priority:" InitialValue="N">
+                <RadioButton Name="PRIORITY_NORMAL" RadioButtonValue="N" Label="Normal" AccessKey="N"/>
+                <RadioButton Name="PRIORITY_URGENT" RadioButtonValue="U" Label="Urgent" AccessKey="U"/>
+              </Item>
+              <Item Name="LINE_TOTAL" ItemType="Display Item" DataType="Number" CalculationMode="Formula" Formula=":PICK_LINE.QUANTITY * :PICK_LINE.UNIT_COST" DatabaseItem="No" Prompt="Total:"/>
+              <Trigger Name="WHEN-VALIDATE-RECORD" TriggerStyle="PL/SQL">
+                <TriggerText>BEGIN RECALCULATE_TOTALS; END;</TriggerText>
+              </Trigger>
+            </Block>
+            <Block Name="PICK_LINE" QueryDataSourceName="WAREHOUSE.PICK_LINE" DMLDataTargetName="WAREHOUSE.PICK_LINE" RecordsDisplayed="10">
+              <Item Name="PICK_ID" ItemType="Text Item" DataType="Number" ColumnName="PICK_ID" Visible="No" Required="Yes"/>
+              <Item Name="BIN_CODE" ItemType="Text Item" DataType="Char" ColumnName="BIN_CODE" Prompt="Bin:" LOVName="BIN_LOV" ValidateFromList="Yes" Required="Yes" Enabled="Yes"/>
+              <Item Name="QUANTITY" ItemType="Text Item" DataType="Number" ColumnName="QUANTITY" Prompt="Qty:" MaximumLength="6" Required="Yes" FormatMask="999G999"/>
+              <Item Name="UNIT_COST" ItemType="Text Item" DataType="Number" ColumnName="UNIT_COST" Prompt="Unit cost:" FormatMask="999G999D99" UpdateAllowed="No"/>
+            </Block>
+            <Relation Name="PICK_HEADER_LINE" DetailBlock="PICK_LINE" JoinCondition="PICK_HEADER.PICK_ID = PICK_LINE.PICK_ID" DeleteRecordBehavior="Cascading" PreventMasterlessOperation="Yes"/>
+          </FormModule>
+        </Module>
+        """;
+
+    /// <summary>
+    /// A second independently authored export under a different module name, using the FormModule root form
+    /// and carrying a site-specific element in a namespace of its own.
+    /// </summary>
+    public const string LookupExport = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <FormModule xmlns="http://xmlns.oracle.com/Forms" xmlns:ext="urn:contoso:forms-annotations" Name="STOCK_LOOKUP" Title="Stock lookup" MenuModule="DEFAULT">
+          <ext:Annotation Origin="site-standard" Reviewed="2019-04-02"/>
+          <Block Name="STOCK" QueryDataSourceName="WAREHOUSE.STOCK" RecordsDisplayed="15">
+            <Item Name="SKU" ItemType="Text Item" DataType="Char" ColumnName="SKU" Prompt="SKU:" Required="Yes" Enabled="Yes" CaseRestriction="Upper"/>
+            <Item Name="ON_HAND" ItemType="Text Item" DataType="Number" ColumnName="ON_HAND" Prompt="On hand:" UpdateAllowed="No" FormatMask="999G999"/>
+          </Block>
+        </FormModule>
+        """;
+
     public const string Schema = """
         -- Independently designed schema for the demo legacy estate.
 

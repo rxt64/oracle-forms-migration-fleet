@@ -17,11 +17,17 @@ public class FormsIntermediateReaderTests
     /// <summary>The source root the valid representation records, which is the run's active source root.</summary>
     private const string ActiveSourceRoot = "legacy/forms";
 
+    private const string Forms = "{http://xmlns.oracle.com/Forms}";
+    private const string ModuleId = $"{Forms}FormModule[1]";
+    private const string TriggerId = $"{ModuleId}/{Forms}Trigger[1]";
+    private const string BlockId = $"{ModuleId}/{Forms}Block[1]";
+    private const string ItemId = $"{BlockId}/{Forms}Item[1]";
+
     /// <summary>An intermediate representation in the exact shape the normalization phase writes.</summary>
     private const string ValidIr = """
         {
           "generator": "oracle-forms-migration-fleet/source-normalization",
-          "schemaVersion": "2",
+          "schemaVersion": "3",
           "normalized": true,
           "sourceRoot": "legacy/forms",
           "formsFamily": "12c",
@@ -55,17 +61,117 @@ public class FormsIntermediateReaderTests
               ],
               "triggers": [{"name": "WHEN-NEW-FORM-INSTANCE","scope": "ORDER_ENTRY","body": "BEGIN EXECUTE_QUERY; END;","bodyEncoding": "Attribute"}],
               "programUnits": [],
-              "lovs": []
+              "lovs": [],
+              "sourceFacts": {
+                "textDigest": "3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b",
+                "wrapperDeclaredVersion": "12.2.1.4",
+                "facts": [
+                  {
+                    "id": "{http://xmlns.oracle.com/Forms}FormModule[1]",
+                    "order": 0,
+                    "childIndex": 0,
+                    "localName": "FormModule",
+                    "namespace": "http://xmlns.oracle.com/Forms",
+                    "declaredName": "ORDER_ENTRY",
+                    "attributes": [
+                      {"name": "Name", "namespace": "", "value": "ORDER_ENTRY"},
+                      {"name": "Title", "namespace": "", "value": "Order entry"}
+                    ],
+                    "kind": "Declared"
+                  },
+                  {
+                    "id": "{http://xmlns.oracle.com/Forms}FormModule[1]/{http://xmlns.oracle.com/Forms}Trigger[1]",
+                    "order": 1,
+                    "parentId": "{http://xmlns.oracle.com/Forms}FormModule[1]",
+                    "childIndex": 0,
+                    "localName": "Trigger",
+                    "namespace": "http://xmlns.oracle.com/Forms",
+                    "declaredName": "WHEN-NEW-FORM-INSTANCE",
+                    "attributes": [
+                      {"name": "Name", "namespace": "", "value": "WHEN-NEW-FORM-INSTANCE"},
+                      {"name": "TriggerText", "namespace": "", "value": "BEGIN EXECUTE_QUERY; END;"}
+                    ],
+                    "kind": "Declared"
+                  },
+                  {
+                    "id": "{http://xmlns.oracle.com/Forms}FormModule[1]/{http://xmlns.oracle.com/Forms}Block[1]",
+                    "order": 2,
+                    "parentId": "{http://xmlns.oracle.com/Forms}FormModule[1]",
+                    "childIndex": 1,
+                    "localName": "Block",
+                    "namespace": "http://xmlns.oracle.com/Forms",
+                    "declaredName": "ORDER_BLOCK",
+                    "attributes": [
+                      {"name": "Name", "namespace": "", "value": "ORDER_BLOCK"},
+                      {"name": "QueryDataSourceName", "namespace": "", "value": "BANK_ACCOUNT"},
+                      {"name": "RecordsDisplayCount", "namespace": "", "value": "10"}
+                    ],
+                    "kind": "Declared"
+                  },
+                  {
+                    "id": "{http://xmlns.oracle.com/Forms}FormModule[1]/{http://xmlns.oracle.com/Forms}Block[1]/{http://xmlns.oracle.com/Forms}Item[1]",
+                    "order": 3,
+                    "parentId": "{http://xmlns.oracle.com/Forms}FormModule[1]/{http://xmlns.oracle.com/Forms}Block[1]",
+                    "childIndex": 0,
+                    "localName": "Item",
+                    "namespace": "http://xmlns.oracle.com/Forms",
+                    "declaredName": "ACCOUNT_ID",
+                    "attributes": [
+                      {"name": "Name", "namespace": "", "value": "ACCOUNT_ID"},
+                      {"name": "ItemType", "namespace": "", "value": "Text Item"},
+                      {"name": "DataType", "namespace": "", "value": "Number"},
+                      {"name": "Prompt", "namespace": "", "value": "Account:"},
+                      {"name": "Required", "namespace": "", "value": "Yes"},
+                      {"name": "MaximumLength", "namespace": "", "value": "12"},
+                      {"name": "FormatMask", "namespace": "", "value": "999G999"}
+                    ],
+                    "kind": "Declared"
+                  },
+                  {
+                    "id": "{http://xmlns.oracle.com/Forms}FormModule[1]/{http://xmlns.oracle.com/Forms}Block[1]/{http://xmlns.oracle.com/Forms}Item[1]/{http://xmlns.oracle.com/Forms}Trigger[1]",
+                    "order": 4,
+                    "parentId": "{http://xmlns.oracle.com/Forms}FormModule[1]/{http://xmlns.oracle.com/Forms}Block[1]/{http://xmlns.oracle.com/Forms}Item[1]",
+                    "childIndex": 0,
+                    "localName": "Trigger",
+                    "namespace": "http://xmlns.oracle.com/Forms",
+                    "declaredName": "WHEN-VALIDATE-ITEM",
+                    "attributes": [
+                      {"name": "Name", "namespace": "", "value": "WHEN-VALIDATE-ITEM"}
+                    ],
+                    "kind": "Declared"
+                  },
+                  {
+                    "id": "{http://xmlns.oracle.com/Forms}FormModule[1]/{http://xmlns.oracle.com/Forms}Block[1]/{http://xmlns.oracle.com/Forms}Item[1]/{http://xmlns.oracle.com/Forms}Trigger[1]/{http://xmlns.oracle.com/Forms}TriggerText[1]",
+                    "order": 5,
+                    "parentId": "{http://xmlns.oracle.com/Forms}FormModule[1]/{http://xmlns.oracle.com/Forms}Block[1]/{http://xmlns.oracle.com/Forms}Item[1]/{http://xmlns.oracle.com/Forms}Trigger[1]",
+                    "childIndex": 0,
+                    "localName": "TriggerText",
+                    "namespace": "http://xmlns.oracle.com/Forms",
+                    "attributes": [],
+                    "text": "BEGIN VALIDATE_ITEM; END;",
+                    "kind": "Declared"
+                  }
+                ]
+              }
             }
           ],
           "notes": []
         }
         """;
 
-    private static string Mutate(string find, string replace) =>
-        ValidIr.Replace(find, replace, StringComparison.Ordinal) is { } mutated && !string.Equals(mutated, ValidIr, StringComparison.Ordinal)
+    private static string Mutate(string find, string replace) => Replace(ValidIr, find, replace);
+
+    /// <summary>
+    /// A second edit on the same document, so a case can move the interpreted structure and the retained
+    /// facts together. Changing only one of them is now a refusal, which several cases below rely on.
+    /// </summary>
+    private static string Mutate(string find, string replace, string alsoFind, string alsoReplace) =>
+        Replace(Mutate(find, replace), alsoFind, alsoReplace);
+
+    private static string Replace(string json, string find, string replace) =>
+        json.Replace(find, replace, StringComparison.Ordinal) is { } mutated && !string.Equals(mutated, json, StringComparison.Ordinal)
             ? mutated
-            : throw new InvalidOperationException($"The fragment '{find}' does not appear in the valid intermediate representation.");
+            : throw new InvalidOperationException($"The fragment '{find}' does not appear in the intermediate representation being mutated.");
 
     /// <summary>
     /// The representation normalization writes for an estate carrying one module name in two directories,
@@ -74,7 +180,7 @@ public class FormsIntermediateReaderTests
     private const string TwoDirectories = """
         {
           "generator": "oracle-forms-migration-fleet/source-normalization",
-          "schemaVersion": "2",
+          "schemaVersion": "3",
           "normalized": true,
           "sourceRoot": "legacy/forms",
           "formsFamily": "12c",
@@ -106,7 +212,56 @@ public class FormsIntermediateReaderTests
               ],
               "triggers": [],
               "programUnits": [],
-              "lovs": []
+              "lovs": [],
+              "sourceFacts": {
+                "textDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+                "facts": [
+                  {
+                    "id": "{http://xmlns.oracle.com/Forms}FormModule[1]",
+                    "order": 0,
+                    "childIndex": 0,
+                    "localName": "FormModule",
+                    "namespace": "http://xmlns.oracle.com/Forms",
+                    "declaredName": "ORDERS",
+                    "attributes": [
+                      {"name": "Name", "namespace": "", "value": "ORDERS"},
+                      {"name": "Title", "namespace": "", "value": "Orders"}
+                    ],
+                    "kind": "Declared"
+                  },
+                  {
+                    "id": "{http://xmlns.oracle.com/Forms}FormModule[1]/{http://xmlns.oracle.com/Forms}Block[1]",
+                    "order": 1,
+                    "parentId": "{http://xmlns.oracle.com/Forms}FormModule[1]",
+                    "childIndex": 0,
+                    "localName": "Block",
+                    "namespace": "http://xmlns.oracle.com/Forms",
+                    "declaredName": "ORDER_BLOCK",
+                    "attributes": [
+                      {"name": "Name", "namespace": "", "value": "ORDER_BLOCK"},
+                      {"name": "QueryDataSourceName", "namespace": "", "value": "BANK_ACCOUNT"},
+                      {"name": "RecordsDisplayCount", "namespace": "", "value": "10"}
+                    ],
+                    "kind": "Declared"
+                  },
+                  {
+                    "id": "{http://xmlns.oracle.com/Forms}FormModule[1]/{http://xmlns.oracle.com/Forms}Block[1]/{http://xmlns.oracle.com/Forms}Item[1]",
+                    "order": 2,
+                    "parentId": "{http://xmlns.oracle.com/Forms}FormModule[1]/{http://xmlns.oracle.com/Forms}Block[1]",
+                    "childIndex": 0,
+                    "localName": "Item",
+                    "namespace": "http://xmlns.oracle.com/Forms",
+                    "declaredName": "ACCOUNT_ID",
+                    "attributes": [
+                      {"name": "Name", "namespace": "", "value": "ACCOUNT_ID"},
+                      {"name": "ItemType", "namespace": "", "value": "Text Item"},
+                      {"name": "Prompt", "namespace": "", "value": "Account"},
+                      {"name": "Required", "namespace": "", "value": "Yes"}
+                    ],
+                    "kind": "Declared"
+                  }
+                ]
+              }
             },
             {
               "name": "ORDERS",
@@ -134,7 +289,56 @@ public class FormsIntermediateReaderTests
               ],
               "triggers": [],
               "programUnits": [],
-              "lovs": []
+              "lovs": [],
+              "sourceFacts": {
+                "textDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+                "facts": [
+                  {
+                    "id": "{http://xmlns.oracle.com/Forms}FormModule[1]",
+                    "order": 0,
+                    "childIndex": 0,
+                    "localName": "FormModule",
+                    "namespace": "http://xmlns.oracle.com/Forms",
+                    "declaredName": "ORDERS",
+                    "attributes": [
+                      {"name": "Name", "namespace": "", "value": "ORDERS"},
+                      {"name": "Title", "namespace": "", "value": "Orders"}
+                    ],
+                    "kind": "Declared"
+                  },
+                  {
+                    "id": "{http://xmlns.oracle.com/Forms}FormModule[1]/{http://xmlns.oracle.com/Forms}Block[1]",
+                    "order": 1,
+                    "parentId": "{http://xmlns.oracle.com/Forms}FormModule[1]",
+                    "childIndex": 0,
+                    "localName": "Block",
+                    "namespace": "http://xmlns.oracle.com/Forms",
+                    "declaredName": "ORDER_BLOCK",
+                    "attributes": [
+                      {"name": "Name", "namespace": "", "value": "ORDER_BLOCK"},
+                      {"name": "QueryDataSourceName", "namespace": "", "value": "BANK_ACCOUNT"},
+                      {"name": "RecordsDisplayCount", "namespace": "", "value": "10"}
+                    ],
+                    "kind": "Declared"
+                  },
+                  {
+                    "id": "{http://xmlns.oracle.com/Forms}FormModule[1]/{http://xmlns.oracle.com/Forms}Block[1]/{http://xmlns.oracle.com/Forms}Item[1]",
+                    "order": 2,
+                    "parentId": "{http://xmlns.oracle.com/Forms}FormModule[1]/{http://xmlns.oracle.com/Forms}Block[1]",
+                    "childIndex": 0,
+                    "localName": "Item",
+                    "namespace": "http://xmlns.oracle.com/Forms",
+                    "declaredName": "ACCOUNT_ID",
+                    "attributes": [
+                      {"name": "Name", "namespace": "", "value": "ACCOUNT_ID"},
+                      {"name": "ItemType", "namespace": "", "value": "Text Item"},
+                      {"name": "Prompt", "namespace": "", "value": "Account"},
+                      {"name": "Required", "namespace": "", "value": "Yes"}
+                    ],
+                    "kind": "Declared"
+                  }
+                ]
+              }
             }
           ],
           "notes": []
@@ -228,12 +432,14 @@ public class FormsIntermediateReaderTests
 
     /// <summary>
     /// An export that declared no version is written with no version and the unknown family, which is the
-    /// one case where a module's family may differ from the release the run settled on.
+    /// one case where a module's family may differ from the release the run settled on. It carries no
+    /// wrapper version either: the wrapper's attribute is one of the declarations that would have given the
+    /// module a family.
     /// </summary>
     [Fact]
     public void An_export_that_declared_no_version_reads_as_the_unknown_family()
     {
-        string json = Mutate("\"declaredVersion\": \"12.2.1.4\",", string.Empty)
+        string json = Mutate("\"declaredVersion\": \"12.2.1.4\",", string.Empty, "\"wrapperDeclaredVersion\": \"12.2.1.4\",", string.Empty)
             .Replace("\"declaredFamily\": \"12c\"", "\"declaredFamily\": \"unknown\"", StringComparison.Ordinal);
 
         FormsIntermediateRead read = Read(json);
@@ -246,7 +452,7 @@ public class FormsIntermediateReaderTests
     public void A_null_declared_version_reads_as_no_version_rather_than_a_refusal()
     {
         FormsIntermediateRead read = Read(
-            Mutate("\"declaredVersion\": \"12.2.1.4\"", "\"declaredVersion\": null")
+            Mutate("\"declaredVersion\": \"12.2.1.4\"", "\"declaredVersion\": null", "\"wrapperDeclaredVersion\": \"12.2.1.4\",", string.Empty)
                 .Replace("\"declaredFamily\": \"12c\"", "\"declaredFamily\": \"unknown\"", StringComparison.Ordinal));
 
         Assert.Null(read.Error);
@@ -274,12 +480,12 @@ public class FormsIntermediateReaderTests
     }
 
     [Theory]
-    [InlineData("\"maxLength\": 12,", "")]
-    [InlineData("\"maxLength\": 12", "\"maxLength\": null")]
-    [InlineData("\"maxLength\": 12", "\"maxLength\": 0")]
-    public void An_absent_null_or_zero_maximum_length_is_read_rather_than_refused(string find, string replace)
+    [InlineData("\"maxLength\": 12,", "", "{\"name\": \"MaximumLength\", \"namespace\": \"\", \"value\": \"12\"},", "")]
+    [InlineData("\"maxLength\": 12", "\"maxLength\": null", "{\"name\": \"MaximumLength\", \"namespace\": \"\", \"value\": \"12\"},", "")]
+    [InlineData("\"maxLength\": 12", "\"maxLength\": 0", "\"value\": \"12\"", "\"value\": \"0\"")]
+    public void An_absent_null_or_zero_maximum_length_is_read_rather_than_refused(string find, string replace, string factFind, string factReplace)
     {
-        FormsIntermediateRead read = Read(Mutate(find, replace));
+        FormsIntermediateRead read = Read(Mutate(find, replace, factFind, factReplace));
 
         Assert.Null(read.Error);
         Assert.Single(read.Modules!);
@@ -305,13 +511,17 @@ public class FormsIntermediateReaderTests
         Assert.Contains("is present and is not a string", read.Error!, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A null optional string reads as absent, which is only a valid document when the retained element
+    /// declared no such attribute either. Each case drops the attribute rather than renaming the field it
+    /// would otherwise contradict.
+    /// </summary>
     [Theory]
-    [InlineData("\"title\": \"Order entry\"", "\"title\": null")]
-    [InlineData("\"baseTable\": \"BANK_ACCOUNT\"", "\"baseTable\": null")]
-    [InlineData("\"prompt\": \"Account\"", "\"prompt\": null")]
-    public void A_null_optional_string_is_read_as_absent(string find, string replace)
+    [InlineData("\"title\": \"Order entry\"", "\"title\": null", "{\"name\": \"Title\", \"namespace\": \"\", \"value\": \"Order entry\"}", "{\"name\": \"WindowStyle\", \"namespace\": \"\", \"value\": \"Document\"}")]
+    [InlineData("\"prompt\": \"Account\"", "\"prompt\": null", "{\"name\": \"Prompt\", \"namespace\": \"\", \"value\": \"Account:\"},", "")]
+    public void A_null_optional_string_is_read_as_absent(string find, string replace, string factFind, string factReplace)
     {
-        FormsIntermediateRead read = Read(Mutate(find, replace));
+        FormsIntermediateRead read = Read(Mutate(find, replace, factFind, factReplace));
 
         Assert.Null(read.Error);
         Assert.Single(read.Modules!);
@@ -374,12 +584,584 @@ public class FormsIntermediateReaderTests
     }
 
     [Fact]
-    public void Schema_version_one_is_refused_with_reimport_guidance()
+    public void The_retained_source_facts_are_read_back_in_full()
     {
-        FormsIntermediateRead read = Read(Mutate("\"schemaVersion\": \"2\"", "\"schemaVersion\": \"1\""));
+        FormsModule module = Assert.Single(Read(ValidIr).Modules!);
+        FormsSourceFactSet facts = module.SourceFacts!;
+
+        Assert.Equal("12.2.1.4", facts.WrapperDeclaredVersion);
+        Assert.Equal(6, facts.Facts.Count);
+        Assert.Equal([0, 1, 2, 3, 4, 5], facts.Facts.Select(fact => fact.Order));
+        Assert.All(facts.Facts, fact => Assert.Equal(FormsSourceFactKind.Declared, fact.Kind));
+
+        Assert.Equal("BEGIN VALIDATE_ITEM; END;", facts.Facts[5].Text);
+
+        FormsSourceFact item = facts.Facts[3];
+        Assert.Equal("Item", item.LocalName);
+        Assert.Equal("ACCOUNT_ID", item.DeclaredName);
+        Assert.Equal("999G999", Assert.Single(item.Attributes, attribute => attribute.Name == "FormatMask").Value);
+        Assert.Equal("{http://xmlns.oracle.com/Forms}FormModule[1]/{http://xmlns.oracle.com/Forms}Block[1]", item.ParentId);
+    }
+
+    /// <summary>
+    /// The wrapper version is retained verbatim and this reader adjudicates nothing from it. What it checks
+    /// is that the string agrees with the release decision the same document records: normalization reads
+    /// every version attribute a supplied export declares, the Module wrapper's among them, and refuses the
+    /// estate when one is uninterpretable, names a second family, or names a second release. The Oracle
+    /// internal build number below is the case that mattered — normalization refuses an estate declaring
+    /// it, while this reader accepted it beside a module attributed to Forms 12c.
+    /// </summary>
+    [Theory]
+    [InlineData("\"wrapperDeclaredVersion\": \"122010400\"", "matches no Oracle Forms release this catalog knows")]
+    [InlineData("\"wrapperDeclaredVersion\": \"banana\"", "matches no Oracle Forms release this catalog knows")]
+    [InlineData("\"wrapperDeclaredVersion\": \"\"", "empty 'wrapperDeclaredVersion'")]
+    [InlineData("\"wrapperDeclaredVersion\": \"   \"", "empty 'wrapperDeclaredVersion'")]
+    [InlineData("\"wrapperDeclaredVersion\": 122010400", "present and is not a string")]
+    [InlineData("\"wrapperDeclaredVersion\": \"6i\"", "reads as Oracle Forms family '6i'")]
+    [InlineData("\"wrapperDeclaredVersion\": \"12.2.1.5\"", "rather than one release stated at different precision")]
+    public void A_wrapper_version_the_normalization_phase_would_have_refused_is_refused(string replace, string expected)
+    {
+        FormsIntermediateRead read = Read(Mutate("\"wrapperDeclaredVersion\": \"12.2.1.4\"", replace));
 
         Assert.Null(read.Modules);
-        Assert.Contains("schema version '1'", read.Error!, StringComparison.Ordinal);
+        Assert.Contains(expected, read.Error!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The accepted cases, so the check above cannot pass by refusing everything: the same release the
+    /// export declared, stated less precisely on the wrapper than in the module beside it.
+    /// </summary>
+    [Theory]
+    [InlineData("12.2")]
+    [InlineData("12c")]
+    public void A_wrapper_version_the_normalization_phase_would_have_written_is_read_back_verbatim(string retained)
+    {
+        FormsIntermediateRead read = Read(Mutate("\"wrapperDeclaredVersion\": \"12.2.1.4\"", $"\"wrapperDeclaredVersion\": \"{retained}\""));
+
+        Assert.Null(read.Error);
+        Assert.Equal(retained, Assert.Single(read.Modules!).SourceFacts!.WrapperDeclaredVersion);
+    }
+
+    /// <summary>
+    /// An export whose root is the FormModule itself carries no wrapper, so it declares no wrapper version
+    /// and the producer retains none. That absence is read back as an absence, not as a gap in the record.
+    /// </summary>
+    [Fact]
+    public void A_module_retaining_no_wrapper_version_is_read_as_having_declared_none()
+    {
+        FormsIntermediateRead read = Read(Mutate("\"wrapperDeclaredVersion\": \"12.2.1.4\",", string.Empty));
+
+        Assert.Null(read.Error);
+        Assert.Null(Assert.Single(read.Modules!).SourceFacts!.WrapperDeclaredVersion);
+    }
+
+    /// <summary>
+    /// The wrapper's version is one of the declarations that decides the release, so a module recording
+    /// that its export declared none cannot sit beside a wrapper that named one.
+    /// </summary>
+    [Fact]
+    public void A_wrapper_version_beside_a_module_declaring_no_release_is_refused()
+    {
+        FormsIntermediateRead read = Read(Mutate(
+            "\"declaredVersion\": \"12.2.1.4\",",
+            string.Empty,
+            "\"declaredFamily\": \"12c\"",
+            "\"declaredFamily\": \"unknown\""));
+
+        Assert.Null(read.Modules);
+        Assert.Contains("declared no release at all", read.Error!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A retained element's direct text is rebuilt before its children, so a set declaring both describes a
+    /// tree in an order the retaining side refuses to write. Indentation an export preserves is not that:
+    /// moving whitespace changes no declared content, and refusing it would reject exports this fleet reads.
+    /// </summary>
+    [Theory]
+    [InlineData("\"text\": \"A\",", false)]
+    [InlineData("\"text\": \"   \",", true)]
+    public void Text_retained_beside_child_elements_is_refused_and_preserved_indentation_is_not(string inserted, bool accepted)
+    {
+        FormsIntermediateRead read = Read(Mutate("\"declaredName\": \"ORDER_BLOCK\",", $"\"declaredName\": \"ORDER_BLOCK\", {inserted}"));
+
+        if (accepted)
+        {
+            Assert.Null(read.Error);
+            Assert.Equal("   ", Assert.Single(read.Modules!).SourceFacts!.Facts[2].Text);
+            return;
+        }
+
+        Assert.Null(read.Modules);
+        Assert.Contains("retains text of its own beside it", read.Error!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The retained facts are the only record of what the export declared beyond the structure this build
+    /// interprets, so a set that is absent, damaged, reordered, or reattributed is refused rather than read
+    /// short: a shorter inventory reads back as an export that genuinely declared less.
+    /// </summary>
+    [Theory]
+    [InlineData("\"sourceFacts\": {", "\"otherFacts\": {", "has no 'sourceFacts' object")]
+    [InlineData("\"kind\": \"Declared\"", "\"kind\": \"Inferred\"", "fact kind other than 'Declared'")]
+    [InlineData("\"kind\": \"Declared\"", "\"kind\": \"declared\"", "fact kind other than 'Declared'")]
+    [InlineData("\"order\": 2,", "\"order\": 5,", "declares order 5 at position 2")]
+    [InlineData("\"textDigest\": \"3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b\"", "\"textDigest\": \"3A7BD3E2360A3D29EEA436FCFB7E44C735D117C42D1C1835420B6B9942DD4F1B\"", "lowercase hexadecimal SHA-256 form")]
+    [InlineData("\"textDigest\": \"3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b\"", "\"textDigest\": \"3a7bd3e2\"", "lowercase hexadecimal SHA-256 form")]
+    [InlineData("\"parentId\": \"{http://xmlns.oracle.com/Forms}FormModule[1]/{http://xmlns.oracle.com/Forms}Block[1]\",", "", "declares no 'parentId'")]
+    [InlineData("\"parentId\": \"{http://xmlns.oracle.com/Forms}FormModule[1]/{http://xmlns.oracle.com/Forms}Block[1]\"", "\"parentId\": \"{http://xmlns.oracle.com/Forms}FormModule[1]/{http://xmlns.oracle.com/Forms}Block[9]\"", "is not a fact declared before it")]
+    [InlineData("\"parentId\": \"{http://xmlns.oracle.com/Forms}FormModule[1]/{http://xmlns.oracle.com/Forms}Block[1]\"", "\"parentId\": \"{http://xmlns.oracle.com/Forms}FormModule[1]\"", "A source-object path is its parent's plus one step")]
+    [InlineData("\"localName\": \"FormModule\"", "\"localName\": \"Module\"", "ends its path with")]
+    [InlineData("\"declaredName\": \"ORDER_ENTRY\"", "\"declaredName\": \"OTHER_MODULE\"", "retained attributes declare 'ORDER_ENTRY'")]
+    [InlineData("{\"name\": \"Title\", \"namespace\": \"\", \"value\": \"Order entry\"}", "{\"name\": \"Title\", \"namespace\": \"\"}", "has no 'value' string")]
+    [InlineData("{\"name\": \"Title\", \"namespace\": \"\", \"value\": \"Order entry\"}", "{\"name\": \"Title\", \"value\": \"Order entry\"}", "has no 'namespace' string")]
+    [InlineData("{\"name\": \"Title\", \"namespace\": \"\", \"value\": \"Order entry\"}", "{\"name\": \"Name\", \"namespace\": \"\", \"value\": \"Order entry\"}", "more than one attribute")]
+    [InlineData("\"namespace\": \"http://xmlns.oracle.com/Forms\",", "", "has no 'namespace' string")]
+    [InlineData("\"facts\": [", "\"facts\": [], \"unusedFacts\": [", "declares no facts")]
+    public void A_tampered_source_fact_set_is_refused(string find, string replace, string expected)
+    {
+        FormsIntermediateRead read = Read(Mutate(find, replace));
+
+        Assert.Null(read.Modules);
+        Assert.Contains(expected, read.Error!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A path that agrees with nothing lets a retained element be cited under a name, a namespace, or a
+    /// sibling position it never had, which is the one thing every later citation depends on.
+    /// </summary>
+    [Theory]
+    [InlineData("\"localName\": \"Item\"", "\"localName\": \"Widget\"", "ends its path with")]
+    [InlineData(ItemId, $"{BlockId}/{{urn:evil}}Item[1]", "ends its path with")]
+    [InlineData(ItemId, $"{BlockId}/{Forms}Item[0]", "ends its path with")]
+    [InlineData(ItemId, $"{BlockId}/{Forms}Item[01]", "ends its path with")]
+    [InlineData("FormModule[1]", "FormModule[0]", "ends its path with")]
+    [InlineData("\"childIndex\": 1,", "\"childIndex\": 2,", "while it is child 1")]
+    [InlineData("\"childIndex\": 0,", "\"childIndex\": 1,", "while it is child 0")]
+    [InlineData("\"declaredName\": \"ACCOUNT_ID\"", "\"declaredName\": \"SOMETHING_ELSE\"", "retained attributes declare 'ACCOUNT_ID'")]
+    public void A_source_fact_whose_path_or_position_disagrees_with_itself_is_refused(string find, string replace, string expected)
+    {
+        FormsIntermediateRead read = Read(Mutate(find, replace));
+
+        Assert.Null(read.Modules);
+        Assert.Contains(expected, read.Error!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A fact is not an identity until it has been checked. Recording it first let an entry name itself as
+    /// its own parent and satisfy the lookup it was supposed to fail.
+    /// </summary>
+    [Fact]
+    public void A_source_fact_that_names_itself_as_its_own_parent_is_refused()
+    {
+        FormsIntermediateRead read = Read(Mutate($"\"parentId\": \"{BlockId}\"", $"\"parentId\": \"{ItemId}\""));
+
+        Assert.Null(read.Modules);
+        Assert.Contains("is not a fact declared before it", read.Error!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The item moves from the block that is still open above it to the trigger the producer had already
+    /// finished. Every other relationship still checks out, so only the depth-first order catches it.
+    /// </summary>
+    [Fact]
+    public void A_source_fact_reattached_to_a_closed_branch_is_refused()
+    {
+        string reattached = Mutate($"\"id\": \"{ItemId}\"", $"\"id\": \"{TriggerId}/{Forms}Item[1]\"")
+            .Replace($"\"parentId\": \"{BlockId}\"", $"\"parentId\": \"{TriggerId}\"", StringComparison.Ordinal);
+
+        FormsIntermediateRead read = Read(reattached);
+
+        Assert.Null(read.Modules);
+        Assert.Contains("had already closed", read.Error!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The module element and the module it is filed under have to name the same module. The tamper is
+    /// self-consistent — declared name and Name attribute agree — so only this check refuses it.
+    /// </summary>
+    [Fact]
+    public void A_module_element_retained_for_another_module_is_refused()
+    {
+        string reattributed = Mutate("\"declaredName\": \"ORDER_ENTRY\"", "\"declaredName\": \"OTHER_MODULE\"")
+            .Replace(
+                "{\"name\": \"Name\", \"namespace\": \"\", \"value\": \"ORDER_ENTRY\"}",
+                "{\"name\": \"Name\", \"namespace\": \"\", \"value\": \"OTHER_MODULE\"}",
+                StringComparison.Ordinal);
+
+        FormsIntermediateRead read = Read(reattributed);
+
+        Assert.Null(read.Modules);
+        Assert.Contains("disagree about which module was read", read.Error!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The interpreted structure and the retained facts were read independently and compared only by
+    /// module name, so a document could declare a base table, a prompt, a flag, or a trigger body that no
+    /// retained element supports and the converter generated from the declaration. Each case here moves the
+    /// interpreted structure alone; the facts stay exactly as the retaining side wrote them.
+    /// </summary>
+    [Theory]
+    [InlineData("\"title\": \"Order entry\"", "\"title\": \"Something else\"", "title")]
+    [InlineData("\"title\": \"Order entry\"", "\"title\": null", "title")]
+    [InlineData("\"baseTable\": \"BANK_ACCOUNT\"", "\"baseTable\": \"SALARY\"", "base table")]
+    [InlineData("\"baseTable\": \"BANK_ACCOUNT\"", "\"baseTable\": null", "base table")]
+    [InlineData("\"recordsDisplayed\": 10", "\"recordsDisplayed\": 1", "displayed record count")]
+    [InlineData("\"prompt\": \"Account\"", "\"prompt\": \"Sort code\"", "declared properties")]
+    [InlineData("\"prompt\": \"Account\"", "\"prompt\": null", "declared properties")]
+    [InlineData("\"dataType\": \"Number\"", "\"dataType\": \"Char\"", "declared properties")]
+    [InlineData("\"columnName\": \"ACCOUNT_ID\"", "\"columnName\": \"SORT_CODE\"", "declared properties")]
+    [InlineData("\"itemType\": \"Text Item\"", "\"itemType\": \"Display Item\"", "declared properties")]
+    [InlineData("\"required\": true", "\"required\": false", "declared properties")]
+    [InlineData("\"visible\": true", "\"visible\": false", "declared properties")]
+    [InlineData("\"maxLength\": 12", "\"maxLength\": 4", "declared properties")]
+    [InlineData("\"body\": \"BEGIN EXECUTE_QUERY; END;\"", "\"body\": \"BEGIN DELETE_RECORD; END;\"", "identity, scope, body, or body encoding")]
+    [InlineData("\"body\": \"BEGIN VALIDATE_ITEM; END;\"", "\"body\": \"BEGIN RAISE FORM_TRIGGER_FAILURE; END;\"", "identity, scope, body, or body encoding")]
+    [InlineData("\"bodyEncoding\": \"Attribute\"", "\"bodyEncoding\": \"Element\"", "identity, scope, body, or body encoding")]
+    [InlineData("\"programUnits\": []", "\"programUnits\": [\"RECALCULATE_TOTALS\"]", "program unit count")]
+    [InlineData("\"lovs\": []", "\"lovs\": [\"BIN_LOV\"]", "LOV count")]
+    public void An_interpreted_structure_the_retained_facts_do_not_support_is_refused(string find, string replace, string field)
+    {
+        FormsIntermediateRead read = Read(Mutate(find, replace));
+
+        Assert.Null(read.Modules);
+        Assert.Contains($"The interpreted {field}", read.Error!, StringComparison.Ordinal);
+        Assert.Contains("the source facts retained beside it describe", read.Error!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The same reconciliation from the other side. Each case moves a retained element and leaves the
+    /// interpreted structure exactly as the producer wrote it, so a tampered inventory cannot describe an
+    /// export the projection beside it never came from. The text digest names which export text the facts
+    /// were read from; it is never evidence that anything beside them agrees with it.
+    /// </summary>
+    [Theory]
+    [InlineData("{\"name\": \"Title\", \"namespace\": \"\", \"value\": \"Order entry\"}", "{\"name\": \"Title\", \"namespace\": \"\", \"value\": \"Something else\"}", "title")]
+    [InlineData("{\"name\": \"QueryDataSourceName\", \"namespace\": \"\", \"value\": \"BANK_ACCOUNT\"}", "{\"name\": \"QueryDataSourceName\", \"namespace\": \"\", \"value\": \"SALARY\"}", "base table")]
+    [InlineData("{\"name\": \"RecordsDisplayCount\", \"namespace\": \"\", \"value\": \"10\"}", "{\"name\": \"RecordsDisplayCount\", \"namespace\": \"\", \"value\": \"1\"}", "displayed record count")]
+    [InlineData("{\"name\": \"Prompt\", \"namespace\": \"\", \"value\": \"Account:\"}", "{\"name\": \"Prompt\", \"namespace\": \"\", \"value\": \"Sort code:\"}", "declared properties")]
+    [InlineData("{\"name\": \"Required\", \"namespace\": \"\", \"value\": \"Yes\"}", "{\"name\": \"Required\", \"namespace\": \"\", \"value\": \"No\"}", "declared properties")]
+    [InlineData("{\"name\": \"ItemType\", \"namespace\": \"\", \"value\": \"Text Item\"}", "{\"name\": \"ItemType\", \"namespace\": \"\", \"value\": \"Display Item\"}", "declared properties")]
+    [InlineData("{\"name\": \"MaximumLength\", \"namespace\": \"\", \"value\": \"12\"}", "{\"name\": \"MaximumLength\", \"namespace\": \"\", \"value\": \"4\"}", "declared properties")]
+    [InlineData("{\"name\": \"TriggerText\", \"namespace\": \"\", \"value\": \"BEGIN EXECUTE_QUERY; END;\"}", "{\"name\": \"TriggerText\", \"namespace\": \"\", \"value\": \"BEGIN DELETE_RECORD; END;\"}", "identity, scope, body, or body encoding")]
+    [InlineData("\"text\": \"BEGIN VALIDATE_ITEM; END;\"", "\"text\": \"BEGIN RAISE FORM_TRIGGER_FAILURE; END;\"", "identity, scope, body, or body encoding")]
+    public void Retained_facts_that_do_not_describe_the_interpreted_structure_are_refused(string find, string replace, string field)
+    {
+        FormsIntermediateRead read = Read(Mutate(find, replace));
+
+        Assert.Null(read.Modules);
+        Assert.Contains($"The interpreted {field}", read.Error!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A trigger renamed in the retained facts keeps its declared name and its Name attribute in step, so
+    /// every check inside the inventory still passes and only the projection beside it disagrees.
+    /// </summary>
+    [Fact]
+    public void A_retained_trigger_renamed_consistently_within_the_facts_is_still_refused()
+    {
+        FormsIntermediateRead read = Read(Mutate(
+            "\"declaredName\": \"WHEN-NEW-FORM-INSTANCE\"",
+            "\"declaredName\": \"WHEN-NEW-BLOCK-INSTANCE\"",
+            "{\"name\": \"Name\", \"namespace\": \"\", \"value\": \"WHEN-NEW-FORM-INSTANCE\"}",
+            "{\"name\": \"Name\", \"namespace\": \"\", \"value\": \"WHEN-NEW-BLOCK-INSTANCE\"}"));
+
+        Assert.Null(read.Modules);
+        Assert.Contains("identity, scope, body, or body encoding", read.Error!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The retaining side refuses an export nested deeper than it keeps, so a fact set declaring a deeper
+    /// element was never written by it. The reader read one regardless, which accepted a tree the retaining
+    /// side would have thrown out.
+    /// </summary>
+    [Fact]
+    public void A_fact_set_nested_deeper_than_the_retaining_side_keeps_is_refused()
+    {
+        FormsIntermediateRead read = Read(DeepIr(FormsSourceFactReader.MaxDepth + 1));
+
+        Assert.Null(read.Modules);
+        Assert.Contains($"reads at most {FormsSourceFactReader.MaxDepth}", read.Error!, StringComparison.Ordinal);
+        Assert.Contains("refused rather than read in part", read.Error!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_fact_set_nested_to_the_retained_depth_is_read()
+    {
+        FormsIntermediateRead read = Read(DeepIr(FormsSourceFactReader.MaxDepth));
+
+        Assert.Null(read.Error);
+        Assert.Equal(FormsSourceFactReader.MaxDepth, Assert.Single(read.Modules!).SourceFacts!.Facts.Count);
+    }
+
+    /// <summary>
+    /// A representation whose only retained structure is a chain of elements this build does not interpret,
+    /// nested <paramref name="depth"/> levels counting the module itself. Its projection is empty, which is
+    /// what the module below declares, so only the depth decides whether it is read.
+    /// </summary>
+    private static string DeepIr(int depth)
+    {
+        string id = $"{Forms}FormModule[1]";
+        string facts =
+            $$"""
+            {"id": "{{id}}","order": 0,"childIndex": 0,"localName": "FormModule","namespace": "http://xmlns.oracle.com/Forms","declaredName": "ORDER_ENTRY","attributes": [{"name": "Name", "namespace": "", "value": "ORDER_ENTRY"}],"kind": "Declared"}
+            """;
+
+        for (int level = 2; level <= depth; level++)
+        {
+            string parent = id;
+            id = $"{parent}/{{}}a[1]";
+            facts +=
+                $$"""
+                ,{"id": "{{id}}","order": {{level - 1}},"parentId": "{{parent}}","childIndex": 0,"localName": "a","namespace": "","attributes": [],"kind": "Declared"}
+                """;
+        }
+
+        return $$"""
+            {
+              "generator": "oracle-forms-migration-fleet/source-normalization",
+              "schemaVersion": "3",
+              "normalized": true,
+              "sourceRoot": "legacy/forms",
+              "formsFamily": "12c",
+              "versionAuthority": "declared by the supplied export",
+              "modules": [
+                {
+                  "name": "ORDER_ENTRY",
+                  "sourcePath": "legacy/forms/ui/ORDER_ENTRY.xml",
+                  "declaredVersion": "12.2.1.4",
+                  "declaredFamily": "12c",
+                  "blocks": [],
+                  "triggers": [],
+                  "programUnits": [],
+                  "lovs": [],
+                  "sourceFacts": {
+                    "textDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+                    "facts": [{{facts}}]
+                  }
+                }
+              ],
+              "notes": []
+            }
+            """;
+    }
+
+    /// <summary>
+    /// The projection reports a retained tree it could not carry instead of throwing, and the reader used
+    /// to discard that report. A tree carrying more blocks than this build retains projects no blocks at
+    /// all, so a document declaring an empty structure beside it compared equal and was read as a module
+    /// with nothing in it — the estate silently shrank to zero screens rather than being refused.
+    /// </summary>
+    [Fact]
+    public void A_retained_tree_over_the_block_limit_is_refused_rather_than_read_as_an_empty_module()
+    {
+        FormsIntermediateRead read = Read(BlocksIr(FormsIntermediateReader.MaxChildren + 1));
+
+        Assert.Null(read.Modules);
+        Assert.Contains("would have refused to normalize", read.Error!, StringComparison.Ordinal);
+        Assert.Contains("declares 20001 block entries", read.Error!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The same gap one level down, where the projection keeps the block and empties only its items, so the
+    /// document that pairs with it is a whole screen carrying no fields.
+    /// </summary>
+    [Fact]
+    public void A_retained_block_over_the_item_limit_is_refused_rather_than_read_as_an_empty_block()
+    {
+        FormsIntermediateRead read = Read(ItemsIr(FormsIntermediateReader.MaxChildren + 1));
+
+        Assert.Null(read.Modules);
+        Assert.Contains("would have refused to normalize", read.Error!, StringComparison.Ordinal);
+        Assert.Contains("ORDER_ENTRY.ORDER_BLOCK — The export declares 20001 item entries", read.Error!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The projection reports every untranslated trigger as unsupported too, and the representation retains
+    /// those triggers on purpose. Only findings about the module's own structure may refuse a read, so the
+    /// document that carries behaviour this fleet never translates is still read in full.
+    /// </summary>
+    [Fact]
+    public void A_representation_retaining_untranslated_trigger_behaviour_is_still_read()
+    {
+        FormsIntermediateRead read = Read(ValidIr);
+
+        Assert.Null(read.Error);
+        FormsModule module = Assert.Single(read.Modules!);
+        Assert.Equal("BEGIN EXECUTE_QUERY; END;", Assert.Single(module.Triggers).Body);
+        Assert.Equal("BEGIN VALIDATE_ITEM; END;", Assert.Single(Assert.Single(module.Blocks).Triggers).Body);
+    }
+
+    /// <summary>
+    /// A representation declaring no blocks whose retained facts carry <paramref name="blocks"/> of them,
+    /// each one an element the projection would have to drop as a whole once the count passes what this
+    /// build retains.
+    /// </summary>
+    private static string BlocksIr(int blocks)
+    {
+        string module =
+            $$"""
+            {"id": "{{ModuleId}}","order": 0,"childIndex": 0,"localName": "FormModule","namespace": "http://xmlns.oracle.com/Forms","declaredName": "ORDER_ENTRY","attributes": [{"name": "Name", "namespace": "", "value": "ORDER_ENTRY"}],"kind": "Declared"}
+            """;
+
+        string retained = string.Join(",", Enumerable.Range(1, blocks).Select(position =>
+            $$"""
+            {"id": "{{ModuleId}}/{{Forms}}Block[{{position}}]","order": {{position}},"parentId": "{{ModuleId}}","childIndex": {{position - 1}},"localName": "Block","namespace": "http://xmlns.oracle.com/Forms","attributes": [],"kind": "Declared"}
+            """));
+
+        return $$"""
+            {
+              "generator": "oracle-forms-migration-fleet/source-normalization",
+              "schemaVersion": "3",
+              "normalized": true,
+              "sourceRoot": "legacy/forms",
+              "formsFamily": "12c",
+              "versionAuthority": "declared by the supplied export",
+              "modules": [
+                {
+                  "name": "ORDER_ENTRY",
+                  "sourcePath": "legacy/forms/ui/ORDER_ENTRY.xml",
+                  "declaredVersion": "12.2.1.4",
+                  "declaredFamily": "12c",
+                  "blocks": [],
+                  "triggers": [],
+                  "programUnits": [],
+                  "lovs": [],
+                  "sourceFacts": {
+                    "textDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+                    "facts": [{{module}},{{retained}}]
+                  }
+                }
+              ],
+              "notes": []
+            }
+            """;
+    }
+
+    /// <summary>
+    /// A representation declaring one block with no items whose retained facts give that same block
+    /// <paramref name="items"/> of them. Everything the block itself declares agrees with the projection,
+    /// so only the emptied item list is left to catch.
+    /// </summary>
+    private static string ItemsIr(int items)
+    {
+        string module =
+            $$"""
+            {"id": "{{ModuleId}}","order": 0,"childIndex": 0,"localName": "FormModule","namespace": "http://xmlns.oracle.com/Forms","declaredName": "ORDER_ENTRY","attributes": [{"name": "Name", "namespace": "", "value": "ORDER_ENTRY"}],"kind": "Declared"}
+            """;
+
+        string block =
+            $$"""
+            {"id": "{{BlockId}}","order": 1,"parentId": "{{ModuleId}}","childIndex": 0,"localName": "Block","namespace": "http://xmlns.oracle.com/Forms","declaredName": "ORDER_BLOCK","attributes": [{"name": "Name", "namespace": "", "value": "ORDER_BLOCK"},{"name": "QueryDataSourceName", "namespace": "", "value": "BANK_ACCOUNT"}],"kind": "Declared"}
+            """;
+
+        string retained = string.Join(",", Enumerable.Range(1, items).Select(position =>
+            $$"""
+            {"id": "{{BlockId}}/{{Forms}}Item[{{position}}]","order": {{position + 1}},"parentId": "{{BlockId}}","childIndex": {{position - 1}},"localName": "Item","namespace": "http://xmlns.oracle.com/Forms","attributes": [],"kind": "Declared"}
+            """));
+
+        return $$"""
+            {
+              "generator": "oracle-forms-migration-fleet/source-normalization",
+              "schemaVersion": "3",
+              "normalized": true,
+              "sourceRoot": "legacy/forms",
+              "formsFamily": "12c",
+              "versionAuthority": "declared by the supplied export",
+              "modules": [
+                {
+                  "name": "ORDER_ENTRY",
+                  "sourcePath": "legacy/forms/ui/ORDER_ENTRY.xml",
+                  "declaredVersion": "12.2.1.4",
+                  "declaredFamily": "12c",
+                  "blocks": [
+                    {
+                      "name": "ORDER_BLOCK",
+                      "baseTable": "BANK_ACCOUNT",
+                      "recordsDisplayed": 1,
+                      "items": [],
+                      "triggers": []
+                    }
+                  ],
+                  "triggers": [],
+                  "programUnits": [],
+                  "lovs": [],
+                  "sourceFacts": {
+                    "textDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+                    "facts": [{{module}},{{block}},{{retained}}]
+                  }
+                }
+              ],
+              "notes": []
+            }
+            """;
+    }
+
+    /// <summary>
+    /// The module element roots its own id space, so the producer always writes it as the first sibling of
+    /// its qualified name. A path rooted anywhere else used to be accepted on the grounds that it was still
+    /// resolvable, which let a document carry an ordinal no retained tree contains.
+    /// </summary>
+    [Fact]
+    public void A_module_element_rooted_at_another_sibling_index_is_refused()
+    {
+        FormsIntermediateRead read = Read(Mutate("FormModule[1]", "FormModule[2]"));
+
+        Assert.Null(read.Modules);
+        Assert.Contains("element 1 of that qualified name under the module root", read.Error!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A sibling ordinal is counted per parent and per qualified name by the producer. Every parent
+    /// reference in these documents still resolves and every path is still its parent's plus one step, so
+    /// only counting the siblings actually retained refuses them.
+    /// </summary>
+    [Theory]
+    [InlineData("Block[1]", "Block[2]")]
+    [InlineData("Item[1]", "Item[9]")]
+    [InlineData("TriggerText[1]", "TriggerText[2]")]
+    public void A_forged_sibling_ordinal_is_refused_even_where_every_reference_is_coherent(string find, string replace)
+    {
+        FormsIntermediateRead read = Read(Mutate(find, replace));
+
+        Assert.Null(read.Modules);
+        Assert.Contains("element 1 of that qualified name under", read.Error!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_duplicated_source_fact_identity_is_refused()
+    {
+        FormsIntermediateRead read = Read(Mutate(
+            "\"id\": \"{http://xmlns.oracle.com/Forms}FormModule[1]/{http://xmlns.oracle.com/Forms}Block[1]/{http://xmlns.oracle.com/Forms}Item[1]\"",
+            "\"id\": \"{http://xmlns.oracle.com/Forms}FormModule[1]/{http://xmlns.oracle.com/Forms}Block[1]\""));
+
+        Assert.Null(read.Modules);
+        Assert.Contains("more than one source fact", read.Error!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A duplicate key shows one value to a reviewer reading the document and is read as another, so a
+    /// tampered copy could carry both the fact it claims and the fact it is read with.
+    /// </summary>
+    [Fact]
+    public void A_duplicate_json_key_is_refused()
+    {
+        FormsIntermediateRead read = Read(Mutate(
+            "\"declaredName\": \"ACCOUNT_ID\"",
+            "\"declaredName\": \"ACCOUNT_ID\", \"declaredName\": \"SOMETHING_ELSE\""));
+
+        Assert.Null(read.Modules);
+        Assert.Contains("more than once in one object", read.Error!, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("1")]
+    [InlineData("2")]
+    public void A_superseded_schema_version_is_refused_with_reimport_guidance(string superseded)
+    {
+        FormsIntermediateRead read = Read(Mutate("\"schemaVersion\": \"3\"", $"\"schemaVersion\": \"{superseded}\""));
+
+        Assert.Null(read.Modules);
+        Assert.Contains($"schema version '{superseded}'", read.Error!, StringComparison.Ordinal);
         Assert.Contains("Re-import source to regenerate this format.", read.Error!, StringComparison.Ordinal);
     }
 
