@@ -11,6 +11,7 @@ from typing import Any
 
 
 REQUIRED_JOBS = (
+    "Native source worker contract",
     "build-and-test",
     "Container image builds",
     "Guided UI browser checks",

@@ -17,6 +17,7 @@ public enum SourcePrerequisite
     OracleClientConnectivity,
     OperatorSuppliedExport,
     WorkerHostArchitecture,
+    SourceWorkerExecutable,
 }
 
 public sealed record SourceExpectedVersions(string Forms, string Database);

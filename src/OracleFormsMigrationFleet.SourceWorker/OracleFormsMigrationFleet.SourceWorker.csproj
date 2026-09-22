@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RuntimeIdentifiers>win-x86;win-x64</RuntimeIdentifiers>
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <PlatformTarget Condition="'$(RuntimeIdentifier)' == 'win-x86'">x86</PlatformTarget>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>OracleFormsMigrationFleet.SourceWorker</AssemblyName>
+    <RootNamespace>OracleFormsMigrationFleet.SourceWorker</RootNamespace>
+  </PropertyGroup>
+</Project>

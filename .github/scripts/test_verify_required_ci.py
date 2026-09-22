@@ -13,6 +13,12 @@ from typing import Any
 REPOSITORY = "rxt64/oracle-forms-migration-fleet"
 SHA = "0123456789abcdef0123456789abcdef01234567"
 VERIFIER = Path(__file__).with_name("verify_required_ci.py")
+REQUIRED_JOBS = (
+    "Native source worker contract",
+    "build-and-test",
+    "Container image builds",
+    "Guided UI browser checks",
+)
 
 
 def run_evidence(run: dict[str, Any], jobs: dict[str, Any], mode: str = "automatic") -> int:
@@ -45,6 +51,7 @@ def passing_run() -> dict[str, Any]:
 def passing_jobs() -> dict[str, Any]:
     return {
         "jobs": [
+            {"name": "Native source worker contract", "status": "completed", "conclusion": "success"},
             {"name": "build-and-test", "status": "completed", "conclusion": "success"},
             {"name": "Container image builds", "status": "completed", "conclusion": "success"},
             {"name": "Guided UI browser checks", "status": "completed", "conclusion": "success"},
@@ -61,6 +68,10 @@ def main() -> None:
     run = passing_run()
     jobs = passing_jobs()
     assert run_evidence(run, jobs) == 0
+
+    for required in REQUIRED_JOBS:
+        missing = {"jobs": [job for job in passing_jobs()["jobs"] if job["name"] != required]}
+        expect_failure(run, missing)
 
     manual = {**run, "status": "completed", "conclusion": "success"}
     assert run_evidence(manual, jobs, "manual") == 0
