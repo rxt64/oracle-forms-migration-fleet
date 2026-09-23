@@ -324,6 +324,61 @@ public sealed class EntryRuntimeVerificationTests : IDisposable
         });
     }
 
+    /// <summary>
+    /// The worker checks the source snapshot once, at startup, and a run then spends minutes normalizing,
+    /// generating, and migrating before anything is read from the target. A declared type edited inside
+    /// that window used to reach the verifier: the intermediate representation and the target mapping are
+    /// pinned by digest, but every other retained SQL file was re-opened and re-parsed on trust, so the
+    /// shape the server expected of the target came from the edited declaration while the evidence it
+    /// would admit went on naming the approved snapshot. The claim is refused instead, before the
+    /// verifier is handed a single expectation, so no customer database is opened at all.
+    /// </summary>
+    [Fact]
+    public async Task A_declared_type_edited_after_the_worker_checked_the_snapshot_reads_no_database()
+    {
+        Harness harness = await HarnessAsync();
+        StubVerifier verifier = harness.Verifier();
+
+        await harness.MutateDeclaredSqlTypeAsync();
+
+        PhaseExecutionResult result = await harness.VerifyAsync(verifier);
+
+        Assert.False(result.Succeeded);
+        Assert.Null(verifier.Seen);
+        Assert.Contains("no longer the snapshot it was authorized against", result.FailureReason!, StringComparison.Ordinal);
+
+        // No record to record from, and so no property carries anything that was read.
+        Assert.False(File.Exists(harness.Absolute(VerificationPath)));
+        Assert.All(await harness.EntriesAsync(), entry => Assert.Empty(entry.TestRefs));
+    }
+
+    /// <summary>
+    /// The same edit made after the read and before the write. The server rebuilds the plan a record is
+    /// measured against from the retained source, so an edited declaration would otherwise decide what
+    /// the record had to account for — and whichever way that comparison fell, the result would be
+    /// entered against the approved snapshot's decisions. It refuses on the source rather than on the
+    /// plan, and nothing is written.
+    /// </summary>
+    [Fact]
+    public async Task A_declared_type_edited_between_the_read_and_the_write_records_nothing()
+    {
+        Harness harness = await HarnessAsync();
+        PhaseExecutionResult result = await harness.VerifyAsync(harness.Verifier());
+        Assert.True(result.Succeeded, result.FailureReason);
+
+        await harness.MutateDeclaredSqlTypeAsync();
+
+        PlatformResult<DispositionLedgerVerification> recorded = await harness.RecordVerificationAsync();
+
+        Assert.False(recorded.Succeeded);
+        Assert.Equal(409, recorded.Status);
+        Assert.Contains("no longer the snapshot it was authorized against", recorded.Error!, StringComparison.Ordinal);
+
+        IReadOnlyList<DispositionLedgerEntry> entries = await harness.EntriesAsync();
+        Assert.All(entries, entry => Assert.Empty(entry.TestRefs));
+        Assert.DoesNotContain(entries, entry => entry.Verification == DispositionVerificationStatus.Passed);
+    }
+
     [Fact]
     public async Task A_case_that_executed_and_passed_makes_exactly_its_own_property_verified()
     {
@@ -1049,6 +1104,17 @@ public sealed class EntryRuntimeVerificationTests : IDisposable
 
         public StubVerifier Verifier(bool failEvery = false) => new(ApprovedTarget, failEvery);
 
+        /// <summary>
+        /// Rewrites one declared column type in this run's retained source, leaving the file count and
+        /// every other byte alone. It is the smallest edit that changes what the target should hold for a
+        /// property the operator decided to carry across.
+        /// </summary>
+        public Task MutateDeclaredSqlTypeAsync() =>
+            File.WriteAllTextAsync(
+                Absolute($"{SourceRoot}/db/schema.sql"),
+                DotNetPilotFixtures.MeridianSchema.Replace(
+                    "ORD_NO       NUMBER(10)", "ORD_NO       VARCHAR2(10)", StringComparison.Ordinal));
+
         public Task<IReadOnlyList<DispositionLedgerEntry>> EntriesAsync() =>
             Store.DispositionLedgerEntriesAsync(Tenant, LedgerId, CancellationToken.None);
 
@@ -1236,7 +1302,12 @@ public sealed class EntryRuntimeVerificationTests : IDisposable
             declared.EndpointHost, declared.DatabaseName, declared.SchemaName, declared.ExecutionIdentity);
 
         DispositionLedgerService ledgers = new(store, platform, runs, workspaces);
-        string snapshot = new('4', 64);
+
+        // The digest the workbench itself computes over these bytes, not a literal. A run authorized
+        // against a made-up snapshot could never be checked back against the source it read, which is the
+        // property the source-drift cases below exercise.
+        string snapshot = workspaces.DurableSnapshotHash(workspaceId, SourceRoot)!;
+        Assert.Equal(64, snapshot.Length);
 
         byte[] ir = await File.ReadAllBytesAsync(
             Path.Combine(workspaceRoot, IrPath.Replace('/', Path.DirectorySeparatorChar)));

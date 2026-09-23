@@ -25,9 +25,10 @@ namespace OracleFormsMigrationFleet.Tests;
 /// build that no longer existed. A test that a comment can satisfy is a test a comment can also break, and
 /// worse, one that keeps passing after the step it was protecting is gone.
 ///
-/// Two tests at the bottom go further and execute the workflow's own code against hostile input, because
-/// the properties they cover — an expander that refuses a traversing entry, a container that cannot reach
-/// the runner — are claims about behaviour rather than about shape.
+/// Three tests at the bottom go further and execute the workflow's own code against hostile input, because
+/// the properties they cover — an expander that refuses a traversing entry, a push that notices the
+/// approval ran out while the image was loading, a container that cannot reach the runner — are claims
+/// about behaviour rather than about shape.
 /// </summary>
 public sealed class GeneratedTargetWorkflowTests
 {
@@ -922,6 +923,25 @@ public sealed class GeneratedTargetWorkflowTests
             StepIndex("publish", "Load, tag, and push"),
             "The approval must be re-checked before the registry push.");
 
+        // And once more inside the push step itself. That step waits twice before it pushes — on the load
+        // of the archive and on the registry sign-in — and a separate step cannot observe an approval that
+        // lapses during either. The check therefore sits after both waits and immediately before the push.
+        IReadOnlyList<string> push = Commands("publish", "Load, tag, and push");
+        int loadAt = LineOf(push, "docker load");
+        int acrLoginAt = LineOf(push, "az acr login");
+        int pushExpiryAt = LineOf(push, "date -u -d \"$APPROVAL_EXPIRES_UTC\"");
+        int pushAt = LineOf(push, "docker push");
+        Assert.True(pushExpiryAt >= 0, "The push step does not re-read the approval expiry.");
+        Assert.True(pushExpiryAt > loadAt, "The approval must be re-read after the archive is loaded.");
+        Assert.True(pushExpiryAt > acrLoginAt, "The approval must be re-read after the registry sign-in.");
+        Assert.True(pushExpiryAt < pushAt, "The approval must be re-read before the image is pushed.");
+
+        // Nothing credentialed or remote may sit between the reading and the push it guards.
+        foreach (string line in push.Skip(pushExpiryAt).Take(pushAt - pushExpiryAt))
+        {
+            Assert.DoesNotContain("az ", line, StringComparison.Ordinal);
+        }
+
         // And again before the only step that changes a customer-facing resource, inside that step so no
         // later edit can reorder a separate check away from what it guards.
         IReadOnlyList<string> deploy = Commands("publish", "Deploy the revision");
@@ -1144,9 +1164,6 @@ public sealed class GeneratedTargetWorkflowTests
                 ("absolute", "Refused absolute or windows-rooted entry",
                     entry => entry("/etc/cron.d/owned", "* * * * * root id")),
 
-                // Python's zipfile turns backslashes into separators as it reads the central directory,
-                // so a windows-rooted name arrives here already normalized and is caught by the traversal
-                // rule rather than by the backslash one. Refused either way; the message says which rule.
                 ("windows-rooted", "Refused traversal entry",
                     entry => entry("..\\..\\Dockerfile", "FROM scratch")),
             ];
@@ -1157,7 +1174,10 @@ public sealed class GeneratedTargetWorkflowTests
                 (int exit, string error) = RunPython(python, script, Bundle(root, name + ".zip", build), destination);
 
                 Assert.True(exit != 0, $"The expander accepted a '{name}' entry.");
-                Assert.Contains(refusal, error, StringComparison.Ordinal);
+                Assert.True(
+                    error.Contains(refusal, StringComparison.Ordinal) ||
+                    (name == "windows-rooted" && error.Contains("Refused absolute or windows-rooted entry", StringComparison.Ordinal)),
+                    $"The expander did not report the expected path refusal for '{name}': {error}");
                 Assert.Empty(Directory.GetFiles(destination, "*", SearchOption.AllDirectories));
             }
 
@@ -1180,6 +1200,149 @@ public sealed class GeneratedTargetWorkflowTests
             Directory.Delete(root, recursive: true);
         }
     }
+
+    /// <summary>
+    /// Adversarial, and executed: the push step is lifted out of the workflow and run against a clock that
+    /// runs out while the image is loading.
+    ///
+    /// This is the window a step-ordering assertion cannot see. The approval is checked in the step before
+    /// this one, and then the step waits — on <c>docker load</c> of a multi-gigabyte archive and on the
+    /// registry sign-in — and an approval that was live at the check can be dead by the time the push
+    /// happens. Before the in-step re-read existed, this test's first case pushed: the clock passed the
+    /// expiry at the load and the push went out anyway.
+    ///
+    /// Nothing here reaches a Docker daemon or Azure. <c>docker</c>, <c>az</c> and <c>date</c> are replaced
+    /// by shell functions that record the order they were called in and what the controlled clock said at
+    /// each call, and the load advances that clock the way a slow load would. The clock is substituted
+    /// rather than passed in, because a step that accepted an instant as an argument would be a step whose
+    /// expiry check an untrusted caller could satisfy.
+    /// </summary>
+    [Fact]
+    public void The_push_is_refused_when_the_approval_lapses_while_the_image_is_loading()
+    {
+        string step = Step("publish", "Load, tag, and push")["run"]!.Text;
+        string bash = BashExecutable();
+        string registry = s_workflow["env"]!["REGISTRY"]!.Text;
+        string image = s_workflow["env"]!["IMAGE"]!.Text;
+
+        // Live at the top of the step, expired by the time the archive has finished loading.
+        (int exit, string output, string calls, string recorded) =
+            RunPushStep(bash, step, registry, image, now: 100, afterLoad: 102, expires: 101);
+
+        Assert.True(exit != 0, $"The step pushed an image after the approval expired:\n{output}\n{calls}");
+        Assert.Contains("Nothing was pushed.", output, StringComparison.Ordinal);
+        Assert.DoesNotContain("PUSH_CALLED", output, StringComparison.Ordinal);
+
+        // The refusal is downstream of both waits, not a check that simply ran early: the load and the
+        // registry sign-in are recorded, the push is not, and the clock had already passed the expiry.
+        Assert.Contains("docker load @100", calls, StringComparison.Ordinal);
+        Assert.Contains("az acr login @102", calls, StringComparison.Ordinal);
+        Assert.Contains("docker tag @102", calls, StringComparison.Ordinal);
+        Assert.DoesNotContain("docker push", calls, StringComparison.Ordinal);
+        Assert.DoesNotContain("IMAGE_DIGEST=", recorded, StringComparison.Ordinal);
+
+        // A refusal that refuses everything is not a guard: the same step, with an approval that outlives
+        // the load, pushes and records the digest the registry returned.
+        (int liveExit, string liveOutput, string liveCalls, string liveRecorded) =
+            RunPushStep(bash, step, registry, image, now: 100, afterLoad: 101, expires: 500);
+
+        Assert.True(liveExit == 0, $"The step refused a live approval:\n{liveOutput}\n{liveCalls}");
+        Assert.Contains("docker push @101", liveCalls, StringComparison.Ordinal);
+        Assert.Contains("PUSH_CALLED", liveOutput, StringComparison.Ordinal);
+        Assert.Contains($"IMAGE_DIGEST=sha256:{FakeDigest}", liveRecorded, StringComparison.Ordinal);
+        Assert.Contains(
+            $"IMAGE_REF={registry}.azurecr.io/{image}@sha256:{FakeDigest}",
+            liveRecorded,
+            StringComparison.Ordinal);
+
+        Assert.True(
+            liveCalls.IndexOf("az acr login", StringComparison.Ordinal) <
+            liveCalls.IndexOf("docker push", StringComparison.Ordinal),
+            "The push must follow the registry sign-in it depends on.");
+    }
+
+    private const string FakeDigest = "1f4e9c0a2b6d8e3f5a7c9b1d3e5f7a9c1b3d5e7f9a1c3e5b7d9f1a3c5e7b9d1f";
+
+    /// <summary>
+    /// Runs the extracted push step under stand-in commands and a clock that only moves when the load
+    /// does. Returns what the step printed, the calls it made with the instant of each, and what it wrote
+    /// to <c>$GITHUB_ENV</c>.
+    /// </summary>
+    private static (int Exit, string Output, string Calls, string Recorded) RunPushStep(
+        string bash, string step, string registry, string image, int now, int afterLoad, int expires)
+    {
+        const string expiresUtc = "2026-09-23T12:00:00Z";
+        string root = Path.Combine(Path.GetTempPath(), "ofm-push-" + Guid.NewGuid().ToString("N")[..12]);
+        Directory.CreateDirectory(root);
+        try
+        {
+            File.WriteAllText(
+                Path.Combine(root, "step.sh"),
+                step.Replace("\r\n", "\n", StringComparison.Ordinal));
+
+            File.WriteAllText(
+                Path.Combine(root, "harness.sh"),
+                string.Join(
+                    '\n',
+                    "set -uo pipefail",
+                    "export GITHUB_ENV=\"$PWD/github-env\"",
+                    $"export REGISTRY='{registry}'",
+                    $"export IMAGE='{image}'",
+                    "export IMAGE_TAG='op-0123456789ab'",
+                    "export IMAGE_REFERENCE='generated-target:op-0123456789ab'",
+                    $"export APPROVAL_EXPIRES_UTC='{expiresUtc}'",
+                    "FAKE_CLOCK=\"$PWD/clock\"",
+                    "FAKE_CALLS=\"$PWD/calls.log\"",
+                    $"FAKE_DIGEST='sha256:{FakeDigest}'",
+                    $"printf '%s' '{now}' > \"$FAKE_CLOCK\"",
+                    ": > \"$FAKE_CALLS\"",
+                    ": > \"$GITHUB_ENV\"",
+                    "date() {",
+                    "  case \"$*\" in",
+                    "    '-u +%s') cat \"$FAKE_CLOCK\" ;;",
+                    $"    \"-u -d {expiresUtc} +%s\") printf '%s' '{expires}' ;;",
+                    "    *) echo \"unexpected date invocation: $*\" >&2; return 97 ;;",
+                    "  esac",
+                    "}",
+                    "docker() {",
+                    "  printf 'docker %s @%s\\n' \"$1\" \"$(cat \"$FAKE_CLOCK\")\" >> \"$FAKE_CALLS\"",
+                    "  case \"$1\" in",
+
+                    // The archive takes time to load, which is the whole point: the clock the step reads
+                    // after it is not the clock the step before it read.
+                    $"    load) printf '%s' '{afterLoad}' > \"$FAKE_CLOCK\" ;;",
+                    "    image) echo 'loaded sha256:0000' ;;",
+                    "    tag) : ;;",
+                    "    push) echo 'PUSH_CALLED'; echo \"pushed digest: $FAKE_DIGEST size: 1234\" ;;",
+                    "    *) echo \"unexpected docker invocation: $*\" >&2; return 98 ;;",
+                    "  esac",
+                    "}",
+                    "az() {",
+                    "  printf 'az %s %s @%s\\n' \"$1\" \"$2\" \"$(cat \"$FAKE_CLOCK\")\" >> \"$FAKE_CALLS\"",
+                    "  case \"$1 $2\" in",
+                    "    'acr login') : ;;",
+                    "    'acr manifest') printf '%s\\n' \"$FAKE_DIGEST\" ;;",
+                    "    *) echo \"unexpected az invocation: $*\" >&2; return 99 ;;",
+                    "  esac",
+                    "}",
+                    ". ./step.sh",
+                    string.Empty));
+
+            (int exit, string output) = Run(bash, ["harness.sh"], root);
+
+            return (
+                exit,
+                output,
+                ReadOrEmpty(Path.Combine(root, "calls.log")),
+                ReadOrEmpty(Path.Combine(root, "github-env")));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static string ReadOrEmpty(string path) => File.Exists(path) ? File.ReadAllText(path) : string.Empty;
 
     /// <summary>
     /// Adversarial, and executed only where a container runtime exists: a <c>RUN</c> that behaves like a
@@ -1325,6 +1488,37 @@ public sealed class GeneratedTargetWorkflowTests
         throw new InvalidOperationException(
             "No python3 was found. The staging step of generated-target.yml is a Python program, and this " +
             "test runs it against hostile bundles rather than restating what it is supposed to do.");
+    }
+
+    /// <summary>
+    /// Bash is a prerequisite of the push-step test for the same reason: the step under test is a bash
+    /// program, and it is executed rather than described. Git for Windows ships one at a known path.
+    /// </summary>
+    private static string BashExecutable()
+    {
+        foreach (string candidate in new[]
+        {
+            "bash",
+            @"C:\Program Files\Git\bin\bash.exe",
+            @"C:\Program Files\Git\usr\bin\bash.exe",
+        })
+        {
+            try
+            {
+                if (Run(candidate, ["--version"], Path.GetTempPath()).Exit == 0)
+                {
+                    return candidate;
+                }
+            }
+            catch (System.ComponentModel.Win32Exception)
+            {
+                // Not on PATH under this name.
+            }
+        }
+
+        throw new InvalidOperationException(
+            "No bash was found. The push step of generated-target.yml is a bash program, and this test " +
+            "runs it against a clock that expires mid-step rather than restating what it is supposed to do.");
     }
 
     /// <summary>

@@ -43,6 +43,18 @@ public sealed record SourceWorkspaceSummary(
 /// </summary>
 public sealed record SourceWorkspaceFacts(SourceWorkspaceSummary Summary, string SnapshotHash);
 
+/// <summary>One source file exactly as it was hashed, kept from the pass that produced a snapshot digest.</summary>
+public sealed record TrustedSourceFile(string RelativePath, byte[] Content);
+
+/// <summary>
+/// What a source folder currently hashes to, and the bytes behind that digest for the files a caller kept.
+///
+/// <paramref name="SnapshotHash"/> is computed by the same calculator every authorization was issued
+/// against, so a caller establishes that the bytes it holds are the approved ones by comparing digests and
+/// never by re-reading the paths.
+/// </summary>
+public sealed record TrustedSourceRead(string SnapshotHash, IReadOnlyList<TrustedSourceFile> Files);
+
 /// <summary>
 /// Acquires a read-only copy of customer source into a per-session sandbox.
 ///
@@ -161,7 +173,10 @@ public sealed class SourceWorkspaceService : IDisposable
             : null;
     }
 
-    internal string? DurableSnapshotHash(string workspaceId, string sourceRoot)
+    internal string? DurableSnapshotHash(string workspaceId, string sourceRoot) =>
+        DurableSourcePath(workspaceId, sourceRoot) is { } selected ? SnapshotHash(selected) : null;
+
+    private string? DurableSourcePath(string workspaceId, string sourceRoot)
     {
         string? root = ResolveDurableRoot(workspaceId);
         if (root is null || WorkspacePath.Validate(sourceRoot, "Source folder") is not null)
@@ -172,8 +187,35 @@ public sealed class SourceWorkspaceService : IDisposable
         string selected = Path.GetFullPath(Path.Combine(root, normalized.Replace('/', Path.DirectorySeparatorChar)));
         string prefix = root.EndsWith(Path.DirectorySeparatorChar) ? root : root + Path.DirectorySeparatorChar;
         return selected.StartsWith(prefix, StringComparison.Ordinal) && Directory.Exists(selected)
-            ? SnapshotHash(selected)
+            ? selected
             : null;
+    }
+
+    /// <summary>
+    /// Re-reads a run's source folder and reports the snapshot it currently is, together with the exact
+    /// bytes of the files the caller asked to keep.
+    ///
+    /// A caller comparing the returned digest with the one its run was authorized against learns whether
+    /// the source is still the source that was approved. Keeping the bytes from the same pass is the point
+    /// of the method: re-opening a file after checking a digest is a second read of a path that may no
+    /// longer hold what the first one hashed, so what gets parsed is the buffer that went into the digest
+    /// and nothing else. The algorithm is the one every other snapshot on this server is computed with, so
+    /// no caller can end up comparing against a digest of its own invention.
+    /// </summary>
+    public TrustedSourceRead? ReadTrustedSource(
+        string owner,
+        string workspaceId,
+        string sourceRoot,
+        Func<string, bool> retain,
+        long maxRetainedBytes)
+    {
+        ArgumentNullException.ThrowIfNull(retain);
+        ArgumentOutOfRangeException.ThrowIfNegative(maxRetainedBytes);
+
+        string? selected = OwnedSourcePath(owner, workspaceId, sourceRoot)
+            ?? DurableSourcePath(workspaceId, sourceRoot);
+
+        return selected is null ? null : SnapshotRead(selected, retain, maxRetainedBytes);
     }
 
     internal IDisposable Retain(string workspaceId)
@@ -217,19 +259,8 @@ public sealed class SourceWorkspaceService : IDisposable
 
     private ScopedSource? Scope(string owner, string workspaceId, string sourceRoot)
     {
-        if (!_workspaces.TryGetValue(workspaceId, out WorkspaceRecord? record) ||
-            !string.Equals(record.Owner, owner, StringComparison.Ordinal) ||
-            WorkspacePath.Validate(sourceRoot, "Source folder") is not null)
-        {
-            return null;
-        }
-
-        string normalized = WorkspacePath.Normalize(sourceRoot);
-        string root = Path.GetFullPath(record.Path);
-        string selected = Path.GetFullPath(Path.Combine(root, normalized.Replace('/', Path.DirectorySeparatorChar)));
-        string prefix = root.EndsWith(Path.DirectorySeparatorChar) ? root : root + Path.DirectorySeparatorChar;
-        if ((!string.Equals(selected, root, StringComparison.Ordinal) && !selected.StartsWith(prefix, StringComparison.Ordinal)) ||
-            !Directory.Exists(selected))
+        if (OwnedSourcePath(owner, workspaceId, sourceRoot) is not { } selected ||
+            !_workspaces.TryGetValue(workspaceId, out WorkspaceRecord? record))
         {
             return null;
         }
@@ -241,7 +272,7 @@ public sealed class SourceWorkspaceService : IDisposable
             {
                 FileCount = inventory.FileCount,
                 ByteCount = inventory.ByteCount,
-                SourceRoot = normalized,
+                SourceRoot = WorkspacePath.Normalize(sourceRoot),
                 Artifacts = inventory.Artifacts,
             }, selected);
         }
@@ -249,6 +280,27 @@ public sealed class SourceWorkspaceService : IDisposable
         {
             return null;
         }
+    }
+
+    /// <summary>The source folder of a workspace the caller owns, or null. One containment rule, used by both readers.</summary>
+    private string? OwnedSourcePath(string owner, string workspaceId, string sourceRoot)
+    {
+        if (!_workspaces.TryGetValue(workspaceId, out WorkspaceRecord? record) ||
+            !string.Equals(record.Owner, owner, StringComparison.Ordinal) ||
+            WorkspacePath.Validate(sourceRoot, "Source folder") is not null)
+        {
+            return null;
+        }
+
+        string normalized = WorkspacePath.Normalize(sourceRoot);
+        string root = Path.GetFullPath(record.Path);
+        string selected = Path.GetFullPath(Path.Combine(root, normalized.Replace('/', Path.DirectorySeparatorChar)));
+        string prefix = root.EndsWith(Path.DirectorySeparatorChar) ? root : root + Path.DirectorySeparatorChar;
+
+        return (string.Equals(selected, root, StringComparison.Ordinal) ||
+            selected.StartsWith(prefix, StringComparison.Ordinal)) && Directory.Exists(selected)
+                ? selected
+                : null;
     }
 
     /// <summary>
@@ -720,7 +772,14 @@ public sealed class SourceWorkspaceService : IDisposable
     /// Enumeration stops at the same intake limits acquisition used, and a tree that exceeds them hashes
     /// to a value that cannot match any bounded read, so an oversized source can never be authorized.
     /// </summary>
-    private static string SnapshotHash(string path)
+    private static string SnapshotHash(string path) => SnapshotRead(path, static _ => false, 0).SnapshotHash;
+
+    /// <summary>
+    /// The one pass that computes a snapshot digest, optionally keeping the bytes of the files
+    /// <paramref name="retain"/> selects. A kept file is hashed out of the buffer that is handed back, so a
+    /// caller that trusts the digest is holding the bytes the digest was taken over.
+    /// </summary>
+    private static TrustedSourceRead SnapshotRead(string path, Func<string, bool> retain, long maxRetainedBytes)
     {
         string prefix = Path.GetFullPath(path) + Path.DirectorySeparatorChar;
         string excluded = WorkbenchExecution.OutputRoot + "/";
@@ -738,12 +797,12 @@ public sealed class SourceWorkspaceService : IDisposable
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
-            return UnhashableSource;
+            return s_unreadableSource;
         }
 
         if (relativePaths.Count > MaxFiles)
         {
-            return UnhashableSource;
+            return s_unreadableSource;
         }
 
         relativePaths.Sort(StringComparer.Ordinal);
@@ -751,7 +810,9 @@ public sealed class SourceWorkspaceService : IDisposable
         using IncrementalHash digest = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         byte[] buffer = new byte[64 * 1024];
         Span<byte> length = stackalloc byte[sizeof(long)];
+        List<TrustedSourceFile> kept = [];
         long total = 0;
+        long retained = 0;
 
         foreach (string relative in relativePaths)
         {
@@ -759,15 +820,33 @@ public sealed class SourceWorkspaceService : IDisposable
             total += info.Length;
             if (total > MaxBytes)
             {
-                return UnhashableSource;
+                return s_unreadableSource;
             }
 
             digest.AppendData(Encoding.UTF8.GetBytes(relative));
             BinaryPrimitives.WriteInt64BigEndian(length, info.Length);
             digest.AppendData(length);
 
+            bool keep = retain(relative);
+            if (keep)
+            {
+                retained += info.Length;
+                if (retained > maxRetainedBytes)
+                {
+                    return s_unreadableSource;
+                }
+            }
+
             try
             {
+                if (keep)
+                {
+                    byte[] content = File.ReadAllBytes(info.FullName);
+                    digest.AppendData(content);
+                    kept.Add(new TrustedSourceFile(relative, content));
+                    continue;
+                }
+
                 using FileStream stream = info.OpenRead();
                 int read;
                 while ((read = stream.Read(buffer, 0, buffer.Length)) > 0)
@@ -777,11 +856,11 @@ public sealed class SourceWorkspaceService : IDisposable
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
             {
-                return UnhashableSource;
+                return s_unreadableSource;
             }
         }
 
-        return Convert.ToHexString(digest.GetHashAndReset()).ToLowerInvariant();
+        return new TrustedSourceRead(Convert.ToHexString(digest.GetHashAndReset()).ToLowerInvariant(), kept);
     }
 
     /// <summary>
@@ -789,6 +868,9 @@ public sealed class SourceWorkspaceService : IDisposable
     /// it matches nothing an authorization could ever have been issued against.
     /// </summary>
     private const string UnhashableSource = "unhashable";
+
+    /// <summary>A pass that could not complete. It carries no file, so nothing is parsed out of a refused read.</summary>
+    private static readonly TrustedSourceRead s_unreadableSource = new(UnhashableSource, []);
 
     private static void MarkReadOnly(string path)
     {

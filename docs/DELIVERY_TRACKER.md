@@ -49,6 +49,19 @@ required in CI, not credited from its locally environment-gated return. Recovery
 refuses ambiguous dispatch rather than automatically risking a duplicate. Result schema v3 binds the
 operation/source/plan/target/artifact and declared readiness. None of this constitutes a live builder run.
 
+The parent invoked Astra again on `2e6386e8223d70db6510c255421ff016787fdf07`. It ran 298 scoped
+checks and retained HOLD for two defects: SQL expectations were not pinned to the approved source
+snapshot, and expiry was checked before image loading rather than immediately before registry push.
+Repairs now reuse the existing source snapshot algorithm while retaining the exact hashed SQL/mapping
+buffers for parsing, and check expiry directly before `docker push`. Post-start SQL substitution and
+expiry-during-load regressions pass. The parent then ran the full solution: 1954/1954 passed.
+
+CI35933261950 for that earlier candidate passed its mandatory Docker containment execution and evidence
+upload. Its later full-suite step failed only the hostile-ZIP test's platform-specific refusal-message
+expectation; the guard refused on both platforms. The repaired assertion accepts either explicit unsafe
+path reason for that backslash case while retaining nonzero exit, empty output, and the benign control.
+The exact repaired SHA still requires fresh runner CI and Astra review; neither prior HOLD is waived.
+
 ## Current Operational Evidence
 
 - Meridian is installed in the existing Oracle source container: 37 verifier assertions passed,

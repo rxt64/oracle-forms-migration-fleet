@@ -224,6 +224,9 @@ public sealed class DispositionLedgerService(
     /// <summary>Ceiling on one retained source file read while re-deriving a verification's plan.</summary>
     private const long MaxSourceTextBytes = 8L * 1024 * 1024;
 
+    /// <summary>Ceiling on the source bytes this server holds in memory while re-deriving a plan from them.</summary>
+    private const long MaxRetainedSourceBytes = 64L * 1024 * 1024;
+
     private static readonly JsonSerializerOptions s_coverageJson = new()
     {
         Converters = { new JsonStringEnumConverter() },
@@ -1167,6 +1170,15 @@ public sealed class DispositionLedgerService(
                 "That run read a different source snapshot, so nothing it generated is evidence about this ledger's source.");
         }
 
+        // Both hashes above are recorded values. The bytes they name are on disk and were last checked when
+        // the worker started, so they are re-hashed here before a claim is granted: a source edited since
+        // then would otherwise have the verifier derive what the target should hold from one source and the
+        // ledger admit the answer as evidence about another.
+        if (ReadTrustedSource(run, ledger, retainParsedFiles: false) is { Succeeded: false } drifted)
+        {
+            return EntryVerificationClaimDecision.Denied(drifted.Error!);
+        }
+
         if (await StaleReasonAsync(ledger, cancellationToken).ConfigureAwait(false) is { } stale)
         {
             return EntryVerificationClaimDecision.Denied(stale);
@@ -1491,9 +1503,21 @@ public sealed class DispositionLedgerService(
         // ledger was projected from, the target mapping the generation was produced against, and the
         // decisions standing over the output just digested — and the record is measured against that
         // rather than against itself.
+        //
+        // The source those bytes come from is re-established as the authorized snapshot first, and the
+        // same pass hands back the buffers the derivation parses, so the check and the read are one read
+        // rather than two of a path that can move in between.
+        PlatformResult<IReadOnlyDictionary<string, byte[]>> trusted =
+            ReadTrustedSource(run, ledger, retainParsedFiles: true);
+        if (!trusted.Succeeded)
+        {
+            return Refuse(trusted.Status, trusted.Error!);
+        }
+
         PlatformResult<EntryVerificationCoverage.VerificationPlan> expected = await ExpectedPlanAsync(
             workspaceRoot,
             WorkspacePath.Normalize(run.Request.SourceRoot),
+            trusted.Value!,
             ledger,
             intermediate,
             generated.Value!.MappingManifestSha256,
@@ -1698,16 +1722,19 @@ public sealed class DispositionLedgerService(
     /// The cases this ledger's retained source requires of a verification, rebuilt from bytes this server
     /// re-hashes rather than from anything a run reported about them.
     ///
-    /// Both inputs are pinned. The normalized representation must hash to the one the ledger was
-    /// projected from, and the target mapping must hash to the one the generation these results speak
-    /// about was produced against, so neither can be exchanged after the fact for one that derives fewer
-    /// probes. The planner is the same pure builder the verification phase used, so a column the source
-    /// resolves no type for is expected to carry no shape probe here either — an unresolvable shape is a
-    /// stated gap, not a missing case.
+    /// Every input is pinned. The normalized representation must hash to the one the ledger was projected
+    /// from, the target mapping must hash to the one the generation these results speak about was produced
+    /// against, and the source those files and every parsed schema come from must hash to the snapshot the
+    /// run was authorized against — which is why the caller supplies the bytes rather than a path: a
+    /// declared column type edited between the check and the parse would otherwise decide what the target
+    /// is expected to hold. The planner is the same pure builder the verification phase used, so a column
+    /// the source resolves no type for is expected to carry no shape probe here either — an unresolvable
+    /// shape is a stated gap, not a missing case.
     /// </summary>
     private static async Task<PlatformResult<EntryVerificationCoverage.VerificationPlan>> ExpectedPlanAsync(
         string workspaceRoot,
         string sourceRoot,
+        IReadOnlyDictionary<string, byte[]> trustedSource,
         DispositionLedger ledger,
         MigrationRunArtifact intermediate,
         string mappingManifestSha256,
@@ -1758,49 +1785,44 @@ public sealed class DispositionLedgerService(
         }
 
         string manifestPath = $"{sourceRoot}/{TargetMappingReader.ConventionalPath}";
-        if (!TryResolveWithin(workspaceRoot, sourceRoot, manifestPath, out string manifestAbsolute))
+        if (!trustedSource.TryGetValue(TargetMappingReader.ConventionalPath, out byte[]? manifestBytes))
         {
             return Refuse(410,
-                $"The target mapping at '{manifestPath}' is no longer readable in this run's workspace, so the cases the source " +
+                $"The target mapping at '{manifestPath}' is not part of this run's authorized source, so the cases the source " +
                 "requires could not be re-derived.");
         }
 
-        WorkspaceWriter source = new(workspaceRoot);
-        string manifestJson;
+        if (manifestBytes.Length > TargetMappingReader.MaxManifestBytes)
+        {
+            return Refuse(413, "The target mapping is larger than this server reads, so it was not read at all.");
+        }
+
+        if (!string.Equals(
+                Convert.ToHexStringLower(SHA256.HashData(manifestBytes)), mappingManifestSha256, StringComparison.OrdinalIgnoreCase))
+        {
+            return Refuse(409,
+                "The target mapping in this run's source is not the one its generation was produced against, so the cases " +
+                "the source requires could not be re-derived.");
+        }
+
+        string manifestJson = Text(manifestBytes);
         List<OracleSchema> schemas = [];
 
-        try
+        foreach (KeyValuePair<string, byte[]> candidate in trustedSource.OrderBy(file => file.Key, StringComparer.Ordinal))
         {
-            FileInfo manifestFile = new(manifestAbsolute);
-            if (manifestFile.Length > TargetMappingReader.MaxManifestBytes)
+            if (!OracleSourceFile.IsSqlText(candidate.Key))
             {
-                return Refuse(413, "The target mapping is larger than this server reads, so it was not read at all.");
+                continue;
             }
 
-            byte[] bytes = await File.ReadAllBytesAsync(manifestAbsolute, cancellationToken).ConfigureAwait(false);
-            if (!string.Equals(
-                    Convert.ToHexStringLower(SHA256.HashData(bytes)), mappingManifestSha256, StringComparison.OrdinalIgnoreCase))
+            if (candidate.Value.LongLength > MaxSourceTextBytes)
             {
-                return Refuse(409,
-                    "The target mapping in this run's source is not the one its generation was produced against, so the cases " +
-                    "the source requires could not be re-derived.");
+                return Refuse(413,
+                    $"The retained source file '{candidate.Key}' is larger than this server reads, so none of this run's source " +
+                    "was parsed: reading part of it would derive the target shape of a property from a fragment of its declaration.");
             }
 
-            manifestJson = Encoding.UTF8.GetString(bytes).TrimStart('\uFEFF');
-
-            foreach (WorkspaceFile candidate in source.EnumerateFiles(sourceRoot, MaxSourceFiles))
-            {
-                if (OracleSourceFile.IsSqlText(candidate.RelativePath))
-                {
-                    schemas.Add(OracleSchemaParser.Parse(source.ReadText(candidate.RelativePath, MaxSourceTextBytes)));
-                }
-            }
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or FormatException
-            or WorkspaceLimitExceededException or WorkspacePathException)
-        {
-            return Refuse(500,
-                "This run's retained source could not be read, so the cases it requires of a verification could not be re-derived.");
+            schemas.Add(OracleSchemaParser.Parse(Text(candidate.Value)));
         }
 
         if (schemas.Count == 0)
@@ -1830,6 +1852,8 @@ public sealed class DispositionLedgerService(
 
         static PlatformResult<EntryVerificationCoverage.VerificationPlan> Refuse(int status, string error) =>
             PlatformResult<EntryVerificationCoverage.VerificationPlan>.Fail(status, error);
+
+        static string Text(byte[] bytes) => Encoding.UTF8.GetString(bytes).TrimStart('\uFEFF');
     }
 
     private static async Task<PlatformResult<EntryVerificationCoverageRecord>> ReadEntryVerificationAsync(
@@ -2043,6 +2067,56 @@ public sealed class DispositionLedgerService(
         {
             return PlatformResult<GenerationCoverageRecord>.Fail(409, "That run's generation coverage could not be read as a coverage record.");
         }
+    }
+
+    /// <summary>
+    /// The run's source folder as the snapshot it was authorized against, read once.
+    ///
+    /// A ledger pins the normalized representation and the target mapping by digest, but everything else
+    /// under the source root was re-opened and re-parsed on trust, so a declared SQL type edited after the
+    /// worker checked the snapshot at startup silently became the shape the server expected of a
+    /// verification — while the evidence it admitted went on naming the approved snapshot. The check is
+    /// therefore taken again here, immediately before anything is derived from those bytes, using the same
+    /// calculator the authorization was issued against; and the bytes handed back are the ones that went
+    /// into the digest, so nothing is parsed out of a second read of a path that has moved since.
+    /// </summary>
+    private PlatformResult<IReadOnlyDictionary<string, byte[]>> ReadTrustedSource(
+        MigrationRunRecord run,
+        DispositionLedger ledger,
+        bool retainParsedFiles)
+    {
+        TrustedSourceRead? read = workspaces.ReadTrustedSource(
+            run.WorkspaceOwnerId,
+            run.WorkspaceId,
+            run.Request.SourceRoot,
+            retainParsedFiles
+                ? static relative => OracleSourceFile.IsSqlText(relative) ||
+                    string.Equals(relative, TargetMappingReader.ConventionalPath, StringComparison.Ordinal)
+                : static _ => false,
+            retainParsedFiles ? MaxRetainedSourceBytes : 0);
+
+        if (read is null)
+        {
+            return PlatformResult<IReadOnlyDictionary<string, byte[]>>.Fail(410,
+                "The run's source folder is no longer readable in this workspace, so the snapshot its decisions were reviewed " +
+                "against could not be re-established and nothing was derived from it.");
+        }
+
+        if (!string.Equals(read.SnapshotHash, ledger.SourceSnapshotHash, StringComparison.Ordinal))
+        {
+            return PlatformResult<IReadOnlyDictionary<string, byte[]>>.Fail(409,
+                "This run's source is no longer the snapshot it was authorized against, so what the target should hold cannot be " +
+                "derived from it and no result read against it is evidence about the source anybody reviewed. Nothing was done.");
+        }
+
+        if (read.Files.Count > MaxSourceFiles)
+        {
+            return PlatformResult<IReadOnlyDictionary<string, byte[]>>.Fail(413,
+                "This run's source holds more parsable files than this server reads, so none of them were read.");
+        }
+
+        return PlatformResult<IReadOnlyDictionary<string, byte[]>>.Ok(
+            read.Files.ToDictionary(file => file.RelativePath, file => file.Content, StringComparer.Ordinal));
     }
 
     /// <summary>Resolves a workspace-relative path the server may read, constrained to one declared root.</summary>

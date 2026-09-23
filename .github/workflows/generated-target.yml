@@ -38,11 +38,12 @@ name: Deploy generated target application
 #    revision while the new one is failing to pull.
 #  * The destination is the exact Container App the workbench's run was approved for. Its ARM identifier
 #    arrives as a dispatch input, is re-derived from this workflow's own configuration, and the two must
-#    agree. The approval's expiry is re-checked three times — before anything is built, again before the
-#    registry push, and again before the Container App is updated — each time against the binding payload
-#    `fetch` emitted as job outputs, never against anything the build produced. GAP: this workflow cannot
-#    ask the product whether the approval was revoked mid-build. It fails closed on expiry only, against
-#    the runner's own clock. See docs/DELIVERY_TRACKER.md.
+#    agree. The approval's expiry is re-checked four times — before anything is built, again before the
+#    registry push, once more in the moment between the image finishing loading and the push itself, and
+#    again before the Container App is updated — each time against the binding payload `fetch` emitted as
+#    job outputs, never against anything the build produced. GAP: this workflow cannot ask the product
+#    whether the approval was revoked mid-build. It fails closed on expiry only, against the runner's own
+#    clock. See docs/DELIVERY_TRACKER.md.
 
 
 run-name: generated-target ${{ inputs.operation_id }}
@@ -667,6 +668,22 @@ jobs:
           az acr login --name "$REGISTRY"
           REMOTE="$REGISTRY.azurecr.io/$IMAGE:$IMAGE_TAG"
           docker tag "$IMAGE_REFERENCE" "$REMOTE"
+
+          # The previous step proved this expiry is the one `fetch` bound into binding_digest, and nothing
+          # since then could have altered it: APPROVAL_EXPIRES_UTC is job-level and comes from
+          # needs.fetch.outputs, so it is the same immutable value here and does not need re-deriving.
+          # What has changed is the clock. Loading a multi-gigabyte archive and authenticating to the
+          # registry are both waits, and an approval that was live when the step began can lapse across
+          # them, so it is re-read here rather than at the top of the step. Everything above this line is
+          # local and uncredentialed — `docker load` and `docker tag` touch only this runner's own image
+          # store — and `docker push` below is the first act that leaves it. The instant is read from the
+          # runner's own clock; no step argument, input, or artifact may say what time it is.
+          if [[ "$(date -u +%s)" -ge "$(date -u -d "$APPROVAL_EXPIRES_UTC" +%s)" ]]; then
+            echo "The approval expired at $APPROVAL_EXPIRES_UTC while the image was being loaded." >&2
+            echo "Nothing was pushed." >&2
+            exit 1
+          fi
+
           docker push "$REMOTE" | tee push.log
 
           # Two independent readings of the same manifest: what the daemon says it pushed, and what the
