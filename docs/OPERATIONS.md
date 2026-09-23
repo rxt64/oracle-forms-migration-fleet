@@ -154,6 +154,94 @@ when compatible rollback succeeds or forward recovery is required. Remove any na
 confirming it belongs to the failed workflow run; never treat cleanup as evidence that release recovery
 succeeded.
 
+## Configure the generated-target builder
+
+This is the path that turns a fleet-generated application tier into a running revision. It is a separate
+trust boundary from the workbench release above: the artifact is generated from a customer's Oracle Forms
+estate, so `.github/workflows/generated-target.yml` builds it in a job that holds no Azure credential and
+publishes the resulting image tar from a job that does.
+
+**Configuration is not yet verified.** When any required keys below are absent,
+`GitHubActionsDeploymentOptions.TryRead` fails, `Program.cs` registers no gateway,
+the deployment phase refuses with `GatewayUnavailable`, and the
+workbench reports an unmet host prerequisite. That is the intended state of an unconfigured host — a
+default here would dispatch a customer's generated code somewhere nobody approved.
+
+### What the host is still missing
+
+Every listed value is a non-secret identifier or a URI. The private key itself must never appear in
+configuration, prompts, logs, or evidence artifacts.
+
+| Configuration key | What it is | How to obtain it |
+|---|---|---|
+| `TargetDeployment:GitHub:Owner` | `rxt64` | Repository owner |
+| `TargetDeployment:GitHub:Repository` | `oracle-forms-migration-fleet` | Repository name |
+| `TargetDeployment:GitHub:AppId` | Numeric App ID of a GitHub App owned by the product | Shown on the App's settings page after it is created |
+| `TargetDeployment:GitHub:InstallationId` | Numeric ID of that App's installation on this repository | Shown in the installation URL after the App is installed |
+| `TargetDeployment:GitHub:PrivateKeySecretUri` | Key Vault **secret identifier** holding the App's PEM private key | `https://<vault>.vault.azure.net/secrets/<name>` — see below |
+| `TargetDeployment:Storage:AccountUri` | Blob endpoint of the approved artifact storage account | `az deployment group show ... --query properties.outputs.artifactStorageAccountName` from `infra/dotnet-pilot` |
+| `TargetDeployment:WorkbenchCommitSha` | Full lowercase 40-character SHA of the deployed workbench | Exact SHA validated and deployed by the trusted release, not an independently moving branch tip |
+| `TargetDeployment:TargetName` | Approved Container App name | `ca-ofmfleet-dotnet-dev-<suffix>`, the `targetContainerAppName` output of `infra/dotnet-pilot/main.bicep` |
+
+`WorkflowFile`, `Ref`, `Container`, `Timeout` and `PollInterval` have safe defaults and only need setting
+to override them. `Ref` must stay `main`: the workflow refuses any other `GITHUB_REF` itself.
+
+### The App's least privilege
+
+The gateway mints an installation token and makes exactly two kinds of call:
+`POST /repos/{owner}/{repo}/actions/workflows/{file}/dispatches`, and reads of that workflow's runs. So
+the installation needs one repository permission:
+
+| Permission | Level | Why |
+|---|---|---|
+| Actions | Read and write | Write to dispatch the workflow; read to follow the run it started |
+
+Nothing else. No `contents: write`, no `packages`, no organisation permission, no webhook events, and no
+account permissions. Install it on `rxt64/oracle-forms-migration-fleet` alone — never "All repositories".
+
+### The private key
+
+Generate the key on the App's settings page, upload it to the vault provisioned by
+`infra/supporting/main.bicep`, and configure only the resulting secret identifier:
+
+```powershell
+$vault = az deployment group show -g rg-oracle-forms-migration-fleet-dev-b9f0e875 `
+  -n <supporting-deployment> --query properties.outputs.keyVaultName.value -o tsv
+az keyvault secret set --vault-name $vault --name generated-target-builder --file <downloaded>.pem `
+  --only-show-errors --query id -o tsv
+```
+
+That `id` is the value of `TargetDeployment:GitHub:PrivateKeySecretUri`. Verify that the workbench identity
+holds **Key Vault Secrets User** on the intended vault/secret; it reads the key with its managed identity when
+it needs it. Delete the downloaded `.pem` afterwards. The key never appears in configuration, in an
+environment variable, or in this file.
+
+**Do not substitute a personal access token.** There is deliberately no configuration path that accepts
+one. A deployment the product performs must be attributable to the product; a PAT would attribute a
+customer's generated code being built and deployed to whoever was signed in, and would carry that
+person's whole account scope into the builder.
+
+### External blocker
+
+Creating the App, generating its key, and installing it are all one-time actions that require a human with
+repository-admin and App-owner rights. The federated OIDC identity the CI workflows use cannot do any of
+them: it is scoped to Azure resources, has no GitHub App ownership, and `gh api user/installations`
+refuses an ordinary user token with "You must authenticate with an access token authorized to a GitHub
+App". Such a refusal does not prove an App is absent. Ask the repository/App owner to identify a suitable
+existing installation before creating another. Nothing in the product can bootstrap this identity for
+itself, and nothing should try.
+
+The builder's Azure side, by contrast, is already configured and needs no secret: the repository holds the
+non-secret variables `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` and `AZURE_SUBSCRIPTION_ID`, no repository
+secrets are required for that login, and `azure/login` federates with `id-token: write`.
+
+OIDC login alone does not establish artifact connectivity or Blob data authorization. The current
+artifact storage disables public networking and shared keys; it has no private endpoint, and the
+existing Container Apps environment has no VNet integration. Neither product upload nor runner
+download is operationally verified. Do not activate the pending SMB mount or relax storage security.
+A private-network design, workspace recovery, runner artifact access, and source connectivity must be
+approved, implemented, and validated before enabling the builder.
+
 ## Failure modes
 
 **Continuous access evaluation blocks Graph while ARM still works.** `az ad app ...` fails with

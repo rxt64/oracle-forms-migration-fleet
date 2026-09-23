@@ -174,8 +174,19 @@ public sealed class MigrationRunWorker(
         IDataMigrationGateway? gateway = services.GetService<IDataMigrationGateway>();
         if (gateway is not null)
         {
-            gateway = new AuthorizingDataMigrationGateway(gateway, authorizer, request);
-            gateway = new FencedDataMigrationGateway(gateway, store, run.RunId, fence, s_lease);
+            gateway = RunScopedGateway.Wrap(gateway, authorizer, request, store, run.RunId, fence, s_lease);
+        }
+
+        // Re-asked immediately before the approved target is opened, not once when the run was queued. A
+        // durable run can sit in the queue and can spend minutes between the migration phase and the read,
+        // so a grant revoked or expired in that window stops the connection. The fence is asked after the
+        // grant, not before it: the grant check is an awaited round trip, and a worker whose claim a newer
+        // one replaced during that round trip is not the worker that may open this target.
+        IEntryRuntimeVerificationGateway? entryVerification = services.GetService<IEntryRuntimeVerificationGateway>();
+        if (entryVerification is not null)
+        {
+            entryVerification = RunScopedGateway.Wrap(
+                entryVerification, authorizer, request, store, run.RunId, fence, s_lease);
         }
 
         // The provider, not an authorization: the generation phase asks it at the moment it emits, and it
@@ -185,6 +196,7 @@ public sealed class MigrationRunWorker(
         DispositionLedgerService? ledgers = services.GetService<DispositionLedgerService>();
         string? ledgerId = request.DispositionLedgerId;
         LedgerGenerationAuthorizationProvider? generation = null;
+        LedgerEntryVerificationProvider? verification = null;
 
         if (ledgerId is { Length: > 0 })
         {
@@ -202,7 +214,45 @@ public sealed class MigrationRunWorker(
             }
 
             generation = new LedgerGenerationAuthorizationProvider(ledgers, actor, ledgerId, run.RunId);
+            verification = new LedgerEntryVerificationProvider(
+                ledgers, run.TenantId, ledgerId, run.RunId, new MigrationRunOwnership(fence, s_lease));
         }
+
+        // Recorded when the phase that wrote it finishes, not when the run does. A later phase verifies
+        // against the generation, so the generation has to be durable while the run is still in flight and
+        // still holds the claim it was produced under — and a generation the ledger will not accept has to
+        // stop the run there rather than after a verification phase has already read a customer database.
+        bool generationRecorded = false;
+
+        // The same ordering one step later. A deployment claims to publish a verified tier, so the
+        // per-entry results have to be entered against the decisions they are about before the deployment
+        // phase runs. Recording them only at the terminal state meant a record the ledger refuses — no
+        // executed case, a decision moved since, output replaced — was discovered after an image was
+        // already serving.
+        bool verificationRecorded = false;
+
+        // What the phases have written so far, one entry per path. The observer is handed only the
+        // artifacts of the phase that just finished, and recording a verification needs this run's
+        // generation coverage as well as its verification record, so the earlier phases' output is
+        // carried forward here rather than re-enumerated off disk.
+        Dictionary<string, ArtifactReference> produced = new(StringComparer.Ordinal);
+
+        // Where this run may publish its generated application, resolved from the project's own profile
+        // and the approval effective for it. Constructed here so the run's identity is fixed by the
+        // server; a host with no platform store and no configured target app resolves nothing, and the
+        // deployment phase then refuses instead of publishing under host configuration alone.
+        ITargetApplicationDeploymentGateway? deploymentGateway = services.GetService<ITargetApplicationDeploymentGateway>();
+        if (deploymentGateway is not null)
+        {
+            deploymentGateway = RunScopedGateway.Wrap(
+                deploymentGateway, authorizer, request, store, run.RunId, fence, s_lease);
+        }
+
+        ITargetDeploymentAuthorityProvider? deploymentAuthority =
+            services.GetService<PlatformAccessService>() is { } access &&
+            services.GetService<GeneratedApplicationTargetName>() is { Name.Length: > 0 } configuredTarget
+                ? new PlatformTargetDeploymentAuthorityProvider(access.Store, run, configuredTarget.Name)
+                : null;
 
         MigrationExecutor executor = new(
             workspaceRoot,
@@ -213,9 +263,48 @@ public sealed class MigrationRunWorker(
                 services.GetService<ProgramUnitRepairLoop>(),
                 services.GetService<IApplicationBuildGateway>(),
                 services.GetService<IApplicationTestGateway>(),
-                services.GetService<ITargetApplicationVerificationGateway>()),
+                services.GetService<ITargetApplicationVerificationGateway>(),
+                entryVerification,
+                deploymentGateway),
             authorizer,
-            generation);
+            generation,
+            verification,
+            ledgers is null || ledgerId is not { Length: > 0 }
+                ? null
+                : async (outcome, _) =>
+                {
+                    foreach (ArtifactReference artifact in outcome.Artifacts)
+                    {
+                        produced[WorkspacePath.Normalize(artifact.Path)] = artifact;
+                    }
+
+                    switch (outcome.Phase)
+                    {
+                        case MigrationPhase.ApplicationCodeConversion:
+                        {
+                            string? unrecorded = await RecordGenerationAsync(
+                                run, fence, ledgers, ledgerId, Manifest(run.RunId, workspaceRoot, [.. produced.Values]))
+                                .ConfigureAwait(false);
+
+                            generationRecorded = unrecorded is null;
+                            return unrecorded;
+                        }
+
+                        case MigrationPhase.TargetContractVerification:
+                        {
+                            string? unrecorded = await RecordVerificationAsync(
+                                run, fence, ledgers, ledgerId, Manifest(run.RunId, workspaceRoot, [.. produced.Values]))
+                                .ConfigureAwait(false);
+
+                            verificationRecorded = unrecorded is null;
+                            return unrecorded;
+                        }
+
+                        default:
+                            return null;
+                    }
+                },
+            deploymentAuthority);
 
         WorkbenchExecution.ResetOutput(workspaceRoot, request.OutputRoot);
         Channel<ExecutionProgress> progress = Channel.CreateUnbounded<ExecutionProgress>(
@@ -278,14 +367,29 @@ public sealed class MigrationRunWorker(
             // Recorded from the manifest this worker just hashed off disk, and recorded before the run is
             // called anything. A generation whose evidence will not record is not a successful run: the
             // files exist and nothing in the ledger says which decisions they were produced under, which
-            // is the state this whole path exists to prevent.
+            // is the state this whole path exists to prevent. The conversion phase normally records it as
+            // soon as it writes it; this covers a run that produced coverage without that phase reporting
+            // it, and is a no-op when the generation is already in the ledger.
             //
             // The lease monitor is still running here on purpose. Recording is a durable write made in
             // this run's name, so the claim that authorizes it has to still be renewable while it happens
             // rather than having been abandoned one statement earlier.
-            string? evidenceFailure = ledgers is null || ledgerId is not { Length: > 0 }
+            string? evidenceFailure = ledgers is null || ledgerId is not { Length: > 0 } || generationRecorded
                 ? null
                 : await RecordGenerationAsync(run, fence, ledgers, ledgerId, artifacts).ConfigureAwait(false);
+
+            // Strictly after the generation it speaks about, in the same run, under the same claim. A
+            // result is a statement about an artifact, so the artifact has to be recorded first or there
+            // is nothing for it to attach to; and if the generation would not record, entering results
+            // about it would be recording proof of something the ledger holds no generation for.
+            //
+            // The verification phase normally records this as soon as it writes it, before the deployment
+            // phase runs. This covers a run that produced a record without that phase reporting it, and is
+            // skipped when the phase boundary already entered it.
+            if (evidenceFailure is null && !verificationRecorded && ledgers is not null && ledgerId is { Length: > 0 })
+            {
+                evidenceFailure = await RecordVerificationAsync(run, fence, ledgers, ledgerId, artifacts).ConfigureAwait(false);
+            }
 
             monitorCancellation.Cancel();
             await StopMonitorAsync(leaseMonitor).ConfigureAwait(false);
@@ -448,6 +552,74 @@ public sealed class MigrationRunWorker(
               $"{recorded.Value!.FilesHashed} emitted file(s) re-hashed by the server, {recorded.Value.EntriesRecorded} decision(s) " +
               "now carrying a generated reference. Nothing here has been compiled, started, or executed."
             : $"The generation this run produced was not recorded against ledger {ledgerId}: {recorded.Error}";
+
+        await store.AppendEventAsync(
+            run.RunId,
+            fence,
+            DateTimeOffset.UtcNow,
+            recorded.Succeeded ? "info" : "error",
+            text,
+            null,
+            null,
+            CancellationToken.None).ConfigureAwait(false);
+
+        return recorded.Succeeded ? null : text;
+    }
+
+    /// <summary>
+    /// Records what this run's trusted verifier executed against each recorded decision, and returns the
+    /// reason nothing was recorded when there was something to record and it failed.
+    ///
+    /// A run whose manifest holds no verification record executed no attributable case — no ledger-bound
+    /// generation, no configured verifier, or a verifier that refused — and that is not a recording
+    /// failure. The phase result already says whether verification passed; this path only decides whether
+    /// what ran was durably attributed to the decisions it was about.
+    ///
+    /// Failures and gaps are recorded exactly as they happened. A failed case makes its property read back
+    /// failed and keeps the ledger incomplete, which is the outcome, not an error in recording it.
+    /// </summary>
+    private async Task<string?> RecordVerificationAsync(
+        MigrationRunRecord run,
+        long fence,
+        DispositionLedgerService ledgers,
+        string ledgerId,
+        IReadOnlyList<MigrationRunArtifact> artifacts)
+    {
+        string recordPath =
+            $"{WorkspacePath.Normalize(run.Request.OutputRoot)}/{EntryVerificationCoverage.RecordPath}";
+
+        if (!artifacts.Any(artifact =>
+                string.Equals(WorkspacePath.Normalize(artifact.Path), recordPath, StringComparison.Ordinal)))
+        {
+            return null;
+        }
+
+        PlatformResult<DispositionLedgerVerification> recorded;
+        try
+        {
+            recorded = await ledgers.RecordVerificationFromRunAsync(
+                run.TenantId,
+                ledgerId,
+                run.RunId,
+                artifacts,
+                new MigrationRunOwnership(fence, s_lease),
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogError(exception, "Recording verification evidence for run {RunId} failed.", run.RunId);
+            return "Cases were executed against a configured verification target, but which recorded decision each one was about " +
+                $"could not be entered against ledger {ledgerId} ({FailureText.Describe(exception)}). The run is reported failed " +
+                "because results exist and nothing records what they proved.";
+        }
+
+        string text = recorded.Succeeded
+            ? $"Recorded this run's executed verification against ledger {ledgerId}: " +
+              $"{recorded.Value!.CasesRecorded} case(s) over {recorded.Value.EntriesRecorded} recorded decision(s) — " +
+              $"{recorded.Value.CasesPassed} passed, {recorded.Value.CasesFailed} failed — against generated content " +
+              $"{recorded.Value.TestedOutputSetSha256}, with {recorded.Value.GapsDeclared} stated gap(s). No generated service " +
+              "was started, so none of this is evidence of application behaviour."
+            : $"The verification this run executed was not recorded against ledger {ledgerId}: {recorded.Error}";
 
         await store.AppendEventAsync(
             run.RunId,
@@ -752,11 +924,58 @@ public sealed class MigrationRunWorker(
         }
     }
 
-    private sealed class StaleRunFenceException : Exception;
-
     private sealed class LeaseMonitorException(Exception inner) : Exception("The run lease monitor failed.", inner);
 
     private sealed class FatalRunOwnershipException(string message) : Exception(message);
+}
+
+/// <summary>
+/// The one place the run-scoped gateway wrappers are composed, and the reason for their order.
+///
+/// Neither wrapper implies the order on its own, and the order is the property that matters. The grant
+/// check is an awaited round trip to the authorization store, so a claim taken over while that check is
+/// in flight is only observable after it returns. The fence therefore sits innermost — the last thing
+/// asked before the call leaves this process — and the grant check outside it. Reversed, a worker that
+/// renewed, then spent the authorization round trip losing its claim, would still reach the gateway.
+///
+/// This narrows the window; it does not close it. Nothing here makes a renewal and a dispatch one atomic
+/// operation, so a takeover in the instant between them is still possible. What it does establish is that
+/// the fence is checked after every other check this process performs, rather than before them.
+/// </summary>
+internal static class RunScopedGateway
+{
+    public static IDataMigrationGateway Wrap(
+        IDataMigrationGateway inner,
+        WorkbenchMutationAuthorizer authorizer,
+        MigrationRunRequest request,
+        IMigrationRunStore store,
+        string runId,
+        long fenceToken,
+        TimeSpan lease) =>
+        new AuthorizingDataMigrationGateway(
+            new FencedDataMigrationGateway(inner, store, runId, fenceToken, lease), authorizer, request);
+
+    public static IEntryRuntimeVerificationGateway Wrap(
+        IEntryRuntimeVerificationGateway inner,
+        WorkbenchMutationAuthorizer authorizer,
+        MigrationRunRequest request,
+        IMigrationRunStore store,
+        string runId,
+        long fenceToken,
+        TimeSpan lease) =>
+        new AuthorizingEntryRuntimeVerificationGateway(
+            new FencedEntryRuntimeVerificationGateway(inner, store, runId, fenceToken, lease), authorizer, request);
+
+    public static ITargetApplicationDeploymentGateway Wrap(
+        ITargetApplicationDeploymentGateway inner,
+        WorkbenchMutationAuthorizer authorizer,
+        MigrationRunRequest request,
+        IMigrationRunStore store,
+        string runId,
+        long fenceToken,
+        TimeSpan lease) =>
+        new AuthorizingTargetApplicationDeploymentGateway(
+            new FencedTargetApplicationDeploymentGateway(inner, store, runId, fenceToken, lease), authorizer, request);
 }
 
 internal sealed class FencedDataMigrationGateway(
@@ -806,5 +1025,76 @@ internal sealed class FencedDataMigrationGateway(
         {
             throw new UnauthorizedAccessException("This worker no longer owns the durable run lease.");
         }
+    }
+}
+
+/// <summary>
+/// A claim this worker no longer holds, raised at the boundary rather than after the call.
+///
+/// It derives from <see cref="UnauthorizedAccessException"/> so an adapter that already fails closed on a
+/// denied gateway keeps doing so, while the worker can still tell a fencing apart from any other refusal.
+/// </summary>
+internal sealed class StaleRunFenceException(string? message = null)
+    : UnauthorizedAccessException(message ?? "This worker no longer owns the durable run lease.");
+
+/// <summary>
+/// Renews the claim against the store immediately before the approved target is read.
+///
+/// The grant check above it answers whether the operator still approves this work. This answers a
+/// different question: whether this process is still the one executing this run. A worker whose lease was
+/// taken over by a newer claim renews nothing, so the read never reaches the gateway and no observation
+/// is produced that a stale worker could enter against the ledger.
+/// </summary>
+internal sealed class FencedEntryRuntimeVerificationGateway(
+    IEntryRuntimeVerificationGateway inner,
+    IMigrationRunStore store,
+    string runId,
+    long fenceToken,
+    TimeSpan lease) : IEntryRuntimeVerificationGateway
+{
+    public EntryVerificationTargetBinding Target => inner.Target;
+
+    public async Task<EntryRuntimeVerificationRun> InspectAsync(
+        EntryVerificationTargetBinding approved,
+        IReadOnlyList<EntryVerificationExpectation> expectations,
+        CancellationToken cancellationToken)
+    {
+        if (!await store.RenewAsync(runId, fenceToken, lease, cancellationToken).ConfigureAwait(false))
+        {
+            throw new StaleRunFenceException(
+                "A newer claim owns this run, so the approved target was not read and nothing was observed under this run's name.");
+        }
+
+        return await inner.InspectAsync(approved, expectations, cancellationToken).ConfigureAwait(false);
+    }
+}
+
+/// <summary>
+/// Renews the claim against the store immediately before the bundle is handed to the trusted builder.
+///
+/// The builder both builds an image and updates a revision, and neither is undone by this process losing
+/// the run afterwards. Renewing here is therefore the last point at which a stale worker can be stopped
+/// from minting a build and a digest under a run another worker now owns.
+/// </summary>
+internal sealed class FencedTargetApplicationDeploymentGateway(
+    ITargetApplicationDeploymentGateway inner,
+    IMigrationRunStore store,
+    string runId,
+    long fenceToken,
+    TimeSpan lease) : ITargetApplicationDeploymentGateway
+{
+    public string Description => inner.Description;
+
+    public async Task<TargetDeploymentResult> PublishAsync(
+        TargetDeploymentRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!await store.RenewAsync(runId, fenceToken, lease, cancellationToken).ConfigureAwait(false))
+        {
+            throw new StaleRunFenceException(
+                "A newer claim owns this run, so nothing was dispatched to the builder and no image was produced under this run's name.");
+        }
+
+        return await inner.PublishAsync(request, cancellationToken).ConfigureAwait(false);
     }
 }

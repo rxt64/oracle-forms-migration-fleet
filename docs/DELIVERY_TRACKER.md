@@ -12,15 +12,42 @@ evidence. These labels are not interchangeable. Local implementation below remai
 
 ## Refreshed Baseline
 
-- Worktree: feat/dotnet-migration-pilot, based on d66095320270810e52151e36ece8cd8390343020.
-- PR32: 714113c3a0482ac276280c979dc5e96ffee29a74, open against main.
-- PR33: d66095320270810e52151e36ece8cd8390343020, open against PR32 branch.
-- Prior observed CI35669953528 passed four required checks; deployment skipped. Reconfirm before merge.
+- PR32 and PR33 are merged. PR34 head `46bcd135a4b8c260d67051fdda5dfb4ca0e09095` is merged;
+  resulting main is `0454f08cf45223491566433847dc0dc16d4b96f5`.
+- Main CI35916158560 passed build/test, native-worker contract, browser, container build, and both
+  exact-commit workbench release jobs. Northstar deployment is separate from a generated Meridian app.
+- Live workbench: `ca-ofmfleet-dev-ykbpnrpd--0000097`, provisioning Succeeded, image digest
+  `sha256:a82eb9847ffb9f132ee7b50f871e0f8f20d1ba426306279c7d271c9775aab0cd`.
+  That digest also appears in CI35916158560 deployment job107369985680.
 - Protected `.agent_configs/` and `eval.yaml` remain excluded and untouched.
-- Last live observation: workbench revision0000093, digest
-  sha256:6599199edf85486c457e0943a8f80087a63bdff1f44958b6059f62d1fbbc3a4e.
-- Azure source database container and ASP.NET browser replica were Running. That is not native Forms
-  or a database correctness check. No VM was found in the inspected resource group, not a subscription-wide claim.
+- Runtime verification/deployment follow-up is locally implemented, not yet released. Last full local
+  solution run: 1830 fleet tests plus 56 demo tests passed. Subsequent independent QA added two tests
+  and passed six fence/authorization cases and 20 policy/evidence cases; counts overlap.
+- Parent invoked independent QA as `GPT-5.6 Sol (copilot)`. Parent invoked the checkpoint reviewer as
+  `GPT-6 Astra (copilot)`; its scoped PASS covered PR34, not this unpublished runtime follow-up.
+  Routing labels are not independent serving-backend identity attestations.
+
+## Current Operational Evidence
+
+- Meridian is installed in the existing Oracle source container: 37 verifier assertions passed,
+  zero compile errors, seed counts 5/6/2/3, BANKING unchanged at 19 objects/0 invalid. Single-exec
+  two-session tests proved commit blocking/oversell rejection and rollback release, then restored
+  the fixture. See [MERIDIAN_AZURE_VALIDATION.md](MERIDIAN_AZURE_VALIDATION.md).
+- Dedicated `ofm_dotnet_pilot` database and runtime/workbench identity grants are verified; the runtime
+  identity was denied access to `ofm_platform`. No generated target SQL or data was applied. See
+  [DOTNET_FOUNDATION_AZURE_VALIDATION.md](DOTNET_FOUNDATION_AZURE_VALIDATION.md).
+- Runtime follow-up reads approved target catalogs after data migration and persists admitted evidence
+  before deployment. It is structural verification, not business or native Forms equivalence.
+- Deployment compares source/tenant/project/ledger/output bindings, and durable gateways authorize,
+  renew the fence, then dispatch. No claim of atomic remote revocation after dispatch is made.
+- Source lab installation/testing and identity/database foundation setup were builder interventions,
+  not a GUI migration. No migration run ID, generated target URL/digest, deployed business acceptance,
+  reconciliation, or restart/retry acceptance exists for this pilot.
+- Publication excludes pending `infra/workbench` mount changes, pending `infra/dotnet-pilot` setup
+  changes, and generated `infra/dotnet-pilot/main.json`. They remain local for separate validation.
+
+The requirements table below retains checkpoint-level evidence; current operational facts above
+supersede its historical source-lab, foundation, and platform-release status.
 
 ## Requirements And Next Actions
 
@@ -50,24 +77,43 @@ evidence. These labels are not interchangeable. Local implementation below remai
 
 ## Operational Evidence Still Required
 
-No generated target URL, verified image digest, migration run ID, ledger verified count, PostgreSQL
+No generated target URL, generated-target image digest, migration run ID, ledger verified count, PostgreSQL
 reconciliation or target business acceptance is claimed yet. Source-runtime differential: NotExecuted.
-Manual interventions so far are product development/tests and infrastructure previews, not a product run.
+Manual interventions include product development/tests, source fixture installation/testing and dedicated
+database/identity provisioning, not a product run.
 All later interventions during a run must be recorded here and in that run's evidence.
 
-Latest local checkpoint: full solution 1721/1721 passed after source-lab and filesystem hardening.
+The generated-target builder is written and tested but **unconfigured**, so no generated application tier
+can be deployed yet: GitHub App configuration is missing or unconfirmed, and
+`GitHubActionsDeploymentOptions.TryRead` registers no gateway when required fields are absent.
+Restricted installation APIs do not prove that an App does not exist.
+The exact non-secret fields, the single least-privilege App permission,
+and the Key Vault secret identifier are listed in `OPERATIONS.md`, "Configure the generated-target
+builder". This is an external blocker — creating the App and its key needs a human with repository-admin
+and App-owner rights, and the federated CI identity cannot perform or bootstrap it.
+
+Two gaps remain open inside `generated-target.yml` itself. It cannot ask the product whether an approval
+was revoked mid-build, so it fails closed on expiry only. And generated code executes in the `build` job
+as the runner's user, so every later step of that job is estate-influenced: the host image recipe is
+pinned by digest in the workflow definition against exactly that, but nothing else in that workspace is.
+The job holds no Azure credential, which is what bounds the consequence.
+
+Historical PR34 checkpoint: full solution 1721/1721 passed after source-lab and filesystem hardening.
 The earlier real PostgreSQL acceptance remains separately snapshot-bound, not rerun after hardening.
-Scoped independent review passed these follow-ups; overall delivery remains HOLD. See
-`PILOT_LOCAL_VALIDATION.md` for reports and review hashes. Work remains dirty and unpublished.
-On 2026-09-22 the operator explicitly authorized selective commit, push and dependent draft PR publication,
-with protected paths excluded. Any later Azure work is limited to development resource group
-`rg-oracle-forms-migration-fleet-dev-b9f0e875`; merge, release, customer operations and product approvals
-remain separate gates. Runtime publication remains pending. Independent runtime-verifier implementation
-can proceed.
+Scoped independent review passed that checkpoint; overall delivery remains HOLD. See
+`PILOT_LOCAL_VALIDATION.md` for historical reports and review hashes. Runtime publication remains pending.
+The operator explicitly authorized selective commit/push, PR creation, gated merge/release, source-lab
+execution, and development provisioning within `rg-oracle-forms-migration-fleet-dev-b9f0e875`.
+This does not waive exact-candidate reviews, CI, named product approvals, or security-scope constraints.
 
 ## Cost And Shutdown
 
 Prepared foundation estimate: roughly USD0.30-4.50/month for artifact storage; target ACA scales to zero,
 with compute/requests/logging/cross-region traffic usage-based. See infra/dotnet-pilot/README.md for
-assumptions and exact resource diff. No new pilot resources applied yet. Preserve evidence/databases;
+assumptions and exact resource diff. Identity/storage/database foundation now exists; no target app exists.
+The pending SMB template would enable shared-key and public-network storage access; it was not applied.
+Live storage keeps both disabled. A private Blob design needs new networking and workspace persistence
+code because the existing Container Apps environment has no VNet. Moving the workbench also needs
+explicit source-connectivity and authentication planning; this is not an approved infrastructure change.
+Preserve evidence/databases;
 destructive cleanup requires explicit approval. Do not stop the shared PostgreSQL server for this pilot.

@@ -93,17 +93,18 @@ Error numbers are part of the contract:
 | `-20106` | The same article appears on more than one line. |
 | `-20107` | The article's revision moved since the caller read it. |
 
-## Installation — NOT EXECUTED
+## Installation — validated on Azure (2026-09-23)
 
-No Oracle runtime and no container runtime is available on this workstation, and no Azure call was
-made. **Nothing below has been run. Every SQL assertion in this lab is `NotExecuted`.** Treat the
-expected values as declared intent until an operator runs them against a real Oracle Free 23.
+The fixture is installed in the isolated `MERIDIAN` schema of the disposable Azure source lab. The
+checkpointed installer, independent verifier, exact live inventory, and remaining concurrency limit
+are recorded in [docs/MERIDIAN_AZURE_VALIDATION.md](../../../docs/MERIDIAN_AZURE_VALIDATION.md).
+No database image was rebuilt or redeployed, and no BANKING or target SQL object was changed.
 
 The already-released `oracle-forms-legacy-db:v2` image **cannot pick these scripts up**: the Oracle
 Free entrypoint runs `/container-entrypoint-initdb.d` only on the first startup of an empty data
-volume. A new image is required, built by the trusted GitHub workflow, tagged from a commit, and
-deployed only under a separate approval. Do not build it locally and do not switch a running
-Container App to it as part of adding these files.
+volume. Automatic first-start initialization would require a new image built by the trusted GitHub
+workflow, tagged from a commit, and deployed only under a separate approval. The approved disposable
+existing lab instead uses the checkpointed direct installer below; do not switch its running image.
 
 The `Dockerfile`'s `COPY initdb/ ...` is relative to the build context, and the only context it
 resolves against is this directory. The trusted workflow must therefore build with:
@@ -114,8 +115,17 @@ resolves against is this directory. The trusted workflow must therefore build wi
 | Dockerfile | `infra/source-lab/meridian-order-entry/Dockerfile` |
 
 A build rooted at the repository root finds no `initdb/` and fails; a build rooted elsewhere would
-copy some other directory's scripts into the entrypoint. **No build has been run** — not locally,
-not as an ACR Task — and no image has been pushed or deployed.
+copy some other directory's scripts into the entrypoint. No Meridian image build was needed or run:
+the reusable installer uses supported Container Apps exec against the existing disposable source lab.
+
+```powershell
+.\Provision-MeridianSourceLab.ps1 -Operation Probe
+.\Provision-MeridianSourceLab.ps1 -Operation Install
+```
+
+`Install` resumes only the exact owned checkpoints `Absent`, `Schema`, `Seed`, and `Ready`. Any
+unexpected MERIDIAN object, invalid named constraint, non-fixture row count, or compile error is
+`PartialUnsupported` and refuses mutation; the installer never drops or resets a schema.
 
 Against a disposable Oracle Free 23 instance, as a user able to `CREATE USER` in `FREEPDB1`:
 
@@ -146,12 +156,14 @@ per check followed by `MERIDIAN ORDER LAB: SEED OK`.
 | Optimistic revision | An in-date `ADJUST_STOCK` moves stock and revision together; repeating it with the stale revision is rejected with `-20107` and moves nothing. |
 | Restoration | After `ROLLBACK`, counts and every stock/revision pair are back to the seeded values. |
 
-## Concurrency — protocol only, NOT EXECUTED
+## Concurrency — reusable harness, blocked at ACA concurrent exec
 
-**A single session cannot prove a race.** The verifier says so in its own output. Nothing in
-`004_meridian_verify.sql` may be cited as evidence that concurrent oversell is prevented; the
-single-session checks only show that the lock and the revision column exist and behave when
-uncontended.
+**A single session cannot prove a race.** The verifier says so in its own output. The reusable
+`Test-MeridianConcurrency.ps1` opens independent SQL*Plus jobs, measures S2 wait time, covers both
+S1 commit and rollback, and restores the synthetic seed. On 2026-09-23, ACA rejected the second
+exec WebSocket with HTTP 429 while S1 held the transaction, so two-session blocking remains
+unverified. The harness reports that platform boundary as a failure and never converts it into a
+database pass.
 
 The real check needs two sessions against one database. Run it manually:
 
@@ -234,7 +246,6 @@ fail the build and have to be accounted for.
 | `DETERMINISTIC` on `LINE_AMOUNT` | No equivalent is emitted. |
 | `MRD_ORDER_SEQ` / `MRD_ORDER_ITEM_SEQ` with `NOCACHE ORDER NOCYCLE` | Ordering and caching semantics are not reproduced. |
 | `TRUNC(SYSDATE)` into `ORD_RAISED DATE` | Oracle `DATE` carries a time component that `TRUNC` removes; the target type decision changes the semantics. |
-| `DBMS_ASSERT` / `EXECUTE IMMEDIATE` grants in `001` | Installation-time only; out of scope for conversion and intentionally not part of `source/`. |
 
 ## Status
 
@@ -245,7 +256,7 @@ fail the build and have to be accounted for.
 | Manifest resolves against the schema through `TargetMappingReader` | Checked offline by test |
 | Forms export parses through `FormsModuleParser` | Checked offline by test |
 | Lab text matches the checked-in mapping fixture | Checked offline by test |
-| Oracle DDL / PL/SQL compiles | **NotExecuted** — no Oracle runtime available |
-| Verifier expectations | **NotExecuted** — declared, never run |
-| Two-session concurrency protocol | **NotExecuted** — protocol only |
+| Oracle DDL / PL/SQL compiles | **Passed on Azure source lab** — 0 `DBA_ERRORS`, 0 invalid MERIDIAN objects |
+| Verifier expectations | **Passed on Azure source lab** — 37 PASS lines, 0 FAIL lines, seed restored by rollback |
+| Two-session concurrency protocol | **Blocked externally** — reusable harness added; ACA concurrent exec returned HTTP 429 |
 | Image built, released, or deployed | **Not done, and deliberately not attempted** |

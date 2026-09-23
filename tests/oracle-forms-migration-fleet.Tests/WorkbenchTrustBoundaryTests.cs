@@ -407,6 +407,145 @@ public class WorkbenchTrustBoundaryTests : IDisposable
     }
 
     /// <summary>
+    /// Reading the approved target is declared as its own class rather than as a workspace artifact write,
+    /// so the executor's just-in-time gate fires for it. Without a grant it is refused, which is what
+    /// stops a connection being opened to a customer database on the planner's say-so alone.
+    /// </summary>
+    [Fact]
+    public async Task Reading_the_approved_target_is_refused_when_no_grant_exists()
+    {
+        (SourceWorkspaceService service, string workspaceId) = await SeedAsync();
+        using SourceWorkspaceService owned = service;
+
+        WorkbenchExecution.WorkbenchRunPreparation preparation = (await WorkbenchExecution.PrepareRunAsync(
+            service, Operator, workspaceId, ForgedRequest(), new WorkbenchAuthorizationService())).Preparation!;
+
+        MutationAuthorizationResult decision = await preparation.MutationAuthorizer.AuthorizeAsync(
+            new MutationAuthorizationRequest(
+                MigrationPhase.TargetContractVerification,
+                MutationClass.ExternalTargetRead,
+                preparation.Request,
+                Owner),
+            CancellationToken.None);
+
+        Assert.False(decision.IsAuthorized);
+        Assert.NotEqual(string.Empty, decision.Reason);
+    }
+
+    /// <summary>
+    /// The sandbox grant names the destination this read opens, so it is the grant the read is held to.
+    /// The phase says what it does — a read — and is still gated; nothing is relabelled as a write.
+    /// </summary>
+    [Fact]
+    public async Task The_sandbox_grant_is_what_authorizes_reading_the_approved_target()
+    {
+        (SourceWorkspaceService service, string workspaceId) = await SeedAsync();
+        using SourceWorkspaceService owned = service;
+
+        StubAuthorizationStore store = new();
+        WorkbenchAuthorizationService authorization = new(store);
+
+        WorkbenchExecution.WorkbenchRunPreparation preparation = (await WorkbenchExecution.PrepareRunAsync(
+            service, Operator, workspaceId, ForgedRequest(), authorization)).Preparation!;
+
+        store.Records = [Grant(service, workspaceId, preparation.Request)];
+
+        MutationAuthorizationResult decision = await preparation.MutationAuthorizer.AuthorizeAsync(
+            new MutationAuthorizationRequest(
+                MigrationPhase.TargetContractVerification,
+                MutationClass.ExternalTargetRead,
+                preparation.Request,
+                Owner),
+            CancellationToken.None);
+
+        Assert.True(decision.IsAuthorized, decision.Reason);
+    }
+
+    /// <summary>
+    /// A grant that lapsed while the run sat in the queue stops the connection before it is opened. The
+    /// wrapper asks at the only moment that matters, so the verifier is never reached.
+    /// </summary>
+    [Fact]
+    public async Task A_grant_that_expired_before_the_probe_stops_the_read_without_calling_the_verifier()
+    {
+        (SourceWorkspaceService service, string workspaceId) = await SeedAsync();
+        using SourceWorkspaceService owned = service;
+
+        StubAuthorizationStore store = new();
+        WorkbenchAuthorizationService authorization = new(store);
+
+        WorkbenchExecution.WorkbenchRunPreparation preparation = (await WorkbenchExecution.PrepareRunAsync(
+            service, Operator, workspaceId, ForgedRequest(), authorization)).Preparation!;
+
+        store.Records =
+        [
+            Grant(service, workspaceId, preparation.Request) with { ExpiresUtc = DateTimeOffset.UtcNow.AddMinutes(-1) },
+        ];
+
+        CountingVerifier inner = new();
+        AuthorizingEntryRuntimeVerificationGateway guarded =
+            new(inner, preparation.MutationAuthorizer, preparation.Request);
+
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+            guarded.InspectAsync(inner.Target, [], CancellationToken.None));
+
+        Assert.Equal(0, inner.Calls);
+    }
+
+    /// <summary>
+    /// The same check after the run was admitted. The grant was valid when the run was queued and is
+    /// revoked before the read, so the read is refused rather than the next run.
+    /// </summary>
+    [Fact]
+    public async Task A_grant_revoked_after_the_run_was_queued_stops_the_read()
+    {
+        (SourceWorkspaceService service, string workspaceId) = await SeedAsync();
+        using SourceWorkspaceService owned = service;
+
+        StubAuthorizationStore store = new();
+        WorkbenchAuthorizationService authorization = new(store);
+
+        WorkbenchExecution.WorkbenchRunPreparation preparation = (await WorkbenchExecution.PrepareRunAsync(
+            service, Operator, workspaceId, ForgedRequest(), authorization)).Preparation!;
+
+        store.Records = [Grant(service, workspaceId, preparation.Request)];
+
+        CountingVerifier inner = new();
+        AuthorizingEntryRuntimeVerificationGateway guarded =
+            new(inner, preparation.MutationAuthorizer, preparation.Request);
+
+        EntryRuntimeVerificationRun first = await guarded.InspectAsync(inner.Target, [], CancellationToken.None);
+        Assert.True(first.ToolAvailable);
+        Assert.Equal(1, inner.Calls);
+
+        store.Records = [];
+
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+            guarded.InspectAsync(inner.Target, [], CancellationToken.None));
+
+        Assert.Equal(1, inner.Calls);
+    }
+
+    /// <summary>A verifier that counts how often it was actually reached.</summary>
+    private sealed class CountingVerifier : IEntryRuntimeVerificationGateway
+    {
+        public int Calls { get; private set; }
+
+        public EntryVerificationTargetBinding Target { get; } =
+            new("pg-sandbox.postgres.database.azure.com", "meridian", "public", "id-ofmfleet");
+
+        public Task<EntryRuntimeVerificationRun> InspectAsync(
+            EntryVerificationTargetBinding approved,
+            IReadOnlyList<EntryVerificationExpectation> expectations,
+            CancellationToken cancellationToken)
+        {
+            Calls++;
+            return Task.FromResult(new EntryRuntimeVerificationRun(
+                "stub", ToolAvailable: true, TimedOut: false, SetupFailed: false, Failure: null, []));
+        }
+    }
+
+    /// <summary>
     /// Spec 004 replaced the earlier behaviour. A persisted grant that matches the run in every binding
     /// now materializes the internal execution approval, and it names the actor who approved it in the
     /// store rather than anything the caller sent. A forged approval in the body is still discarded first,

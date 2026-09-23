@@ -245,6 +245,13 @@ internal static class DotNetBackendEmitter
 
                 WebApplication app = builder.Build();
 
+                // The browser bundle this run generated is served from the same origin as the API, so the
+                // deployed application is the whole application and not an API with no screens in front of
+                // it. Both calls are no-ops when no wwwroot was staged, which is how the acceptance suite
+                // hosts this app from the project directory without carrying a build of the client.
+                app.UseDefaultFiles();
+                app.UseStaticFiles();
+
                 app.MapGet("/healthz", () => Results.Text("ok"));
 
                 app.MapGet("/api/parties", async (
@@ -337,6 +344,12 @@ internal static class DotNetBackendEmitter
                         : Problem("NOTFOUND", "No submission carries that identifier.", 404));
 
                 app.Map("/api/{**rest}", () => Problem("NOTFOUND", "This API serves no such route.", 404));
+
+                // Client-side routing: a deep link the browser asks for is answered with the shell so the
+                // router can resolve it. The fallback is registered last and matches least specifically, so
+                // an unrouted path under /api still reaches the JSON 404 above rather than being handed an
+                // HTML page — a caller that asked for data must never be told 200 with a document.
+                app.MapFallbackToFile("index.html");
 
                 return app;
             }

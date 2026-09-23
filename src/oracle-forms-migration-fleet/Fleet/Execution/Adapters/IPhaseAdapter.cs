@@ -37,6 +37,29 @@ public sealed record PhaseExecutionContext(
     /// </summary>
     public IGenerationAuthorizationProvider? AuthorizationProvider { get; init; }
 
+    /// <summary>
+    /// The server's authority over verifying what this run generated, or null when the host established
+    /// none.
+    ///
+    /// Like <see cref="AuthorizationProvider"/> it is a provider rather than a decision, and for the same
+    /// reason: the verification phase asks at the moment it is about to read the approved target, so a
+    /// generation the server has not durably recorded, or a decision that moved since it was generated,
+    /// is answered as it stands then. A phase with no provider reads no database.
+    /// </summary>
+    public IEntryVerificationGenerationProvider? VerificationProvider { get; init; }
+
+    /// <summary>
+    /// The server's authority over where this run may publish a generated application tier, or null when
+    /// the host resolved none.
+    ///
+    /// A provider again, and for the sharpest version of the same reason: the destination is read from the
+    /// project's immutable target profile and its effective approval at the moment the deployment phase is
+    /// about to hand bytes to a builder, so an approval revoked or expired while the run was working is an
+    /// approval this run does not publish under. It is never read out of the workspace or a request body,
+    /// because a destination an untrusted document can name is a destination a caller can redirect.
+    /// </summary>
+    public ITargetDeploymentAuthorityProvider? DeploymentAuthorityProvider { get; init; }
+
     public void Info(string text) => Report?.Invoke("info", text);
 
     public void Warn(string text) => Report?.Invoke("warn", text);

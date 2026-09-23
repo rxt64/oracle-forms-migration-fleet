@@ -77,6 +77,24 @@ public sealed record DispositionLedgerGeneration(
     int EntriesRecorded);
 
 /// <summary>
+/// What recording one run's executed verification changed.
+///
+/// The counts are kept apart on purpose. <see cref="CasesRecorded"/> is how many results were entered,
+/// <see cref="EntriesRecorded"/> how many properties now carry one, and <see cref="GapsDeclared"/> how
+/// many things the verification stated it does not demonstrate. A reader who wants "how much of this
+/// migration is proved" gets it from the ledger's own counts, never from these.
+/// </summary>
+public sealed record DispositionLedgerVerification(
+    string LedgerId,
+    string RunId,
+    string TestedOutputSetSha256,
+    int EntriesRecorded,
+    int CasesRecorded,
+    int CasesPassed,
+    int CasesFailed,
+    int GapsDeclared);
+
+/// <summary>
 /// The claim a still-running worker holds over the run whose generation it is recording.
 ///
 /// It is supplied only by the worker that made the claim. Recording under it re-establishes ownership
@@ -148,6 +166,29 @@ public sealed class LedgerGenerationAuthorizationProvider(
             : GenerationAuthorizationDecision.Denied(
                 "The target mapping this phase read is not the mapping the server issued an authorization over.");
     }
+}
+
+/// <summary>
+/// The server's authority over verifying one run's generation, bound at construction to the ledger, the
+/// run, and the ownership claim the worker holds.
+///
+/// The verification phase holds this and nothing else. It offers the digest it observed on disk and is
+/// answered from a generation the ledger already recorded durably under this run's claim — so a phase
+/// whose generation was never recorded, whose output has changed, or whose worker has been displaced gets
+/// no claim and opens no connection to a customer database.
+/// </summary>
+public sealed class LedgerEntryVerificationProvider(
+    DispositionLedgerService ledgers,
+    string tenantId,
+    string ledgerId,
+    string runId,
+    MigrationRunOwnership? ownership) : IEntryVerificationGenerationProvider
+{
+    public Task<EntryVerificationClaimDecision> ClaimAsync(
+        string observedOutputSetSha256,
+        CancellationToken cancellationToken) =>
+        ledgers.ClaimGenerationForVerificationAsync(
+            tenantId, ledgerId, runId, observedOutputSetSha256, ownership, cancellationToken);
 }
 
 /// <summary>
@@ -1077,6 +1118,530 @@ public sealed class DispositionLedgerService(
 
         return PlatformResult<DispositionLedgerGeneration>.Ok(
             new DispositionLedgerGeneration(ledger.LedgerId, run.RunId, observed, record.OutputFiles.Count, updates.Length));
+    }
+
+    /// <summary>
+    /// Grants a verification phase the generation it may speak about, or every reason it has none.
+    ///
+    /// This is what stands between a run and a connection to a customer database. It answers only from a
+    /// generation the ledger already holds: the references recorded against this run, under the claim this
+    /// worker still owns, over the exact bytes the phase says it is looking at. A run whose generation was
+    /// never recorded, whose output has changed since, or whose worker a newer claim displaced gets no
+    /// claim, so it reads nothing and produces no evidence it could not have attached to anything.
+    ///
+    /// The decisions carried back are the rows as they stand now, not as the run's own coverage document
+    /// described them. A property re-decided between generating and verifying therefore drops out of the
+    /// claim, and the phase plans no case for it rather than proving something about a decision nobody
+    /// holds.
+    /// </summary>
+    public async Task<EntryVerificationClaimDecision> ClaimGenerationForVerificationAsync(
+        string tenantId,
+        string ledgerId,
+        string runId,
+        string observedOutputSetSha256,
+        MigrationRunOwnership? ownership,
+        CancellationToken cancellationToken)
+    {
+        DispositionLedger? ledger =
+            await store.GetDispositionLedgerAsync(tenantId, ledgerId, cancellationToken).ConfigureAwait(false);
+        if (ledger is null)
+        {
+            return EntryVerificationClaimDecision.Denied("No ledger with that identifier exists in this tenant.");
+        }
+
+        MigrationRunRecord? run = await runs.GetAsync(tenantId, runId, cancellationToken).ConfigureAwait(false);
+        if (run is null || !string.Equals(run.ProjectId, ledger.ProjectId, StringComparison.Ordinal))
+        {
+            return EntryVerificationClaimDecision.Denied("No run with that identifier belongs to this ledger's project.");
+        }
+
+        if (!string.Equals(run.SourceSnapshotHash, ledger.SourceSnapshotHash, StringComparison.Ordinal))
+        {
+            return EntryVerificationClaimDecision.Denied(
+                "That run read a different source snapshot, so nothing it generated is evidence about this ledger's source.");
+        }
+
+        if (await StaleReasonAsync(ledger, cancellationToken).ConfigureAwait(false) is { } stale)
+        {
+            return EntryVerificationClaimDecision.Denied(stale);
+        }
+
+        if (string.IsNullOrWhiteSpace(run.TargetProfileId))
+        {
+            return EntryVerificationClaimDecision.Denied(
+                "This run names no target profile, so there is no immutable record of the destination a verification would read.");
+        }
+
+        PlatformTargetProfile? profile = await store.GetTargetProfileAsync(
+            tenantId, ledger.ProjectId, run.TargetProfileId, run.TargetProfileVersion, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (profile is null)
+        {
+            return EntryVerificationClaimDecision.Denied(
+                "The target profile this run was accepted against is no longer readable, so the destination a verification " +
+                "would read cannot be confirmed.");
+        }
+
+        if (!string.Equals(profile.CanonicalHash, run.TargetProfileHash, StringComparison.Ordinal))
+        {
+            return EntryVerificationClaimDecision.Denied(
+                "The target profile no longer matches the exact profile this run was accepted against, so the destination a " +
+                "verification would read cannot be confirmed.");
+        }
+
+        IReadOnlyList<DispositionLedgerEntry> entries = await store
+            .DispositionLedgerEntriesAsync(tenantId, ledgerId, cancellationToken).ConfigureAwait(false);
+
+        List<GenerationCoveredEntry> covered = [];
+        foreach (DispositionLedgerEntry entry in entries)
+        {
+            DispositionGeneratedReference? standing =
+                DispositionLedgerRules.StandingGeneration(entry.DecisionRevision, entry.GeneratedRefs);
+
+            if (standing is null ||
+                !string.Equals(standing.RunId, run.RunId, StringComparison.Ordinal) ||
+                standing.RunFenceToken != run.FenceToken ||
+                !string.Equals(standing.ContentSha256, observedOutputSetSha256, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            covered.Add(new GenerationCoveredEntry(
+                entry.EntryId, entry.DecisionRevision, entry.Decision, entry.MappingRuleId, entry.MappingRuleVersion));
+        }
+
+        if (covered.Count == 0)
+        {
+            return EntryVerificationClaimDecision.Denied(
+                "This ledger records no generation produced by this run, under the claim it still holds, over the output now on " +
+                "disk. Either the generation was never recorded, the decisions have moved since, or the files have changed.");
+        }
+
+        // The claim is re-established against the run store here, immediately before the phase is told it
+        // may read. A worker a newer claim already displaced never reaches the target.
+        if (ownership is not null &&
+            (run.FenceToken != ownership.FenceToken ||
+             !await runs.RenewAsync(run.RunId, ownership.FenceToken, ownership.LeaseExtension, cancellationToken)
+                 .ConfigureAwait(false)))
+        {
+            return EntryVerificationClaimDecision.Denied(
+                "This run is no longer held by the worker asking, so it was given no claim and read nothing.");
+        }
+
+        return EntryVerificationClaimDecision.Granted(new EntryVerificationGenerationClaim(
+            ledger.LedgerId,
+            ledger.TenantId,
+            ledger.ProjectId,
+            run.RunId,
+            ledger.SourceSnapshotHash,
+            observedOutputSetSha256,
+            new EntryVerificationTargetBinding(
+                profile.EndpointHost, profile.DatabaseName, profile.SchemaName, profile.ExecutionIdentity),
+            covered));
+    }
+
+    /// <summary>
+    /// Records what a run's trusted verifier actually read from the approved target, per recorded
+    /// decision, from the run's own retained evidence.
+    ///
+    /// This is the only production route by which an executed result reaches a property, and everything
+    /// it adds is a check on where the evidence came from. The cases are read out of a document retained
+    /// in the run's manifest and re-hashed here, the output they were read against is re-derived from the
+    /// run's own generation coverage rather than believed, the destination is compared with the project's
+    /// immutable target profile, and every case is matched to the row it names by identity as well as by
+    /// identifier. The binding itself — decision revision, source snapshot, generated content, run, and
+    /// fence — is adjudicated by the same rules the single-entry path uses, so there is one definition of
+    /// what makes a result evidence and this path cannot relax it. The write is one all-or-nothing update
+    /// over every property named, because one verification is one fact about one output set.
+    ///
+    /// Nothing about an aggregate test report reaches here. A JUnit file says how many generated tests
+    /// ran; it does not say which recorded decision any of them was about, so no count from one can move a
+    /// property off unexecuted.
+    /// </summary>
+    public async Task<PlatformResult<DispositionLedgerVerification>> RecordVerificationFromRunAsync(
+        string tenantId,
+        string ledgerId,
+        string runId,
+        IReadOnlyList<MigrationRunArtifact>? manifest,
+        MigrationRunOwnership? ownership,
+        CancellationToken cancellationToken)
+    {
+        DispositionLedger? ledger =
+            await store.GetDispositionLedgerAsync(tenantId, ledgerId, cancellationToken).ConfigureAwait(false);
+        if (ledger is null)
+        {
+            return Refuse(404, "No ledger with that identifier exists in this tenant.");
+        }
+
+        MigrationRunRecord? run = await runs.GetAsync(tenantId, runId, cancellationToken).ConfigureAwait(false);
+        if (run is null || !string.Equals(run.ProjectId, ledger.ProjectId, StringComparison.Ordinal))
+        {
+            return Refuse(404, "No run with that identifier belongs to this ledger's project.");
+        }
+
+        if (!string.Equals(run.SourceSnapshotHash, ledger.SourceSnapshotHash, StringComparison.Ordinal))
+        {
+            return Refuse(409,
+                "That run read a different source snapshot, so what it executed is not evidence about this ledger's source.");
+        }
+
+        if (await StaleReasonAsync(ledger, cancellationToken).ConfigureAwait(false) is { } stale)
+        {
+            return Refuse(409,
+                $"{stale} Recording execution against decisions about superseded source would enter a result nobody reviewed the " +
+                "source of as evidence about the source that stands.");
+        }
+
+        string expectedOutputRoot = WorkspacePath.Normalize(run.Request.OutputRoot);
+        IReadOnlyList<MigrationRunArtifact> artifacts = manifest
+            ?? await runs.ArtifactsAsync(tenantId, run.RunId, cancellationToken).ConfigureAwait(false);
+
+        MigrationRunArtifact? verification = Single(artifacts, run.RunId, $"{expectedOutputRoot}/{EntryVerificationCoverage.RecordPath}");
+        MigrationRunArtifact? generation = Single(artifacts, run.RunId, $"{expectedOutputRoot}/{GenerationCoverage.RecordPath}");
+
+        if (verification is null)
+        {
+            return Refuse(409,
+                "That run retained no per-entry verification record at its own output root, or retained more than one, so which " +
+                "execution it describes is not established. Nothing was recorded.");
+        }
+
+        if (generation is null)
+        {
+            return Refuse(409,
+                "That run retained no single generation coverage at its own output root, so the output its results were executed " +
+                "against cannot be re-derived and no result was recorded.");
+        }
+
+        string? workspaceRoot = workspaces.ResolveRoot(run.WorkspaceOwnerId, run.WorkspaceId)
+            ?? workspaces.ResolveDurableRoot(run.WorkspaceId);
+
+        if (workspaceRoot is null)
+        {
+            return Refuse(410, "The run's manifest is retained, but the workspace bytes it describes have expired.");
+        }
+
+        PlatformResult<EntryVerificationCoverageRecord> read =
+            await ReadEntryVerificationAsync(workspaceRoot, verification, cancellationToken).ConfigureAwait(false);
+        if (!read.Succeeded)
+        {
+            return Refuse(read.Status, read.Error!);
+        }
+
+        EntryVerificationCoverageRecord record = read.Value!;
+
+        if (!string.Equals(record.SchemaVersion, EntryVerificationCoverage.SchemaVersion, StringComparison.Ordinal) ||
+            !string.Equals(record.LedgerId, ledger.LedgerId, StringComparison.Ordinal) ||
+            !string.Equals(record.TenantId, ledger.TenantId, StringComparison.Ordinal) ||
+            !string.Equals(record.ProjectId, ledger.ProjectId, StringComparison.Ordinal) ||
+            !string.Equals(record.RunId, run.RunId, StringComparison.Ordinal) ||
+            !string.Equals(record.SourceSnapshotHash, ledger.SourceSnapshotHash, StringComparison.Ordinal) ||
+            !string.Equals(WorkspacePath.Normalize(record.OutputRoot), expectedOutputRoot, StringComparison.Ordinal))
+        {
+            return Refuse(409,
+                "That verification was executed for a different tenant, project, ledger, run, source, or output root than this " +
+                "one, or under a record version this build does not read, so it is not evidence here.");
+        }
+
+        if (record.Cases.Count == 0 || record.Cases.Count > EntryVerificationCoverage.MaxCases)
+        {
+            return Refuse(409,
+                "That verification record describes no executed case, or more than this server records, so nothing was entered.");
+        }
+
+        if (record.Cases.Select(item => $"{item.EntryId}\u0000{item.TestId}").Distinct(StringComparer.Ordinal).Count()
+            != record.Cases.Count)
+        {
+            return Refuse(409,
+                "That verification record names the same case on the same property more than once, so which result it reports is ambiguous.");
+        }
+
+        // Where it was read matters as much as what it said. A result taken from a database this project's
+        // immutable profile does not name is a result about somewhere nobody approved, whatever it found.
+        PlatformTargetProfile? profile = string.IsNullOrWhiteSpace(run.TargetProfileId)
+            ? null
+            : await store.GetTargetProfileAsync(
+                tenantId, ledger.ProjectId, run.TargetProfileId, run.TargetProfileVersion, cancellationToken)
+                .ConfigureAwait(false);
+
+        if (profile is null)
+        {
+            return Refuse(409,
+                "The target profile this run was accepted against is no longer readable, so the destination its results were read " +
+                "from cannot be confirmed. Nothing was recorded.");
+        }
+
+        if (!string.Equals(profile.CanonicalHash, run.TargetProfileHash, StringComparison.Ordinal))
+        {
+            return Refuse(409,
+                "The target profile no longer matches the exact profile this run was accepted against, so where its results were " +
+                "read cannot be confirmed. Nothing was recorded.");
+        }
+
+        if (!record.Target.SameTargetAs(new EntryVerificationTargetBinding(
+                profile.EndpointHost, profile.DatabaseName, profile.SchemaName, profile.ExecutionIdentity)))
+        {
+            return Refuse(409,
+                "That verification was read from a destination this project's approved target profile does not name, so what it " +
+                "observed is not evidence about the target this run was approved for. Nothing was recorded.");
+        }
+
+        // Re-derived, not believed. The digest the cases were executed against has to be the digest this
+        // server computes from the run's own generation, or the results describe output that has since
+        // been replaced.
+        PlatformResult<string> tested =
+            await TestedOutputDigestAsync(workspaceRoot, expectedOutputRoot, generation, cancellationToken).ConfigureAwait(false);
+        if (!tested.Succeeded)
+        {
+            return Refuse(tested.Status, tested.Error!);
+        }
+
+        if (!string.Equals(record.TestedOutputSetSha256, tested.Value, StringComparison.OrdinalIgnoreCase))
+        {
+            return Refuse(409,
+                "The cases in that record name different generated content than this run's output now digests to, so they were " +
+                "executed against output this run has replaced. Nothing was recorded.");
+        }
+
+        IReadOnlyList<DispositionLedgerEntry> entries = await store
+            .DispositionLedgerEntriesAsync(tenantId, ledgerId, cancellationToken).ConfigureAwait(false);
+        Dictionary<string, DispositionLedgerEntry> byId = entries.ToDictionary(entry => entry.EntryId, StringComparer.Ordinal);
+
+        foreach (EntryVerificationCase item in record.Cases)
+        {
+            if (!byId.TryGetValue(item.EntryId, out DispositionLedgerEntry? entry))
+            {
+                return Refuse(409, "That verification names a property this ledger does not record, so it describes a different ledger's source.");
+            }
+
+            if (!string.Equals(entry.Identity.FilePath, item.ModulePath, StringComparison.Ordinal) ||
+                !string.Equals(entry.Identity.ObjectPath, item.ObjectPath, StringComparison.Ordinal) ||
+                !string.Equals(entry.Identity.PropertyName, item.PropertyName, StringComparison.Ordinal))
+            {
+                return Refuse(409,
+                    "A case names a property whose identity does not match the row it claims, so what was executed and what it " +
+                    "would be recorded against are two different properties.");
+            }
+
+            // A retirement is a decision to drop the property. A case that passed because the target
+            // happens to hold the object would read back as the property having been preserved, so it is
+            // refused here rather than admitted as evidence about a decision it does not describe.
+            if (entry.Decision is not (DispositionDecision.Preserve or DispositionDecision.Transform))
+            {
+                return Refuse(409,
+                    $"A case was executed for a property recorded {entry.Decision}, which is not a decision to carry it into the " +
+                    "target. Recording it would present that decision as a preservation, so nothing was entered.");
+            }
+
+            if (!string.Equals(item.DecisionRevision, entry.DecisionRevision, StringComparison.Ordinal))
+            {
+                return Refuse(409,
+                    "A case names a different disposition of its property than the one recorded now, so it proves something about " +
+                    "a decision nobody holds any more. Generate and verify again under the decision that stands.");
+            }
+
+            if (item.Outcome == DispositionVerificationStatus.NotExecuted)
+            {
+                return Refuse(409,
+                    "A case in that record reports nothing having been executed. An unexecuted case is a gap, and a gap is not " +
+                    "recorded as a result about a property.");
+            }
+        }
+
+        // The claim this worker holds is re-established against the run store immediately before anything
+        // is written, exactly as recording a generation does. A worker a newer claim already displaced
+        // writes nothing.
+        if (ownership is not null &&
+            (run.FenceToken != ownership.FenceToken ||
+             !await runs.RenewAsync(run.RunId, ownership.FenceToken, ownership.LeaseExtension, cancellationToken)
+                 .ConfigureAwait(false)))
+        {
+            return Refuse(409,
+                "This run is no longer held by the worker recording it, so what it executed was not entered against any decision. " +
+                "Nothing was written.");
+        }
+
+        long fence = ownership?.FenceToken ?? run.FenceToken;
+        DateTimeOffset recordedUtc = _clock();
+        List<DispositionLedgerEntryUpdate> updates = [];
+
+        // One verification is one fact about one output set, so it is applied to every property it names
+        // or to none of them. The per-entry path adjudicates the same bindings one row at a time and can
+        // leave half a verification standing when a row moves underneath it; this reads the rows once,
+        // applies the same audit, and writes them together against the versions it read.
+        foreach (IGrouping<string, EntryVerificationCase> group in record.Cases.GroupBy(item => item.EntryId, StringComparer.Ordinal))
+        {
+            DispositionLedgerEntry entry = byId[group.Key];
+
+            DispositionGeneratedReference? standing =
+                DispositionLedgerRules.StandingGeneration(entry.DecisionRevision, entry.GeneratedRefs);
+
+            if (standing is null ||
+                !string.Equals(standing.RunId, run.RunId, StringComparison.Ordinal) ||
+                standing.RunFenceToken != run.FenceToken)
+            {
+                return Refuse(409,
+                    "The generation that stands for a property in that record is not the one this run owns, so a result read " +
+                    "against some other output was not entered as evidence about it. Record this run's generation first.");
+            }
+
+            DispositionTestReference[] offered =
+            [
+                .. group.Select(item => new DispositionTestReference(
+                    run.RunId,
+                    item.TestId,
+                    item.Outcome,
+                    item.Detail,
+                    recordedUtc,
+                    item.DecisionRevision,
+                    record.TestedOutputSetSha256,
+                    ledger.SourceSnapshotHash,
+                    fence)),
+            ];
+
+            foreach (DispositionTestReference test in offered)
+            {
+                if (DispositionLedgerRules.RejectTestBinding(entry, standing, test) is { } refused)
+                {
+                    return Refuse(409, refused);
+                }
+            }
+
+            // Re-recording the identical result is the same fact arriving twice, so it changes nothing.
+            DispositionTestReference[] tests =
+                [.. entry.TestRefs, .. offered.Where(test => !Carries(entry, test))];
+
+            updates.Add(new DispositionLedgerEntryUpdate(
+                entry with
+                {
+                    TestRefs = tests,
+                    Verification = DispositionLedgerRules.AdmitEvidence(entry, entry.GeneratedRefs, tests).Verification,
+                },
+                entry.Version));
+        }
+
+        if (await store.UpdateDispositionLedgerEntriesAsync(updates, cancellationToken).ConfigureAwait(false) is null)
+        {
+            return Refuse(409,
+                "A property changed while this verification was being recorded against it, so no property was changed. " +
+                "Record it again.");
+        }
+
+        int passed = record.Cases.Count(item => item.Outcome == DispositionVerificationStatus.Passed);
+
+        return PlatformResult<DispositionLedgerVerification>.Ok(new DispositionLedgerVerification(
+            ledger.LedgerId,
+            run.RunId,
+            record.TestedOutputSetSha256,
+            updates.Count,
+            record.Cases.Count,
+            passed,
+            record.Cases.Count - passed,
+            record.Gaps.Count));
+
+        static PlatformResult<DispositionLedgerVerification> Refuse(int status, string error) =>
+            PlatformResult<DispositionLedgerVerification>.Fail(status, error);
+
+        static MigrationRunArtifact? Single(IReadOnlyList<MigrationRunArtifact> all, string runId, string path)
+        {
+            MigrationRunArtifact[] matches =
+            [
+                .. all.Where(artifact =>
+                    string.Equals(artifact.RunId, runId, StringComparison.Ordinal) &&
+                    string.Equals(WorkspacePath.Normalize(artifact.Path), path, StringComparison.Ordinal)),
+            ];
+
+            return matches.Length == 1 ? matches[0] : null;
+        }
+    }
+
+    /// <summary>
+    /// The digest of the output a run's results may speak about: re-hashed here from the file list its own
+    /// generation coverage recorded, never taken from the verification record.
+    /// </summary>
+    private static async Task<PlatformResult<string>> TestedOutputDigestAsync(
+        string workspaceRoot,
+        string outputRoot,
+        MigrationRunArtifact generation,
+        CancellationToken cancellationToken)
+    {
+        PlatformResult<GenerationCoverageRecord> coverage =
+            await ReadCoverageAsync(workspaceRoot, generation, cancellationToken).ConfigureAwait(false);
+        if (!coverage.Succeeded)
+        {
+            return PlatformResult<string>.Fail(coverage.Status, coverage.Error);
+        }
+
+        GenerationCoverageRecord record = coverage.Value!;
+        if (record.OutputFiles.Count == 0 || record.OutputFiles.Count > GenerationCoverage.MaxOutputFiles)
+        {
+            return PlatformResult<string>.Fail(409,
+                "That run's generation coverage describes no emitted file, or more than this server re-hashes.");
+        }
+
+        List<(string Path, string ContentSha256)> hashed = [];
+        foreach (string relative in record.OutputFiles)
+        {
+            if (!TryResolveRunArtifact(workspaceRoot, $"{outputRoot}/{relative}", out string absolute))
+            {
+                return PlatformResult<string>.Fail(409,
+                    $"The generated file '{relative}' is no longer readable in this run's output, so what the results were executed " +
+                    "against cannot be established from its bytes.");
+            }
+
+            try
+            {
+                byte[] bytes = await File.ReadAllBytesAsync(absolute, cancellationToken).ConfigureAwait(false);
+                hashed.Add((relative, Convert.ToHexStringLower(SHA256.HashData(bytes))));
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                return PlatformResult<string>.Fail(500, $"The generated file '{relative}' could not be read.");
+            }
+        }
+
+        return PlatformResult<string>.Ok(GenerationCoverage.OutputSetDigest(hashed));
+    }
+
+    private static async Task<PlatformResult<EntryVerificationCoverageRecord>> ReadEntryVerificationAsync(
+        string workspaceRoot,
+        MigrationRunArtifact artifact,
+        CancellationToken cancellationToken)
+    {
+        if (!TryResolveRunArtifact(workspaceRoot, artifact.Path, out string absolute))
+        {
+            return PlatformResult<EntryVerificationCoverageRecord>.Fail(410,
+                "The run's verification record is retained in its manifest, but the workspace bytes have expired.");
+        }
+
+        try
+        {
+            FileInfo file = new(absolute);
+            if (file.Length != artifact.ByteLength || file.Length > MaxCoverageBytes)
+            {
+                return PlatformResult<EntryVerificationCoverageRecord>.Fail(409,
+                    "The retained verification record no longer matches the size its run recorded.");
+            }
+
+            byte[] bytes = await File.ReadAllBytesAsync(absolute, cancellationToken).ConfigureAwait(false);
+            if (!CryptographicOperations.FixedTimeEquals(SHA256.HashData(bytes), Convert.FromHexString(artifact.ContentSha256)))
+            {
+                return PlatformResult<EntryVerificationCoverageRecord>.Fail(409,
+                    "The retained verification record no longer matches the digest its run recorded.");
+            }
+
+            EntryVerificationCoverageRecord? record =
+                JsonSerializer.Deserialize<EntryVerificationCoverageRecord>(bytes, s_coverageJson);
+
+            return record is null
+                ? PlatformResult<EntryVerificationCoverageRecord>.Fail(409, "That run's verification record could not be read.")
+                : PlatformResult<EntryVerificationCoverageRecord>.Ok(record);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or FormatException or JsonException)
+        {
+            return PlatformResult<EntryVerificationCoverageRecord>.Fail(409, "That run's verification record could not be read.");
+        }
     }
 
     private static bool Carries(DispositionLedgerEntry entry, DispositionGeneratedReference reference) =>

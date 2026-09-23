@@ -197,6 +197,7 @@ builder.Services.AddSingleton<ISourceSnapshotStore, WorkspaceSourceSnapshotStore
 string? sandboxHost = Environment.GetEnvironmentVariable("SANDBOX_PGHOST");
 string? sandboxUser = Environment.GetEnvironmentVariable("SANDBOX_PGUSER");
 string sandboxDatabase = Environment.GetEnvironmentVariable("SANDBOX_PGDATABASE") ?? "postgres";
+string sandboxSchema = Environment.GetEnvironmentVariable("SANDBOX_PGSCHEMA") ?? "public";
 bool sandboxDatabaseConfigured = !string.IsNullOrWhiteSpace(sandboxHost) && !string.IsNullOrWhiteSpace(sandboxUser);
 if (sandboxDatabaseConfigured)
 {
@@ -215,7 +216,27 @@ if (sandboxDatabaseConfigured)
             sandboxUser!,
             sandboxCredential));
 
+    // The same coordinates, read-only. A verifier configured separately would be a second destination
+    // nobody approved, so there is deliberately no way to point it anywhere but where the migration lands
+    // — and the project's target profile is compared against these before a case is planned.
+    builder.Services.AddSingleton<IEntryRuntimeVerificationGateway>(
+        new PostgresEntryRuntimeVerificationGateway(
+            sandboxHost!,
+            sandboxDatabase,
+            sandboxSchema,
+            sandboxUser!,
+            sandboxCredential));
+
     Console.WriteLine($"[INFO] Sandbox data migration target: {sandboxHost}. Authentication is Entra only.");
+    Console.WriteLine(
+        $"[INFO] Target contract verification reads {sandboxHost}/{sandboxDatabase}, schema '{sandboxSchema}', read-only. " +
+        "No generated artifact is given these coordinates and no generated statement is executed against them.");
+}
+else
+{
+    Console.WriteLine(
+        "[WARNING] SANDBOX_PGHOST and SANDBOX_PGUSER are not set. Runs that generate under a disposition ledger will report " +
+        "target contract verification as unavailable rather than passing it, so no property will read back verified.");
 }
 
 // The identity of the target, separated from the ability to write to it. A persisted target profile is
@@ -235,6 +256,53 @@ builder.Services.AddSingleton(
         Environment.GetEnvironmentVariable,
         environmentName,
         requireSandboxCoordinates: sandboxBinding is not null));
+
+// The trusted builder that turns a verified generated tier into a running revision.
+//
+// Registered only when the host can answer every question in GitHubActionsDeploymentOptions. There is no
+// partial mode and no default: a missing key leaves the gateway unregistered, the deployment phase then
+// refuses with GatewayUnavailable and names this as an unmet host prerequisite, and nothing anywhere
+// reports a deployment that did not happen. Filling a gap with a default would dispatch somewhere nobody
+// approved, and accepting an operator's token would attribute the product's side effects to a person.
+//
+// The approved application name comes from the builder's own options when a builder is configured, and
+// from TARGET_DEPLOYMENT_APPLICATION_NAME otherwise, so the run's destination stays resolvable on a host
+// that has not been given a builder yet and the refusal names the one real gap.
+if (GitHubActionsDeploymentOptions.TryRead(
+        builder.Configuration,
+        out GitHubActionsDeploymentOptions? deploymentOptions,
+        out IReadOnlyList<string> deploymentGaps))
+{
+    TokenCredential deploymentCredential = string.IsNullOrWhiteSpace(managedIdentityClientId)
+        ? new ChainedTokenCredential(
+            new AzureDeveloperCliCredential(new AzureDeveloperCliCredentialOptions { ProcessTimeout = TimeSpan.FromSeconds(30) }),
+            new ManagedIdentityCredential(ManagedIdentityId.SystemAssigned))
+        : new ManagedIdentityCredential(ManagedIdentityId.FromUserAssignedClientId(managedIdentityClientId));
+
+    builder.Services.AddSingleton<ITargetApplicationDeploymentGateway>(
+        new GitHubActionsTargetDeploymentGateway(
+            deploymentOptions!,
+            deploymentCredential,
+            new HttpClient { Timeout = TimeSpan.FromSeconds(60) }));
+
+    builder.Services.AddSingleton(new GeneratedApplicationTargetName(deploymentOptions!.TargetName));
+
+    Console.WriteLine(
+        $"[INFO] Generated-application deployment builder: {deploymentOptions.Owner}/{deploymentOptions.Repository} " +
+        $"workflow '{deploymentOptions.WorkflowFile}' on '{deploymentOptions.Ref}', target '{deploymentOptions.TargetName}'.");
+}
+else
+{
+    if (Environment.GetEnvironmentVariable("TARGET_DEPLOYMENT_APPLICATION_NAME") is { Length: > 0 } generatedTargetName)
+    {
+        builder.Services.AddSingleton(new GeneratedApplicationTargetName(generatedTargetName.Trim()));
+    }
+
+    Console.Error.WriteLine(
+        "[WARNING] No trusted deployment builder is configured, so runs will refuse target application deployment and " +
+        "report it as an unmet host prerequisite. Nothing will be deployed and nothing will claim it was. Unset: " +
+        string.Join(", ", deploymentGaps));
+}
 
 // Platform state: PostgreSQL in a deployment, a durable local file in explicit Development mode.
 // Production must not fall back to the file adapter — a per-replica file is not a shared record of who

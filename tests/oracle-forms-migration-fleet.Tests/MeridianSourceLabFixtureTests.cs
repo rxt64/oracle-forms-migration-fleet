@@ -251,6 +251,56 @@ public class MeridianSourceLabFixtureTests
     }
 
     [Fact]
+    public void The_live_installer_resumes_only_exact_owned_checkpoints()
+    {
+        string installer = Read("Provision-MeridianSourceLab.ps1");
+
+        foreach (string checkpoint in (string[])["Absent", "Schema", "Seed", "Ready", "PartialUnsupported"])
+        {
+            Assert.Contains($"'{checkpoint}'", installer, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("MERIDIAN_UNEXPECTED_OBJECTS", installer, StringComparison.Ordinal);
+        Assert.Contains("MERIDIAN_BAD_CONSTRAINTS", installer, StringComparison.Ordinal);
+        Assert.Contains("MERIDIAN_COMPILE_ERRORS", installer, StringComparison.Ordinal);
+        Assert.Contains("Install refuses to drop, reset, or modify it", installer, StringComparison.Ordinal);
+        Assert.DoesNotContain("DROP USER", installer, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("DROP TABLE", installer, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("ALTER USER BANKING", installer, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void The_live_transport_and_concurrency_harness_are_bounded_and_single_exec()
+    {
+        string transport = Read("Invoke-MeridianSqlPlus.ps1");
+        string concurrency = Read("Test-MeridianConcurrency.ps1");
+
+        Assert.Contains("[ValidateRange(1, 30)]", transport, StringComparison.Ordinal);
+        Assert.Contains("[int]$TimeoutMinutes = 15", transport, StringComparison.Ordinal);
+        Assert.Contains("Wait-ForSqlPlusPrompt", transport, StringComparison.Ordinal);
+        Assert.Contains(" {0,2}\\d+ {2}", transport, StringComparison.Ordinal);
+        Assert.Contains("-InputMode Raw", concurrency, StringComparison.Ordinal);
+        Assert.Contains("-ExecCommand 'timeout 180s bash -s'", concurrency, StringComparison.Ordinal);
+        Assert.Equal(1, Count(concurrency, "& $invokeSqlPlus"));
+        Assert.DoesNotContain("Start-Job", concurrency, StringComparison.Ordinal);
+        Assert.Contains("mkfifo", concurrency, StringComparison.Ordinal);
+        Assert.Contains("sqlplus -s / as sysdba", concurrency, StringComparison.Ordinal);
+        Assert.True(Count(concurrency, "sqlplus -s / as sysdba") >= 2);
+        Assert.Contains("timeout __BLOCK_PROOF_SECONDS__s cat", concurrency, StringComparison.Ordinal);
+        Assert.Contains(".Replace('__BLOCK_PROOF_SECONDS__'", concurrency, StringComparison.Ordinal);
+        Assert.Contains("wait \"$s1_pid\"", concurrency, StringComparison.Ordinal);
+        Assert.Contains("wait \"$s2_pid\"", concurrency, StringComparison.Ordinal);
+        Assert.Contains("OFM_CONCURRENCY|COMMIT|S2|CODE=-20105", concurrency, StringComparison.Ordinal);
+        Assert.Contains("OFM_CONCURRENCY|ROLLBACK|S2|CODE=0", concurrency, StringComparison.Ordinal);
+        Assert.Contains("WAIT_CENTISECONDS", concurrency, StringComparison.Ordinal);
+        Assert.Contains("OFM_CONCURRENCY|FINAL|MERIDIAN_COMPILE_ERRORS=0", concurrency, StringComparison.Ordinal);
+        Assert.Contains("OFM_CONCURRENCY|FINAL|SEED=5|6|2|3", concurrency, StringComparison.Ordinal);
+        Assert.Contains("OFM_CONCURRENCY|FINAL|BANKING=19|0", concurrency, StringComparison.Ordinal);
+        Assert.DoesNotContain("DROP USER", concurrency, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("ALTER USER BANKING", concurrency, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void The_lab_installs_into_its_own_schema_and_leaves_the_banking_estate_alone()
     {
         foreach (string script in Directory.EnumerateFiles(
@@ -261,6 +311,8 @@ public class MeridianSourceLabFixtureTests
             Assert.DoesNotContain("CURRENT_SCHEMA = BANKING", text, StringComparison.Ordinal);
             Assert.DoesNotContain("BANK_ACCOUNT", text, StringComparison.Ordinal);
             Assert.DoesNotContain("LEGACY_BANKING_API", text, StringComparison.Ordinal);
+            Assert.DoesNotContain(" TO BANKING", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("'BANKING'", text, StringComparison.Ordinal);
         }
     }
 
@@ -289,6 +341,9 @@ public class MeridianSourceLabFixtureTests
 
     private static string Normalize(string text) =>
         text.Replace("\r\n", "\n", StringComparison.Ordinal).Trim();
+
+    private static int Count(string text, string value) =>
+        text.Split(value, StringSplitOptions.None).Length - 1;
 
     private static string RepositoryRoot()
     {
