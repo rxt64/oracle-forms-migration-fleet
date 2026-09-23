@@ -107,6 +107,34 @@ public sealed class WorkspaceWriter
             return false;
         }
 
+        string current = Root;
+        foreach (string segment in WorkspacePath.Normalize(relativePath!).Split('/'))
+        {
+            current = Path.Combine(current, segment);
+
+            try
+            {
+                if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                {
+                    error = "The resolved path contains a symbolic link or junction and was rejected.";
+                    return false;
+                }
+            }
+            catch (FileNotFoundException)
+            {
+                break;
+            }
+            catch (DirectoryNotFoundException)
+            {
+                break;
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                error = "The resolved path could not be inspected safely and was rejected.";
+                return false;
+            }
+        }
+
         absolutePath = candidate;
         error = string.Empty;
         return true;
@@ -173,6 +201,39 @@ public sealed class WorkspaceWriter
 
         string text = s_utf8.GetString(buffer);
         return text.Length > 0 && text[0] == '\uFEFF' ? text[1..] : text;
+    }
+
+    /// <summary>
+    /// SHA-256 over a workspace file's bytes as they are on disk.
+    ///
+    /// Deliberately not a digest of <see cref="ReadText"/>'s result: that strips a byte-order mark, so two
+    /// files whose text is equal but whose bytes are not would digest the same, and a digest recorded
+    /// elsewhere over the bytes would never match it.
+    /// </summary>
+    public string Sha256(string relativePath, long maxBytes)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxBytes);
+
+        string absolute = Resolve(relativePath);
+        string reported = WorkspacePath.Normalize(relativePath);
+
+        using FileStream stream = File.OpenRead(absolute);
+        long length = stream.Length;
+
+        if (length > maxBytes)
+        {
+            throw new WorkspaceLimitExceededException(
+                WorkspaceLimitKind.FileSize,
+                reported,
+                maxBytes,
+                length,
+                actualIsLowerBound: false,
+                $"'{reported}' is {length.ToString(CultureInfo.InvariantCulture)} bytes, which exceeds the " +
+                $"{maxBytes.ToString(CultureInfo.InvariantCulture)}-byte limit this phase digests.");
+        }
+
+        using System.Security.Cryptography.SHA256 sha = System.Security.Cryptography.SHA256.Create();
+        return Convert.ToHexStringLower(sha.ComputeHash(stream));
     }
 
     /// <summary>

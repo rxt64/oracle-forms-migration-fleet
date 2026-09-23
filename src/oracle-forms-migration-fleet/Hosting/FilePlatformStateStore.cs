@@ -3,6 +3,7 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using OracleFormsMigrationFleet.Fleet;
 
 namespace OracleFormsMigrationFleet.Hosting;
 
@@ -308,6 +309,122 @@ public sealed class FilePlatformStateStore : IPlatformStateStore, ISandboxProjec
             return updated;
         }, cancellationToken);
 
+    public Task<DispositionLedger?> CreateDispositionLedgerAsync(
+        DispositionLedger ledger, IReadOnlyList<DispositionLedgerEntry> entries, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(ledger);
+        ArgumentNullException.ThrowIfNull(entries);
+
+        return MutateAsync<DispositionLedger?>(document =>
+        {
+            bool exists = document.DispositionLedgers.Any(stored =>
+                string.Equals(stored.TenantId, ledger.TenantId, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(stored.ProjectId, ledger.ProjectId, StringComparison.Ordinal) &&
+                string.Equals(stored.RunId, ledger.RunId, StringComparison.Ordinal));
+
+            if (exists)
+            {
+                return null;
+            }
+
+            document.DispositionLedgers.Add(ledger);
+            document.DispositionLedgerEntries.AddRange(entries);
+            return ledger;
+        }, cancellationToken);
+    }
+
+    public Task<DispositionLedger?> GetDispositionLedgerAsync(
+        string tenantId, string ledgerId, CancellationToken cancellationToken) =>
+        ReadAsync(document => document.DispositionLedgers.FirstOrDefault(ledger =>
+            string.Equals(ledger.TenantId, tenantId, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(ledger.LedgerId, ledgerId, StringComparison.Ordinal)), cancellationToken);
+
+    public Task<IReadOnlyList<DispositionLedger>> DispositionLedgersAsync(
+        string tenantId, string projectId, CancellationToken cancellationToken) =>
+        ReadAsync(document => (IReadOnlyList<DispositionLedger>)
+        [.. document.DispositionLedgers
+            .Where(ledger =>
+                string.Equals(ledger.TenantId, tenantId, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(ledger.ProjectId, projectId, StringComparison.Ordinal))
+            .OrderByDescending(ledger => ledger.CreatedUtc)], cancellationToken);
+
+    public Task<IReadOnlyList<DispositionLedgerEntry>> DispositionLedgerEntriesAsync(
+        string tenantId, string ledgerId, CancellationToken cancellationToken) =>
+        ReadAsync(document => (IReadOnlyList<DispositionLedgerEntry>)
+        [.. document.DispositionLedgerEntries
+            .Where(entry =>
+                string.Equals(entry.TenantId, tenantId, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(entry.LedgerId, ledgerId, StringComparison.Ordinal))
+            .OrderBy(entry => entry.Identity.ModuleName, StringComparer.Ordinal)
+            .ThenBy(entry => entry.Identity.ObjectPath, StringComparer.Ordinal)
+            .ThenBy(entry => entry.Identity.PropertyName, StringComparer.Ordinal)], cancellationToken);
+
+    public Task<DispositionLedgerEntry?> UpdateDispositionLedgerEntryAsync(
+        DispositionLedgerEntry entry, int expectedVersion, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(entry);
+
+        return MutateAsync<DispositionLedgerEntry?>(document =>
+        {
+            DispositionLedgerEntry? existing = document.DispositionLedgerEntries.FirstOrDefault(stored =>
+                string.Equals(stored.TenantId, entry.TenantId, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(stored.LedgerId, entry.LedgerId, StringComparison.Ordinal) &&
+                string.Equals(stored.EntryId, entry.EntryId, StringComparison.Ordinal));
+
+            if (existing is null || existing.Version != expectedVersion)
+            {
+                return null;
+            }
+
+            DispositionLedgerEntry updated = entry with { Version = existing.Version + 1 };
+            document.DispositionLedgerEntries.Remove(existing);
+            document.DispositionLedgerEntries.Add(updated);
+            return updated;
+        }, cancellationToken);
+    }
+
+    public Task<IReadOnlyList<DispositionLedgerEntry>?> UpdateDispositionLedgerEntriesAsync(
+        IReadOnlyList<DispositionLedgerEntryUpdate> updates, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(updates);
+
+        if (updates.Count == 0)
+        {
+            return Task.FromResult<IReadOnlyList<DispositionLedgerEntry>?>([]);
+        }
+
+        // One mutation under the document gate: every version is compared before any row is replaced, so
+        // a mismatch anywhere leaves the document exactly as it was and nothing reaches disk.
+        return MutateAsync<IReadOnlyList<DispositionLedgerEntry>?>(document =>
+        {
+            List<(DispositionLedgerEntry Existing, DispositionLedgerEntry Updated)> applied = [];
+
+            foreach (DispositionLedgerEntryUpdate update in updates)
+            {
+                DispositionLedgerEntry entry = update.Entry;
+                DispositionLedgerEntry? existing = document.DispositionLedgerEntries.FirstOrDefault(stored =>
+                    string.Equals(stored.TenantId, entry.TenantId, StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(stored.LedgerId, entry.LedgerId, StringComparison.Ordinal) &&
+                    string.Equals(stored.EntryId, entry.EntryId, StringComparison.Ordinal));
+
+                if (existing is null || existing.Version != update.ExpectedVersion)
+                {
+                    return null;
+                }
+
+                applied.Add((existing, entry with { Version = existing.Version + 1 }));
+            }
+
+            foreach ((DispositionLedgerEntry existing, DispositionLedgerEntry updated) in applied)
+            {
+                document.DispositionLedgerEntries.Remove(existing);
+                document.DispositionLedgerEntries.Add(updated);
+            }
+
+            return [.. applied.Select(pair => pair.Updated)];
+        }, cancellationToken);
+    }
+
     private static PlatformMembership? Find(Document document, string tenantId, string projectId, string objectId) =>
         document.Memberships.FirstOrDefault(membership =>
             string.Equals(membership.TenantId, tenantId, StringComparison.OrdinalIgnoreCase) &&
@@ -408,5 +525,9 @@ public sealed class FilePlatformStateStore : IPlatformStateStore, ISandboxProjec
             new(StringComparer.OrdinalIgnoreCase);
 
         public List<PlatformApproval> Approvals { get; set; } = [];
+
+        public List<DispositionLedger> DispositionLedgers { get; set; } = [];
+
+        public List<DispositionLedgerEntry> DispositionLedgerEntries { get; set; } = [];
     }
 }

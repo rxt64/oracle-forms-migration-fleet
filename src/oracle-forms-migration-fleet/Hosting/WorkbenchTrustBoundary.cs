@@ -419,6 +419,11 @@ public static class WorkbenchTrustBoundary
             request.OracleDatabaseVersion,
             WorkspacePath.Normalize(request.SourceRoot),
             WorkspacePath.Normalize(request.OutputRoot),
+
+            // A run that generates under recorded decisions is not the run an approval over no ledger was
+            // issued for, and moving to a different ledger is a different run again. Both differences have
+            // to invalidate the grant, so the locator is part of the identity it was issued against.
+            request.DispositionLedgerId ?? string.Empty,
             [.. (request.Evidence ?? [])
                 .Select(item => new CanonicalEvidence(item.Kind.ToString(), item.Source, item.IsVerified))
                 .OrderBy(item => item.Kind, StringComparer.Ordinal)
@@ -452,6 +457,7 @@ public static class WorkbenchTrustBoundary
         string OracleDatabaseVersion,
         string SourceRoot,
         string OutputRoot,
+        string DispositionLedgerId,
         IReadOnlyList<CanonicalEvidence> Evidence);
 
     private sealed record CanonicalTarget(string Database, string FrontEnd, string BackEnd);

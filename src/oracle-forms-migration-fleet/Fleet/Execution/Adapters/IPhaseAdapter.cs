@@ -25,6 +25,18 @@ public sealed record PhaseExecutionContext(
     /// </summary>
     public IReadOnlyList<PhaseOutcome> CompletedPhases { get; init; } = [];
 
+    /// <summary>
+    /// The server's authority over generating from this run's source, or null when the host established
+    /// none.
+    ///
+    /// Only the host sets this, and it sets a provider rather than a decision: a generation phase asks at
+    /// the moment it is about to emit, so a disposition changed between the operator's review and the
+    /// phase is a disposition this run does not generate under. It is never read out of the workspace, the
+    /// request, or a mapping manifest, because an authorization an untrusted document can supply
+    /// authorizes nothing.
+    /// </summary>
+    public IGenerationAuthorizationProvider? AuthorizationProvider { get; init; }
+
     public void Info(string text) => Report?.Invoke("info", text);
 
     public void Warn(string text) => Report?.Invoke("warn", text);

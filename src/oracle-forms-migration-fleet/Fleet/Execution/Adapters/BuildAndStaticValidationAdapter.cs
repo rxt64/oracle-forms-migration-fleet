@@ -18,24 +18,29 @@ public sealed class BuildAndStaticValidationAdapter(IApplicationBuildGateway? ga
         if (gateway is null)
         {
             return PhaseExecutionResult.Failure(
-                "No application build gateway is configured, so generated Java and React were not compiled.");
+                "No application build gateway is configured, so the generated back end and React were not compiled.");
         }
 
         string appRoot = $"{WorkspacePath.Normalize(context.OutputRoot)}/application";
         string backend = $"{appRoot}/backend";
         string frontend = $"{appRoot}/frontend";
-        if (!context.Workspace.FileExists($"{backend}/pom.xml") ||
-            !context.Workspace.FileExists($"{frontend}/package.json"))
+        BackEndStack stack = context.Request.Target.BackEnd;
+        string descriptor = $"{appRoot}/{GeneratedApplicationLayout.BackendDescriptor(stack)}";
+        string component = GeneratedApplicationLayout.BackendComponent(stack);
+
+        if (!context.Workspace.FileExists(descriptor) ||
+            !context.Workspace.FileExists($"{appRoot}/{GeneratedApplicationLayout.FrontendDescriptor}"))
         {
             return PhaseExecutionResult.Failure(
-                "Generated Maven and React build descriptors were not both present, so nothing was built.");
+                $"The generated {component} descriptor '{descriptor}' and the React one were not both present, " +
+                "so nothing was built.");
         }
 
-        context.Info("Building the generated Spring Boot back end.");
-        ApplicationBuildResult java = await gateway
-            .BuildJavaAsync(context.Workspace.Resolve(backend), cancellationToken)
-            .ConfigureAwait(false);
-        context.Info(java.Succeeded ? "Spring Boot build passed." : "Spring Boot build failed.");
+        context.Info($"Building the generated {component} back end.");
+        ApplicationBuildResult server = stack == BackEndStack.AspNetCore
+            ? await gateway.BuildDotNetAsync(context.Workspace.Resolve(backend), cancellationToken).ConfigureAwait(false)
+            : await gateway.BuildJavaAsync(context.Workspace.Resolve(backend), cancellationToken).ConfigureAwait(false);
+        context.Info(server.Succeeded ? $"{component} build passed." : $"{component} build failed.");
 
         context.Info("Building the generated React and TypeScript front end.");
         ApplicationBuildResult react = await gateway
@@ -43,7 +48,7 @@ public sealed class BuildAndStaticValidationAdapter(IApplicationBuildGateway? ga
             .ConfigureAwait(false);
         context.Info(react.Succeeded ? "React and TypeScript build passed." : "React and TypeScript build failed.");
 
-        java = RedactPotentialSecret(java);
+        server = RedactPotentialSecret(server);
         react = RedactPotentialSecret(react);
 
         string reportPath = $"{WorkspacePath.Normalize(context.OutputRoot)}/reports/build-and-static-analysis.json";
@@ -51,20 +56,21 @@ public sealed class BuildAndStaticValidationAdapter(IApplicationBuildGateway? ga
             new
             {
                 application = context.Request.ApplicationName,
-                succeeded = java.Succeeded && react.Succeeded,
-                components = new[] { java, react },
+                backEnd = stack.ToString(),
+                succeeded = server.Succeeded && react.Succeeded,
+                components = new[] { server, react },
             },
             new JsonSerializerOptions { WriteIndented = true }));
 
         ArtifactReference artifact = new(
             reportPath,
             ArtifactKind.ValidationReport,
-            "Compiler and static-build results for the generated Java and React application.");
+            $"Compiler and static-build results for the generated {component} and React application.");
 
-        if (!java.Succeeded || !react.Succeeded)
+        if (!server.Succeeded || !react.Succeeded)
         {
             string[] failures =
-            [.. new[] { java, react }
+            [.. new[] { server, react }
                 .Where(result => !result.Succeeded)
                 .Select(result => $"{result.Component}: {result.Command} exited {result.ExitCode}. {result.Output}")];
 

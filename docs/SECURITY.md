@@ -77,6 +77,21 @@ PostgreSQL principal with only the sandbox schema privileges required by migrati
 That database authorization is not an Azure RBAC assignment. The host fixes `SANDBOX_PGHOST`,
 `SANDBOX_PGUSER`, and `SANDBOX_PGDATABASE`; a browser request cannot select another server or credential.
 
+The generated back-end stack is host-owned for the same reason. `TARGET_BACKEND_STACK` names it —
+`JavaSpringBoot` (the default when the variable is unset) or `AspNetCore` — and an unrecognised value
+stops the host rather than falling back to a stack nobody configured. The value is part of the target
+profile's canonical hash, so changing it records a new immutable profile version and strands every
+approval issued against the previous one.
+
+A run request still carries a `target` object, because the planner needs one, so the server compares it
+to the project's target profile rather than trusting it. A request whose database, front end, or back
+end is not the one the profile records is refused with `409` — both when an approval is requested, so no
+approval record is created for a destination that was never configured, and again when a run is
+prepared, so an approval that predates this check cannot carry one through. The plan-input hash does not
+cover this on its own: it detects drift between an approval and the run it was issued for, and an
+approval requested for the wrong stack hashes the wrong stack consistently. Both request readers accept
+enum names only, so an ordinal cannot name a stack by number.
+
 ## 6. Approval-gated execution
 
 Source analysis, normalization, conversion, build validation, PostgreSQL sandbox migration, and

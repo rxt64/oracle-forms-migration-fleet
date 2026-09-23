@@ -21,4 +21,16 @@ public interface IApplicationBuildGateway
     Task<ApplicationBuildResult> BuildJavaAsync(string workingDirectory, CancellationToken cancellationToken);
 
     Task<ApplicationBuildResult> BuildReactAsync(string workingDirectory, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Builds a generated .NET back end. The default reports that this host cannot, rather than reporting a
+    /// build that did not happen as a passing one; a gateway that can build .NET overrides it.
+    /// </summary>
+    Task<ApplicationBuildResult> BuildDotNetAsync(string workingDirectory, CancellationToken cancellationToken) =>
+        Task.FromResult(new ApplicationBuildResult(
+            ".NET/ASP.NET Core",
+            "dotnet build",
+            ToolAvailable: false,
+            ExitCode: -1,
+            Output: "This build gateway has no .NET toolchain, so the generated ASP.NET Core back end was not compiled."));
 }

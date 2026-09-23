@@ -103,12 +103,40 @@ export interface WorkbenchContext {
   projects: ProjectView[];
 }
 
+export interface TargetProfileStack {
+  database: string;
+  frontEnd: string;
+  backEnd: string;
+}
+
 interface Props {
   /** Present only where a copied source exists, which is the only place an approval can be requested. */
   workspaceId?: string;
   /** The same body the planner receives. The server re-derives every binding from it. */
   runRequest?: unknown;
   onProjectChange?: (projectId: string | null) => void;
+  /** The stored profile's stack, so the wizard can report a mismatch instead of relabelling it. */
+  onTargetProfileStackChange?: (stack: TargetProfileStack | null) => void;
+}
+
+/**
+ * The parts of the requested stack the server's own comparison would reject.
+ *
+ * It repeats `WorkbenchExecution.TryMatchTargetProfile`, which runs before an approval is created and
+ * again before a run is prepared, and answers 409 from both. Repeating it here buys the operator an
+ * explanation instead of a refusal, and it is a convenience only: the server still decides.
+ */
+export function profileStackDifferences(
+  requested: Partial<TargetProfileStack> | undefined,
+  profile: TargetProfileStack | null,
+): Array<{ field: string; configured: string; requested: string }> {
+  if (!profile) return [];
+  const compared: Array<{ field: string; configured: string; requested: string }> = [
+    { field: "database", configured: profile.database, requested: requested?.database ?? "" },
+    { field: "front end", configured: profile.frontEnd, requested: requested?.frontEnd ?? "" },
+    { field: "back end", configured: profile.backEnd, requested: requested?.backEnd ?? "" },
+  ];
+  return compared.filter((item) => item.configured.toLowerCase() !== item.requested.toLowerCase());
 }
 
 async function send(path: string, method: string, body?: unknown) {
@@ -129,7 +157,7 @@ function Row({ label, value, testId }: { label: string; value: string; testId?: 
   return <div className="mf-review-row"><dt>{label}</dt><dd data-testid={testId}>{value}</dd></div>;
 }
 
-export function ProjectApprovals({ workspaceId, runRequest, onProjectChange }: Props) {
+export function ProjectApprovals({ workspaceId, runRequest, onProjectChange, onTargetProfileStackChange }: Props) {
   const [context, setContext] = useState<WorkbenchContext | null>(null);
   const [selected, setSelected] = useState<string>("");
   const [busy, setBusy] = useState(false);
@@ -170,6 +198,19 @@ export function ProjectApprovals({ workspaceId, runRequest, onProjectChange }: P
   const source = project?.sourceEnvironments.find((item) => item.sourceEnvironmentId === selectedSourceId)
     ?? project?.sourceEnvironments[0]
     ?? null;
+
+  // Keyed on the values rather than on the object, so the parent is handed a new stack only when the
+  // stored profile actually changed. Raising an object literal every render would set state forever.
+  const stackKey = profile ? `${profile.stack.database}|${profile.stack.frontEnd}|${profile.stack.backEnd}` : "";
+  useEffect(() => {
+    const [database, frontEnd, backEnd] = stackKey.split("|");
+    onTargetProfileStackChange?.(stackKey ? { database, frontEnd, backEnd } : null);
+  }, [stackKey, onTargetProfileStackChange]);
+
+  // Read off the body that would actually be posted, not off a second copy of the wizard's state, so
+  // what is checked here is what the server would receive.
+  const requestedStack = (runRequest as { target?: Partial<TargetProfileStack> } | undefined)?.target;
+  const stackDifferences = profileStackDifferences(requestedStack, profile?.stack ?? null);
 
   useEffect(() => {
     setSourceProbe(null);
@@ -415,7 +456,8 @@ export function ProjectApprovals({ workspaceId, runRequest, onProjectChange }: P
         <button
           type="button"
           className="mf-secondary"
-          disabled={busy || !profile}
+          disabled={busy || !profile || stackDifferences.length > 0}
+          aria-describedby={stackDifferences.length > 0 ? "approval-stack-mismatch" : undefined}
           data-testid="request-approval"
           onClick={() => act(async () => {
             await send(`/api/workbench/projects/${project.projectId}/approvals`, "POST", {
@@ -429,9 +471,16 @@ export function ProjectApprovals({ workspaceId, runRequest, onProjectChange }: P
         >
           Request sandbox approval for this run
         </button>
+        {stackDifferences.length > 0 && <p className="mf-error" id="approval-stack-mismatch" role="alert" data-testid="approval-stack-mismatch">
+          This project's target profile is immutable and this run does not match it
+          ({stackDifferences.map((item) => `${item.field} is fixed at ${item.configured}`).join("; ")}).
+          The server refuses an approval for a stack the profile does not name, so no approval can be requested
+          until the run asks for the configured destination. Change it on the Azure destination step.
+        </p>}
         <p className="mf-help">
           The request records the source copy this server indexed, the run inputs after every claim of authority was stripped
-          from them, and the stored target. Change any of those and the approval stops covering the run.
+          from them, and the stored target. Change any of those — including the recorded decisions this run would generate
+          under — and the approval stops covering the run.
         </p>
       </div>}
     </>}

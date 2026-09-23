@@ -38,7 +38,13 @@ public sealed record PlatformResult<T>(bool Succeeded, T? Value, int Status, str
     public static PlatformResult<T> Fail(int status, string error) => new(false, default, status, error);
 }
 
-/// <summary>What a caller asks for when requesting an approval. Every binding is derived, not supplied.</summary>
+/// <summary>
+/// What a caller asks for when requesting an approval. Every binding is derived, not supplied.
+///
+/// <paramref name="RequestedTarget"/> is the stack the server read back out of the sanitized run
+/// request. It is carried here so the approval can be refused when it names a destination the project's
+/// immutable target profile does not, rather than being bound into a grant that later authorizes it.
+/// </summary>
 public sealed record PlatformApprovalRequestInput(
     string ProjectId,
     string TargetProfileId,
@@ -47,7 +53,8 @@ public sealed record PlatformApprovalRequestInput(
     string SourceSnapshotHash,
     string PlanInputHash,
     TimeSpan Lifetime,
-    string? Notes);
+    string? Notes,
+    TargetStack? RequestedTarget);
 
 /// <summary>
 /// Projects persisted approvals into the grants the trust boundary understands.
@@ -351,8 +358,11 @@ public sealed class PlatformAccessService(
     /// <summary>
     /// Records the target this process is configured for as an immutable profile of the project.
     ///
-    /// The caller chooses nothing. Without a configured sandbox there is no target identity to describe,
-    /// and inventing one would produce a profile that authorizes a database that does not exist.
+    /// The caller chooses nothing, including the generated back-end stack: that comes from deployment
+    /// configuration and is covered by the canonical hash, so changing it supersedes the profile and
+    /// strands every approval issued against the old one. Without a configured sandbox there is no target
+    /// identity to describe, and inventing one would produce a profile that authorizes a database that
+    /// does not exist.
     /// </summary>
     public async Task<PlatformResult<PlatformTargetProfile>> EnsureConfiguredTargetProfileAsync(
         WorkbenchActor actor,
@@ -375,6 +385,15 @@ public sealed class PlatformAccessService(
                 "No sandbox database is configured on this server, so there is no target identity to record.");
         }
 
+        if (!PlatformTargetProfileEnvironment.TryResolveBackEnd(environment.StackBackEnd, out BackEndStack backEnd))
+        {
+            return PlatformResult<PlatformTargetProfile>.Fail(
+                409,
+                $"This server is configured for a back-end stack it cannot generate, so there is no target " +
+                $"identity to record. Set {PlatformTargetProfileEnvironment.BackEndVariable} to one of: " +
+                $"{string.Join(", ", Enum.GetNames<BackEndStack>())}.");
+        }
+
         PlatformTargetProfile candidate = new()
         {
             TargetProfileId = "sandbox",
@@ -393,7 +412,7 @@ public sealed class PlatformAccessService(
             EnvironmentName = environment.EnvironmentName,
             StackDatabase = nameof(DatabaseTarget.PostgreSql),
             StackFrontEnd = nameof(FrontEndStack.React),
-            StackBackEnd = nameof(BackEndStack.JavaSpringBoot),
+            StackBackEnd = backEnd.ToString(),
             CanonicalHash = string.Empty,
             CreatedUtc = _clock(),
         };
@@ -607,6 +626,15 @@ public sealed class PlatformAccessService(
         if (profile is null)
         {
             return PlatformResult<PlatformApproval>.Fail(404, "That project has no target profile with that identifier.");
+        }
+
+        // Same check the execute path runs, against the profile this approval is about to be bound to.
+        // An approval for a stack the profile does not name must not exist at all, because the plan-input
+        // hash would then happily authorize the run that asked for it.
+        if (!WorkbenchExecution.TryMatchTargetProfile(
+            input.RequestedTarget, WorkbenchTargetProfileStack.From(profile), out string incompatible))
+        {
+            return PlatformResult<PlatformApproval>.Fail(409, incompatible);
         }
 
         if (sandbox is null)
@@ -866,6 +894,9 @@ public sealed record PlatformTargetProfileEnvironment
 {
     public const string Undeclared = "undeclared";
 
+    /// <summary>The environment variable that names the generated back-end stack.</summary>
+    public const string BackEndVariable = "TARGET_BACKEND_STACK";
+
     public required string AzureTenantId { get; init; }
 
     public required string SubscriptionId { get; init; }
@@ -880,12 +911,33 @@ public sealed record PlatformTargetProfileEnvironment
 
     public required string EnvironmentName { get; init; }
 
+    /// <summary>
+    /// Back-end stack this deployment is configured to generate, named by <see cref="BackEndStack"/>.
+    ///
+    /// It is a deployment fact for the same reason the endpoint is: the generated application shape is
+    /// part of the canonical profile hash an approval is bound to, so letting a request pick it would let
+    /// a caller redirect an approved run at a target identity nobody approved. The default keeps an
+    /// unchanged deployment on the stack its existing approvals were issued against.
+    /// </summary>
+    public string StackBackEnd { get; init; } = nameof(BackEndStack.JavaSpringBoot);
+
     public static PlatformTargetProfileEnvironment Read(
         WorkbenchConfigurationLookup configuration,
         string environmentName,
         bool requireSandboxCoordinates = true)
     {
         ArgumentNullException.ThrowIfNull(configuration);
+
+        string declaredBackEnd = Value(configuration, BackEndVariable, nameof(BackEndStack.JavaSpringBoot));
+        if (!TryResolveBackEnd(declaredBackEnd, out BackEndStack _))
+        {
+            // Fail closed at startup rather than silently generating a stack nobody configured. The
+            // rejected value is not echoed, because configuration is read from the same process
+            // environment that carries credential material.
+            throw new InvalidOperationException(
+                $"{BackEndVariable} names a back-end stack this build cannot generate. Supported: " +
+                $"{string.Join(", ", Enum.GetNames<BackEndStack>())}.");
+        }
 
         PlatformTargetProfileEnvironment environment = new()
         {
@@ -896,6 +948,7 @@ public sealed record PlatformTargetProfileEnvironment
             Region = Value(configuration, "SANDBOX_AZURE_REGION"),
             SchemaName = Value(configuration, "SANDBOX_PGSCHEMA", "public"),
             EnvironmentName = environmentName,
+            StackBackEnd = declaredBackEnd,
         };
 
         if (requireSandboxCoordinates &&
@@ -916,6 +969,29 @@ public sealed record PlatformTargetProfileEnvironment
         }
 
         return environment;
+    }
+
+    /// <summary>
+    /// Resolves a configured stack name to a stack this build can actually generate.
+    ///
+    /// Only the declared names are accepted. <see cref="Enum.TryParse{TEnum}(string, bool, out TEnum)"/>
+    /// also accepts the underlying number, which would let a configured "1" quietly select whichever
+    /// stack happens to sit at that ordinal today rather than the one an operator meant to name.
+    /// </summary>
+    public static bool TryResolveBackEnd(string? declared, out BackEndStack stack)
+    {
+        string value = (declared ?? string.Empty).Trim();
+        foreach (BackEndStack known in Enum.GetValues<BackEndStack>())
+        {
+            if (string.Equals(known.ToString(), value, StringComparison.OrdinalIgnoreCase))
+            {
+                stack = known;
+                return true;
+            }
+        }
+
+        stack = default;
+        return false;
     }
 
     private static string Value(WorkbenchConfigurationLookup configuration, string name, string fallback = Undeclared) =>

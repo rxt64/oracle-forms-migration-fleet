@@ -1,0 +1,309 @@
+// Copyright (c) Microsoft. All rights reserved.
+
+using System.Text.Json;
+using OracleFormsMigrationFleet.Fleet.Execution;
+
+namespace OracleFormsMigrationFleet.Tests;
+
+/// <summary>
+/// The Meridian order-entry source lab under `infra/source-lab/meridian-order-entry` is an owned,
+/// original, fictional Oracle estate the fleet is allowed to read end to end.
+///
+/// These tests do not execute SQL: no Oracle runtime is assumed and none is reachable offline. What
+/// they establish is that the lab is the same estate the mapping fixture already declares, that its
+/// manifest and export are readable by the product's own readers rather than by a bespoke parser, and
+/// that the installed text has not drifted from the canonical source text. Compilation, seeding, and
+/// every behavioural expectation in the verifier remain NotExecuted until an operator runs them.
+/// </summary>
+public class MeridianSourceLabFixtureTests
+{
+    private static readonly string[] s_nativeModuleExtensions =
+        [".fmb", ".fmx", ".mmb", ".mmx", ".pll", ".plx", ".olb", ".fmt", ".mmt", ".rdf", ".rep"];
+
+    private static string LabRoot => Path.Combine(
+        RepositoryRoot(), "infra", "source-lab", "meridian-order-entry");
+
+    private static string Read(params string[] parts) =>
+        File.ReadAllText(Path.Combine(LabRoot, Path.Combine(parts)));
+
+    [Fact]
+    public void The_lab_schema_is_the_estate_the_mapping_fixture_already_declares()
+    {
+        // One estate, not two that drift: the lab installs exactly the tables the pilot fixture binds.
+        Assert.Equal(
+            Normalize(DotNetPilotFixtures.MeridianSchema),
+            Normalize(Read("source", "db", "schema.sql")));
+    }
+
+    [Fact]
+    public void The_installed_scripts_carry_the_canonical_source_text_unchanged()
+    {
+        Assert.Contains(
+            Normalize(Read("source", "db", "schema.sql")),
+            Normalize(Read("initdb", "001_meridian_schema.sql")),
+            StringComparison.Ordinal);
+
+        Assert.Contains(
+            Normalize(Read("source", "db", "package.sql")),
+            Normalize(Read("initdb", "003_meridian_plsql.sql")),
+            StringComparison.Ordinal);
+
+        Assert.Contains(
+            Normalize(Read("source", "db", "seed.sql")),
+            Normalize(Read("initdb", "002_meridian_seed.sql")),
+            StringComparison.Ordinal);
+
+        Assert.Contains(
+            Normalize(Read("source", "db", "sequences.sql")).Split('\n')
+                .First(line => line.StartsWith("CREATE SEQUENCE MRD_ORDER_SEQ", StringComparison.Ordinal)),
+            Normalize(Read("initdb", "001_meridian_schema.sql")),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void The_schema_parses_into_the_four_tables_the_lab_installs()
+    {
+        OracleSchema schema = OracleSchemaParser.Parse(Read("source", "db", "schema.sql"));
+
+        Assert.Equal(
+            ["MRD_ARTICLE", "MRD_CUSTOMER", "MRD_ORDER_HEAD", "MRD_ORDER_ITEM"],
+            schema.Tables.Select(table => table.Name).Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public void The_package_declares_the_routines_the_contract_promises()
+    {
+        OracleSchema schema = OracleSchemaParser.Parse(Read("source", "db", "package.sql"));
+
+        Assert.Contains(schema.ProgramUnits, unit =>
+            unit.Kind == OracleProgramUnitKind.PackageSpecification && unit.Name == "MRD_ORDER_ENTRY_API");
+        Assert.Contains(schema.ProgramUnits, unit =>
+            unit.Kind == OracleProgramUnitKind.PackageBody && unit.Name == "MRD_ORDER_ENTRY_API");
+    }
+
+    [Fact]
+    public void The_manifest_resolves_against_the_lab_schema_through_the_product_reader()
+    {
+        OracleSchema schema = OracleSchemaParser.Parse(Read("source", "db", "schema.sql"));
+
+        TargetMappingRead read = TargetMappingReader.Read(
+            Read("source", "mapping", "target-mapping.json"), schema);
+
+        Assert.Empty(read.Rejections);
+        Assert.NotNull(read.Mapping);
+        Assert.Equal(DotNetPilotFixtures.MeridianLabel, read.Mapping!.Declaration.FixtureLabel);
+        Assert.Equal("MRD_ORDER_HEAD", read.Mapping.Header.Table.Name);
+        Assert.Equal("MRD_ORDER_ITEM", read.Mapping.Detail.Table.Name);
+        Assert.Equal("MRD_CUSTOMER", read.Mapping.Party.Table.Name);
+        Assert.Equal("MRD_ARTICLE", read.Mapping.Item.Table.Name);
+        Assert.True(read.Mapping.ItemIsVersioned);
+    }
+
+    [Fact]
+    public void The_lab_manifest_binds_what_the_checked_in_pilot_manifest_binds()
+    {
+        using JsonDocument lab = JsonDocument.Parse(Read("source", "mapping", "target-mapping.json"));
+        using JsonDocument pilot = JsonDocument.Parse(DotNetPilotFixtures.MeridianManifest);
+
+        Assert.Equal(Bindings(pilot), Bindings(lab));
+    }
+
+    [Fact]
+    public void The_synthetic_export_is_readable_by_the_forms_parser()
+    {
+        FormsModuleParse parse = FormsModuleParser.Parse(Read("source", "forms", "MRD_ORDER_ENTRY.xml"));
+
+        FormsModule module = Assert.Single(parse.Modules);
+        Assert.Equal("MRD_ORDER_ENTRY", module.Name);
+        Assert.Equal("MRD_ORDER_HEAD", module.Blocks.Single(block => block.Name == "ORDER_BLOCK").BaseTable);
+        Assert.Equal("MRD_ORDER_ITEM", module.Blocks.Single(block => block.Name == "LINE_BLOCK").BaseTable);
+    }
+
+    [Fact]
+    public void The_export_reports_exactly_the_coverage_gaps_it_was_written_to_expose()
+    {
+        // Unsupported findings are what this fixture is for. Demanding none of them would force the
+        // gap out of sight; accepting any of them would let a construct appear or vanish unnoticed.
+        // The exact set is therefore pinned, so a newly dropped construct and a newly translated one
+        // both fail here and have to be accounted for.
+        FormsModuleParse parse = FormsModuleParser.Parse(Read("source", "forms", "MRD_ORDER_ENTRY.xml"));
+
+        Assert.Equal(
+            [
+                "MRD_ORDER_ENTRY.LINE_BLOCK.POST-CHANGE",
+                "MRD_ORDER_ENTRY.LINE_BLOCK.POST-TEXT-ITEM",
+                "MRD_ORDER_ENTRY.LINE_BLOCK.WHEN-NEW-RECORD-INSTANCE",
+                "MRD_ORDER_ENTRY.LINE_BLOCK.WHEN-VALIDATE-ITEM",
+                "MRD_ORDER_ENTRY.MRD_ORDER_ENTRY.ON-ERROR",
+                "MRD_ORDER_ENTRY.MRD_ORDER_ENTRY.WHEN-NEW-FORM-INSTANCE",
+                "MRD_ORDER_ENTRY.ORDER_BLOCK.KEY-COMMIT",
+                "MRD_ORDER_ENTRY.ORDER_BLOCK.POST-QUERY",
+                "MRD_ORDER_ENTRY.ORDER_BLOCK.WHEN-BUTTON-PRESSED",
+                "MRD_ORDER_ENTRY.ORDER_BLOCK.WHEN-VALIDATE-RECORD",
+                "MRD_ORDER_ENTRY.REFRESH_TOTALS",
+                "MRD_ORDER_ENTRY.SUBMIT_CURRENT_ORDER",
+                "MRD_ORDER_ENTRY.TOTALS_BLOCK.WHEN-TIMER-EXPIRED",
+            ],
+            Constructs(parse, ConversionSeverity.Unsupported));
+
+        Assert.Equal(
+            [
+                "MRD_ORDER_ENTRY.ARTICLE_LOV",
+                "MRD_ORDER_ENTRY.CUSTOMER_LOV",
+                "MRD_ORDER_ENTRY.TOTALS_BLOCK",
+            ],
+            Constructs(parse, ConversionSeverity.ManualReview));
+
+        // Nothing else was reported at any other severity.
+        Assert.Equal(16, parse.Findings.Count);
+    }
+
+    [Fact]
+    public void Every_design_time_name_the_installed_export_references_resolves_inside_it()
+    {
+        string export = Read("source", "forms", "MRD_ORDER_ENTRY.xml");
+        FormsModule module = Assert.Single(FormsModuleParser.Parse(export).Modules);
+
+        // The named visual attribute the WHEN-NEW-RECORD-INSTANCE trigger applies is declared here.
+        Assert.Contains(module.SourceFacts!.Facts, fact =>
+            fact.LocalName == "VisualAttribute" && fact.DeclaredName == "VA_TOTALS");
+
+        // Both record groups the two LOVs name are declared here.
+        foreach (string recordGroup in (string[])["CUSTOMER_RG", "ARTICLE_RG"])
+        {
+            Assert.Contains(module.SourceFacts.Facts, fact =>
+                fact.LocalName == "RecordGroup" && fact.DeclaredName == recordGroup);
+        }
+
+        // No multi-form navigation: this fixture contains one module, so CALL_FORM could only ever
+        // name a module it does not carry.
+        Assert.DoesNotContain("CALL_FORM", export, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void An_unresolved_design_time_reference_is_exercised_without_breaking_the_installed_lab()
+    {
+        // A name that resolves to nothing is a defect in the *source*, not a gap in this fleet's
+        // coverage, and the two must not be confused. The variant below exists only in this test:
+        // it is never installed, never pointed at a run, and adds no file to the lab.
+        const string DanglingExport = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <Module xmlns="http://xmlns.oracle.com/Forms" version="12.2.1.4" FormsVersion="12.2.1.4">
+              <FormModule Name="MRD_ORDER_ENTRY_DANGLING" Title="SyntheticExport negative variant">
+                <Block Name="LINE_BLOCK" QueryDataSourceName="MRD_ORDER_ITEM" RecordsDisplayCount="8">
+                  <Item Name="ITM_VALUE" ItemType="Display Item" DataType="Number" ColumnName="ITM_VALUE" Prompt="Line total"/>
+                  <Trigger Name="WHEN-NEW-RECORD-INSTANCE" TriggerText="BEGIN SET_ITEM_PROPERTY('LINE_BLOCK.ITM_VALUE', VISUAL_ATTRIBUTE, 'VA_TOTALS'); END;"/>
+                </Block>
+                <ProgramUnit Name="OPEN_CUSTOMER_FILE" ProgramUnitType="Procedure"
+                             ProgramUnitText="PROCEDURE OPEN_CUSTOMER_FILE IS BEGIN CALL_FORM('MRD_CUSTOMER_FILE', HIDE, DO_REPLACE, NO_QUERY_ONLY); END;"/>
+              </FormModule>
+            </Module>
+            """;
+
+        FormsModuleParse parse = FormsModuleParser.Parse(DanglingExport);
+        FormsModule module = Assert.Single(parse.Modules);
+
+        // Both names are referenced by retained source text...
+        Assert.Contains(module.SourceFacts!.Facts, fact => References(fact, "VA_TOTALS"));
+        Assert.Contains(module.SourceFacts.Facts, fact => References(fact, "MRD_CUSTOMER_FILE"));
+
+        // ...and neither resolves: no VisualAttribute declares VA_TOTALS, and the export carries no
+        // module named MRD_CUSTOMER_FILE for CALL_FORM to reach.
+        Assert.DoesNotContain(module.SourceFacts.Facts, fact =>
+            fact.LocalName == "VisualAttribute" && fact.DeclaredName == "VA_TOTALS");
+        Assert.DoesNotContain(parse.Modules, candidate => candidate.Name == "MRD_CUSTOMER_FILE");
+
+        // The constructs carrying the unresolved names are reported rather than silently dropped.
+        // The parser does not resolve design-time references, so it reports them as untranslated
+        // behaviour; that they are also unresolved is established above, not claimed here.
+        Assert.Equal(
+            [
+                "MRD_ORDER_ENTRY_DANGLING.LINE_BLOCK.WHEN-NEW-RECORD-INSTANCE",
+                "MRD_ORDER_ENTRY_DANGLING.OPEN_CUSTOMER_FILE",
+            ],
+            Constructs(parse, ConversionSeverity.Unsupported));
+    }
+
+    [Fact]
+    public void The_export_declares_its_synthetic_provenance_and_no_native_module_is_present()
+    {
+        string export = Read("source", "forms", "MRD_ORDER_ENTRY.xml");
+
+        Assert.Contains("SyntheticExport", export, StringComparison.Ordinal);
+        Assert.Contains("DELIBERATE SYNTHETIC", export, StringComparison.Ordinal);
+
+        // No fabricated native bytes: a hand-authored export must never be accompanied by a file that
+        // would be read as a genuine compiled or binary Forms module.
+        Assert.DoesNotContain(
+            Directory.EnumerateFiles(LabRoot, "*", SearchOption.AllDirectories),
+            path => s_nativeModuleExtensions.Contains(
+                Path.GetExtension(path), StringComparer.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void The_verifier_refuses_to_present_a_single_session_as_concurrency_evidence()
+    {
+        string verifier = Read("initdb", "004_meridian_verify.sql");
+
+        Assert.Contains("NOT VERIFIED", verifier, StringComparison.Ordinal);
+        Assert.Contains("RAISE_APPLICATION_ERROR", verifier, StringComparison.Ordinal);
+        Assert.Contains("MERIDIAN ORDER LAB: SEED OK", verifier, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void The_lab_installs_into_its_own_schema_and_leaves_the_banking_estate_alone()
+    {
+        foreach (string script in Directory.EnumerateFiles(
+            Path.Combine(LabRoot, "initdb"), "*.sql", SearchOption.TopDirectoryOnly))
+        {
+            string text = File.ReadAllText(script);
+            Assert.Contains("ALTER SESSION SET CURRENT_SCHEMA = MERIDIAN;", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("CURRENT_SCHEMA = BANKING", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("BANK_ACCOUNT", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("LEGACY_BANKING_API", text, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>Role bindings only, ordered, so formatting and comments cannot make the two look different.</summary>
+    private static IReadOnlyList<string> Bindings(JsonDocument manifest) =>
+    [
+        .. manifest.RootElement.GetProperty("objects").EnumerateArray()
+            .SelectMany(entry => entry.GetProperty("fields").EnumerateArray()
+                .Select(field =>
+                    $"{entry.GetProperty("role").GetString()}.{field.GetProperty("role").GetString()}" +
+                    $"={entry.GetProperty("table").GetString()}.{field.GetProperty("column").GetString()}"))
+            .Order(StringComparer.Ordinal),
+    ];
+
+    private static IReadOnlyList<string> Constructs(FormsModuleParse parse, ConversionSeverity severity) =>
+    [
+        .. parse.Findings
+            .Where(finding => finding.Severity == severity)
+            .Select(finding => finding.Construct)
+            .Order(StringComparer.Ordinal),
+    ];
+
+    /// <summary>Whether a retained element names <paramref name="name"/> in any attribute it declared.</summary>
+    private static bool References(FormsSourceFact fact, string name) =>
+        fact.Attributes.Any(attribute => attribute.Value.Contains(name, StringComparison.Ordinal));
+
+    private static string Normalize(string text) =>
+        text.Replace("\r\n", "\n", StringComparison.Ordinal).Trim();
+
+    private static string RepositoryRoot()
+    {
+        DirectoryInfo? directory = new(AppContext.BaseDirectory);
+
+        while (directory is not null)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "oracle-forms-migration-fleet.slnx")))
+            {
+                return directory.FullName;
+            }
+
+            directory = directory.Parent;
+        }
+
+        throw new InvalidOperationException("The repository root was not found above the test assembly.");
+    }
+}

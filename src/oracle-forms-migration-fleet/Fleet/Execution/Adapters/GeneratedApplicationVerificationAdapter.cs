@@ -26,17 +26,23 @@ public sealed class GeneratedApplicationVerificationAdapter(
 
         string outputRoot = WorkspacePath.Normalize(context.OutputRoot);
         string reportPath = $"{outputRoot}/reports/generated-application-verification.json";
-        string backend = $"{outputRoot}/application/backend";
-        string frontend = $"{outputRoot}/application/frontend";
+        string application = $"{outputRoot}/application";
+        string backend = $"{application}/backend";
+        string frontend = $"{application}/frontend";
+        BackEndStack stack = context.Request.Target.BackEnd;
         List<ApplicationVerificationLegResult> legs = [];
 
         legs.Add(await ExecuteLegAsync(
             context,
             ApplicationVerificationLeg.BackendTests,
-            $"{backend}/pom.xml",
+            $"{application}/{GeneratedApplicationLayout.BackendDescriptor(stack)}",
             backend,
             "backend",
-            testGateway is null ? null : testGateway.RunBackendTestsAsync,
+            testGateway is null
+                ? null
+                : stack == BackEndStack.AspNetCore
+                    ? testGateway.RunDotNetBackendTestsAsync
+                    : testGateway.RunBackendTestsAsync,
             "No generated-application test gateway is configured.",
             cancellationToken).ConfigureAwait(false));
         legs.Add(await ExecuteLegAsync(

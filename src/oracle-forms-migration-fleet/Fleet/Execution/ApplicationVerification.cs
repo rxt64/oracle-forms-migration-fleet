@@ -72,6 +72,22 @@ public interface IApplicationTestGateway
         string workingDirectory,
         string reportDirectory,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Runs a generated .NET back end's own test suite. The default states that this host cannot run one, so
+    /// an unavailable toolchain classifies as <see cref="ApplicationVerificationState.ToolUnavailable"/>
+    /// rather than as a leg that passed without executing anything.
+    /// </summary>
+    Task<ApplicationTestRun> RunDotNetBackendTestsAsync(
+        string workingDirectory,
+        string reportDirectory,
+        CancellationToken cancellationToken) =>
+        Task.FromResult(new ApplicationTestRun(
+            "dotnet test",
+            ToolAvailable: false,
+            TimedOut: false,
+            ExitCode: -1,
+            Output: "This test gateway has no .NET toolchain, so the generated ASP.NET Core test suite was not started."));
 }
 
 public interface ITargetApplicationVerificationGateway

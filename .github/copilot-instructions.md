@@ -7,9 +7,10 @@ first one in a session.** That means this file, the nearest `AGENTS.md`, and any
 `.github/instructions/*.instructions.md` whose `applyTo` glob matches the files you are about to touch.
 Re-read after any prompt that changes direction. A later prompt does not cancel these instructions.
 
-Precedence, per GitHub's documented model: personal instructions, then repository instructions
-(this file), then organization instructions. The nearest `AGENTS.md` in the directory tree wins over
-one further up. Where guidance genuinely conflicts, say so rather than silently picking one.
+Follow the active host's instruction hierarchy and applicable scopes; do not assume the same precedence
+across VS Code and CLI. Resolve contradictions explicitly without weakening organizational policy,
+identity checks, approvals, licensing or release gates. If loading is in doubt, inspect host diagnostics.
+Track delivery status and historical limitations in `docs/DELIVERY_TRACKER.md`, not capability bans here.
 
 ## Your role: you build the tool, you are not the tool
 
@@ -21,8 +22,8 @@ This is the distinction that matters most, and it is easy to violate while being
 | Work | Whose job | How it gets done |
 |---|---|---|
 | Writing adapters, emitters, gates, agents, tests | **Yours** | Edit code in this repo |
-| Building and deploying **the workbench itself** | **Yours** | `az acr build`, `az containerapp update`, IaC |
-| Standing up the **demo estate** used to exercise the tool | **Yours** | Scripts in `infra/` |
+| Building and deploying **the workbench itself** | **Yours** | Trusted GitHub release workflow and approved IaC |
+| Provisioning the **source lab and target foundation** | **Yours** | Approved scripts in `infra/`; source lab is not migration evidence |
 | Analysing source, converting a schema, **executing DDL**, moving rows, generating the app, cutting over | **The tool's** | An adapter or agent, invoked from the GUI |
 
 If you find yourself hand-running a migration step — executing generated SQL from a console, copying rows
@@ -33,7 +34,8 @@ capable than before, which is the opposite of the goal.
 A useful test before any command: *would the fleet still be able to do this tomorrow, with nobody
 watching?* If the answer is no because you did it yourself, put it in the tool instead.
 
-Using the Azure CLI is correct for **building and deploying the tool**. Using it to perform a customer's
+Using the Azure CLI is correct for **inspecting and provisioning approved infrastructure**. Shipping
+images come from trusted CI with commit and digest provenance. Using CLI to perform a customer's
 migration is the tool doing nothing and you doing everything.
 
 ## How work actually gets done
@@ -82,7 +84,8 @@ example — and always under a termination condition and a step budget.
 Adding agents does not loosen a single gate. Agents **propose**; deterministic code **authorizes**.
 
 - No agent output may open a gate, sign an attestation, alter a deterministic report, or decide the
-  target platform. Those stay in `Fleet/`, pure and offline.
+  target platform. Authorization and planning stay pure and offline. Authorized execution adapters
+  perform scoped I/O; residing beneath `Fleet/Execution/` does not make an adapter a pure planner.
 - An agent may write artifacts only through an adapter that the planner authorized for that phase.
 - Every agent result is typed and validated before use; an unparseable result is a failed step, never a
   clean one.
@@ -166,12 +169,19 @@ in the wizard, then prove it by running it in the browser and reading the artifa
 
 Some limits are real. Respect these, and be specific about them rather than vague.
 
-- `.fmb` files are a proprietary binary; their contents need Forms Builder or the Forms JDAPI. Index
-  them by name and size, and never claim to have read their triggers or blocks.
-- PL/SQL bodies are not machine-translated here. Report them as manual PL/pgSQL work, with reasons.
-- A model may review generated artifacts and nothing else. No model output may open a gate, sign an
-  attestation, alter a deterministic report, or reach the platform recommendation.
+- Binary FMB metadata is not decoded content. Genuine extraction requires authorized tools whose
+  compatibility with the specific release is verified, with original hashes, commands and provenance
+  retained. Do not assume modern XML/JDAPI tooling supports Forms 6i.
+- Implement supported PL/SQL transformations using explicit, tested rules. Unsupported constructs
+  remain visible coverage gaps and block completion when required by the selected workflow.
+- Models may propose conversion, review and bounded repair through typed, planner-authorized adapters
+  with step/cost budgets and retained transcripts. No model output opens a gate, signs an attestation,
+  alters a deterministic report or replaces compiler, database or application execution evidence.
 - Nothing writes to a customer tenant without a named approver on the run.
+
+The export/fixture pilot and native Forms qualification are distinct outcomes. An independently owned
+fixture plus a real Oracle database may prove the target path, not native extraction or equivalence.
+Continue feasible delivery between small specs; a checked-off spec is not the mission's completion.
 
 ## Verified environment facts
 

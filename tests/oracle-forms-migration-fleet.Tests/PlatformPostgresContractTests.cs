@@ -158,6 +158,54 @@ public class PlatformPostgresContractTests
     }
 
     [Fact]
+    public void Version_five_adds_the_disposition_ledger_and_holds_one_ledger_per_run()
+    {
+        string migration = string.Join("\n", PlatformSchema.Migrations(Schema)[4].Statements);
+
+        foreach (string table in new[] { "disposition_ledger", "disposition_ledger_entry" })
+        {
+            Assert.Contains($"create table if not exists {Schema}.{table}", migration, StringComparison.Ordinal);
+        }
+
+        Assert.Contains($"references {Schema}.project (project_id)", migration, StringComparison.Ordinal);
+        Assert.Contains($"references {Schema}.disposition_ledger (ledger_id)", migration, StringComparison.Ordinal);
+        Assert.Contains("primary key (ledger_id, entry_id)", migration, StringComparison.Ordinal);
+        Assert.Contains("intermediate_content_sha256 text not null", migration, StringComparison.Ordinal);
+
+        // The uniqueness is in the index, not only in the adapter: two replicas ingesting the same run
+        // concurrently must not fork one snapshot's decisions into two ledgers.
+        Assert.Contains(
+            $"create unique index if not exists ux_disposition_ledger_run on {Schema}.disposition_ledger (tenant_id, project_id, run_id)",
+            migration,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_second_ingest_of_one_run_conflicts_instead_of_replacing_its_ledger()
+    {
+        string sql = PostgresPlatformStateStore.DispositionLedgerInsertSql(Schema);
+
+        Assert.Contains("on conflict do nothing", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("do update", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("delete", sql, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void The_disposition_entry_update_is_guarded_by_the_version_the_caller_read()
+    {
+        string sql = PostgresPlatformStateStore.DispositionLedgerEntryUpdateSql(Schema);
+
+        Assert.Contains("version = version + 1", sql, StringComparison.Ordinal);
+        Assert.Contains("and version = @expected", sql, StringComparison.Ordinal);
+        Assert.Contains("tenant_id = @tenant", sql, StringComparison.Ordinal);
+
+        // The observed source facts live in entry_json and are rewritten wholesale, so the columns the
+        // update names are the only ones a decision is allowed to move.
+        Assert.DoesNotContain("source_snapshot_hash =", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ledger_id =", sql[..sql.IndexOf("where", StringComparison.Ordinal)], StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Source_profile_insert_is_immutable_and_never_updates_a_version()
     {
         string sql = PostgresPlatformStateStore.SourceEnvironmentProfileInsertSql(Schema);
@@ -294,6 +342,7 @@ public class PlatformPostgresContractTests
         {
             PostgresPlatformStateStore.ApprovalUpdateSql(Schema),
             PostgresPlatformStateStore.MembershipVersionedUpdateSql(Schema),
+            PostgresPlatformStateStore.DispositionLedgerEntryUpdateSql(Schema),
         })
         {
             Assert.Contains("@tenant", sql, StringComparison.Ordinal);

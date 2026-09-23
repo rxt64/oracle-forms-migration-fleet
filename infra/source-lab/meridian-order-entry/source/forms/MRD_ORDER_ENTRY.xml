@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SyntheticExport - Meridian Order Entry.
+
+  PROVENANCE, stated plainly so nothing downstream can over-read this file:
+
+  * This file was hand-authored in this repository. It is a SyntheticExport: text written in the
+    shape Oracle's frmf2xml converter emits, not output from any Oracle tool.
+  * No Oracle Forms Builder, Compiler, Runtime, Migration Assistant, JDAPI or Open API call
+    produced, touched, or validated it. No .fmb, .fmx, .mmb, .mmx, .pll, .plx or .olb exists for
+    this module, and none is simulated: there are no fabricated native bytes anywhere in this
+    fixture.
+  * The version="12.2.1.4" / FormsVersion="12.2.1.4" attributes below are a DELIBERATE SYNTHETIC
+    CHOICE. 12.2.1.4 is picked because it is a release this fleet's normalizer already reads, so
+    the fixture exercises a supported path. The attribute is NOT evidence that a 12.2.1.4 tool ran,
+    and this file is NOT an Oracle Forms 6i artifact and must never be cited as one.
+  * Every customer, article, price and order named here is invented. Nothing corresponds to a real
+    person, company or transaction, and nothing is copied from a customer, a sample application, or
+    an upstream repository.
+  * Trigger bodies below are source text only. Several of them use constructs this fleet does not
+    translate; they are present on purpose so the coverage gap stays visible instead of being
+    quietly dropped. See README.md in this fixture for the enumerated list.
+  * Every design-time name this module references is declared in this module. A dangling reference
+    is a different defect from an untranslated construct, so it is exercised by an in-memory
+    variant in MeridianSourceLabFixtureTests rather than left broken here.
+-->
+<Module xmlns="http://xmlns.oracle.com/Forms" version="12.2.1.4" FormsVersion="12.2.1.4">
+  <FormModule Name="MRD_ORDER_ENTRY" Title="Meridian Order Entry" ConsoleWindow="ORDER_WINDOW">
+
+    <Trigger Name="WHEN-NEW-FORM-INSTANCE" TriggerText="BEGIN GO_BLOCK('ORDER_BLOCK'); EXECUTE_QUERY; END;"/>
+    <Trigger Name="ON-ERROR" TriggerText="BEGIN IF DBMS_ERROR_CODE = -20105 THEN MESSAGE('Not enough stock on hand.'); ELSE MESSAGE(DBMS_ERROR_TEXT); END IF; RAISE FORM_TRIGGER_FAILURE; END;"/>
+
+    <Block Name="ORDER_BLOCK" QueryDataSourceName="MRD_ORDER_HEAD" RecordsDisplayCount="1"
+           QueryAllowed="true" InsertAllowed="true" UpdateAllowed="true" DeleteAllowed="false">
+
+      <Item Name="ORD_NO" ItemType="Text Item" DataType="Number" ColumnName="ORD_NO"
+            Prompt="Order" Required="true" Visible="true" MaximumLength="10" Enabled="false"/>
+      <Item Name="ORD_CUST" ItemType="Text Item" DataType="Number" ColumnName="ORD_CUST"
+            Prompt="Customer" Required="true" Visible="true" MaximumLength="8" LOVName="CUSTOMER_LOV"/>
+      <Item Name="ORD_RAISED" ItemType="Text Item" DataType="Date" ColumnName="ORD_RAISED"
+            Prompt="Raised" Required="true" Visible="true"/>
+      <Item Name="ORD_STATE" ItemType="Text Item" DataType="Char" ColumnName="ORD_STATE"
+            Prompt="Status" Required="true" Visible="true" MaximumLength="10"/>
+      <Item Name="ORD_VALUE" ItemType="Display Item" DataType="Number" ColumnName="ORD_VALUE"
+            Prompt="Order total" Required="true" Visible="true" Enabled="false"/>
+      <Item Name="ORD_REV" ItemType="Text Item" DataType="Number" ColumnName="ORD_REV"
+            Prompt="Revision" Required="true" Visible="false" MaximumLength="12"/>
+      <Item Name="SUBMIT_BUTTON" ItemType="Push Button" Prompt="Submit order" Visible="true"/>
+
+      <Trigger Name="KEY-COMMIT" TriggerText="BEGIN SUBMIT_CURRENT_ORDER; COMMIT_FORM; END;"/>
+      <Trigger Name="WHEN-BUTTON-PRESSED" TriggerText="BEGIN SUBMIT_CURRENT_ORDER; END;"/>
+      <Trigger Name="WHEN-VALIDATE-RECORD" TriggerText="BEGIN IF :ORDER_BLOCK.ORD_CUST IS NULL THEN MESSAGE('Choose a customer.'); RAISE FORM_TRIGGER_FAILURE; END IF; END;"/>
+      <Trigger Name="POST-QUERY" TriggerText="BEGIN :ORDER_BLOCK.ORD_VALUE := MRD_ORDER_ENTRY_API.ORDER_TOTAL(:ORDER_BLOCK.ORD_NO); END;"/>
+
+    </Block>
+
+    <Block Name="LINE_BLOCK" QueryDataSourceName="MRD_ORDER_ITEM" RecordsDisplayCount="8"
+           QueryAllowed="true" InsertAllowed="true" UpdateAllowed="true" DeleteAllowed="true">
+
+      <Item Name="ITM_NO" ItemType="Text Item" DataType="Number" ColumnName="ITM_NO"
+            Prompt="Line" Required="true" Visible="true" MaximumLength="12" Enabled="false"/>
+      <Item Name="ITM_ORD" ItemType="Text Item" DataType="Number" ColumnName="ITM_ORD"
+            Prompt="Order" Required="true" Visible="false" MaximumLength="10"/>
+      <Item Name="ITM_ART" ItemType="Text Item" DataType="Number" ColumnName="ITM_ART"
+            Prompt="Article" Required="true" Visible="true" MaximumLength="8" LOVName="ARTICLE_LOV"/>
+      <Item Name="ITM_QTY" ItemType="Text Item" DataType="Number" ColumnName="ITM_QTY"
+            Prompt="Quantity" Required="true" Visible="true" MaximumLength="9"/>
+      <Item Name="ITM_PRICE" ItemType="Text Item" DataType="Number" ColumnName="ITM_PRICE"
+            Prompt="Unit price" Required="true" Visible="true" MaximumLength="11"/>
+      <Item Name="ITM_VALUE" ItemType="Display Item" DataType="Number" ColumnName="ITM_VALUE"
+            Prompt="Line total" Required="true" Visible="true" Enabled="false"/>
+      <Item Name="ART_DESC_SHADOW" ItemType="Display Item" DataType="Char"
+            Prompt="Description" Required="false" Visible="true" MaximumLength="80"/>
+
+      <Trigger Name="WHEN-VALIDATE-ITEM" TriggerText="BEGIN IF :LINE_BLOCK.ITM_QTY IS NULL OR :LINE_BLOCK.ITM_QTY &lt;= 0 OR :LINE_BLOCK.ITM_QTY &lt;&gt; TRUNC(:LINE_BLOCK.ITM_QTY) THEN MESSAGE('Quantity must be a whole number greater than zero.'); RAISE FORM_TRIGGER_FAILURE; END IF; END;"/>
+      <Trigger Name="POST-CHANGE" TriggerText="BEGIN SELECT ART_DESC, ART_PRICE INTO :LINE_BLOCK.ART_DESC_SHADOW, :LINE_BLOCK.ITM_PRICE FROM MRD_ARTICLE WHERE ART_NO = :LINE_BLOCK.ITM_ART; EXCEPTION WHEN NO_DATA_FOUND THEN MESSAGE('Unknown article.'); RAISE FORM_TRIGGER_FAILURE; END;"/>
+      <Trigger Name="WHEN-NEW-RECORD-INSTANCE" TriggerText="BEGIN SET_ITEM_PROPERTY('LINE_BLOCK.ITM_PRICE', UPDATE_ALLOWED, PROPERTY_FALSE); SET_ITEM_PROPERTY('LINE_BLOCK.ITM_VALUE', VISUAL_ATTRIBUTE, 'VA_TOTALS'); END;"/>
+      <Trigger Name="POST-TEXT-ITEM" TriggerText="BEGIN :LINE_BLOCK.ITM_VALUE := MRD_ORDER_ENTRY_API.LINE_AMOUNT(:LINE_BLOCK.ITM_QTY, :LINE_BLOCK.ITM_PRICE); END;"/>
+
+    </Block>
+
+    <Block Name="TOTALS_BLOCK" RecordsDisplayCount="1" QueryAllowed="false">
+      <Item Name="OPEN_ORDER_COUNT" ItemType="Display Item" DataType="Number" Prompt="Open orders" Visible="true"/>
+      <Trigger Name="WHEN-TIMER-EXPIRED" TriggerText="BEGIN REFRESH_TOTALS; END;"/>
+    </Block>
+
+    <LOV Name="CUSTOMER_LOV" RecordGroupName="CUSTOMER_RG" Title="Customers"/>
+    <RecordGroup Name="CUSTOMER_RG"
+                 RecordGroupQuery="SELECT CUST_NO, CUST_NAME FROM MRD_CUSTOMER WHERE CUST_STATE = 'A' ORDER BY CUST_NAME"/>
+
+    <LOV Name="ARTICLE_LOV" RecordGroupName="ARTICLE_RG" Title="Articles"/>
+    <RecordGroup Name="ARTICLE_RG"
+                 RecordGroupQuery="SELECT ART_NO, ART_DESC, ART_PRICE, ART_ON_HAND FROM MRD_ARTICLE WHERE ART_STATE = 'A' ORDER BY ART_DESC"/>
+
+    <ProgramUnit Name="SUBMIT_CURRENT_ORDER" ProgramUnitType="Procedure"
+                 ProgramUnitText="PROCEDURE SUBMIT_CURRENT_ORDER IS v_lines MRD_ORDER_LINE_TAB := MRD_ORDER_LINE_TAB(); v_ord NUMBER; BEGIN GO_BLOCK('LINE_BLOCK'); FIRST_RECORD; LOOP EXIT WHEN :LINE_BLOCK.ITM_ART IS NULL; v_lines.EXTEND; v_lines(v_lines.COUNT) := MRD_ORDER_LINE_T(:LINE_BLOCK.ITM_ART, :LINE_BLOCK.ITM_QTY); EXIT WHEN :SYSTEM.LAST_RECORD = 'TRUE'; NEXT_RECORD; END LOOP; MRD_ORDER_ENTRY_API.CREATE_ORDER(:ORDER_BLOCK.ORD_CUST, v_lines, v_ord); :ORDER_BLOCK.ORD_NO := v_ord; END;"/>
+
+    <ProgramUnit Name="REFRESH_TOTALS" ProgramUnitType="Procedure"
+                 ProgramUnitText="PROCEDURE REFRESH_TOTALS IS BEGIN SELECT COUNT(*) INTO :TOTALS_BLOCK.OPEN_ORDER_COUNT FROM MRD_ORDER_HEAD WHERE ORD_STATE = 'ENTERED'; END;"/>
+
+    <Window Name="ORDER_WINDOW" Title="Meridian Order Entry"/>
+    <Canvas Name="ORDER_CANVAS" CanvasType="Content"/>
+
+    <VisualAttribute Name="VA_TOTALS" FontName="Tahoma" FontSize="900" FontWeight="Bold"
+                     ForegroundColor="r0g0b0" BackgroundColor="r255g255b204"/>
+  </FormModule>
+</Module>

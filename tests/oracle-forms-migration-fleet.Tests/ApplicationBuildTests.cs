@@ -161,6 +161,7 @@ public class ProcessApplicationBuildGatewayTests
     {
         ProcessStartInfo start = new("dotnet");
         start.Environment["PATH"] = "safe-path";
+        start.Environment["DOTNET_ROOT"] = "/usr/share/dotnet";
         start.Environment["AZURE_CLIENT_ID"] = "secret-client";
         start.Environment["IDENTITY_ENDPOINT"] = "http://identity";
         start.Environment["NPM_CONFIG_TOKEN"] = "secret-token";
@@ -168,6 +169,7 @@ public class ProcessApplicationBuildGatewayTests
         ProcessApplicationBuildGateway.ApplyRestrictedEnvironment(start);
 
         Assert.Equal("safe-path", start.Environment["PATH"]);
+        Assert.Equal("/usr/share/dotnet", start.Environment["DOTNET_ROOT"]);
         Assert.False(start.Environment.ContainsKey("AZURE_CLIENT_ID"));
         Assert.False(start.Environment.ContainsKey("IDENTITY_ENDPOINT"));
         Assert.False(start.Environment.ContainsKey("NPM_CONFIG_TOKEN"));

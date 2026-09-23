@@ -2,13 +2,44 @@
 
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Text;
+using System.Xml.Linq;
+using OracleFormsMigrationFleet.Fleet;
 using OracleFormsMigrationFleet.Fleet.Execution;
 
 namespace OracleFormsMigrationFleet.Hosting;
 
 public sealed class ProcessApplicationTestGateway : IApplicationTestGateway
 {
+    private const string DotNetTrxFileName = "dotnet-backend.trx";
+    private const string DotNetReportFileName = "dotnet-backend.xml";
+
     private static readonly TimeSpan s_timeout = TimeSpan.FromMinutes(10);
+    private static readonly XNamespace s_trx = "http://microsoft.com/schemas/VisualStudio/TeamTest/2010";
+
+    private static readonly string s_dotNetSolution =
+        Path.GetFileName(GeneratedApplicationLayout.BackendDescriptor(BackEndStack.AspNetCore));
+
+    /// <summary>
+    /// The .NET CLI's view of the sandbox. Caches and the CLI home are redirected onto writable sandbox
+    /// paths; the generated suite is told a target is expected while being given none, so a run in here
+    /// fails every case loudly instead of reporting a green result it never earned. Handing it a real
+    /// connection string would put a target credential inside generated code, which this host will not do.
+    /// </summary>
+    internal static readonly (string Name, string Value)[] DotNetSandboxEnvironment =
+    [
+        ("DOTNET_CLI_TELEMETRY_OPTOUT", "1"),
+        ("DOTNET_NOLOGO", "1"),
+        ("DOTNET_SKIP_FIRST_TIME_EXPERIENCE", "1"),
+        ("DOTNET_CLI_UI_LANGUAGE", "en"),
+        ("DOTNET_CLI_HOME", "/home/tester"),
+        ("MSBUILDDISABLENODEREUSE", "1"),
+        ("NUGET_PACKAGES", "/home/tester/.nuget/packages"),
+        ("NUGET_HTTP_CACHE_PATH", "/tmp/nuget-http"),
+        ("NUGET_FALLBACK_PACKAGES", ""),
+        ("TARGET_POSTGRES_CONNECTION", ""),
+        ("GENERATED_SUITE_REQUIRE_TARGET", "true"),
+    ];
 
     public async Task<ApplicationTestRun> RunBackendTestsAsync(
         string workingDirectory,
@@ -110,6 +141,152 @@ public sealed class ProcessApplicationTestGateway : IApplicationTestGateway
         {
             ApplicationProcessGate.Lock.Release();
         }
+    }
+
+    /// <summary>
+    /// Restores, builds, and runs the generated ASP.NET Core suite inside the same network-isolated sandbox
+    /// the other stacks use, then writes the one JUnit report this host authors from the runner's TRX. The
+    /// sandbox reaches no database, and the suite is told to say so, so this leg reports a compile and a
+    /// loud per-case "no target" rather than a pass the run did not earn.
+    /// </summary>
+    public async Task<ApplicationTestRun> RunDotNetBackendTestsAsync(
+        string workingDirectory,
+        string reportDirectory,
+        CancellationToken cancellationToken)
+    {
+        if (!SandboxAvailable())
+        {
+            return SandboxUnavailable("dotnet test");
+        }
+
+        string? packages = NuGetPackageSource();
+        if (packages is null)
+        {
+            return new ApplicationTestRun("dotnet restore", true, false, -1, "The read-only NuGet dependency cache is unavailable.", SetupFailed: true);
+        }
+
+        using IsolatedRunner runner = IsolatedRunner.Create(workingDirectory);
+
+        // The generated suite writes into this directory, not into the caller's. The host is then the only
+        // author of the JUnit report the verification phase reads, so generated code cannot forge a pass.
+        string results = Path.Combine(runner.Root, "results");
+        Directory.CreateDirectory(results);
+
+        await ApplicationProcessGate.Lock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ApplicationTestRun prepared = await RestoreAndBuildDotNetAsync(runner, results, packages, cancellationToken)
+                .ConfigureAwait(false);
+            if (!Succeeded(prepared))
+            {
+                return prepared with { SetupFailed = true };
+            }
+
+            ApplicationTestRun test = await RunAsync(
+                "dotnet",
+                [
+                    "test",
+                    s_dotNetSolution,
+                    "-c", "Release",
+                    "--no-restore",
+                    "--no-build",
+                    "--nologo",
+                    "--results-directory", "/reports",
+                    "--logger", $"trx;LogFileName={DotNetTrxFileName}",
+                ],
+                runner,
+                results,
+                readOnlyMavenRepository: null,
+                readOnlyNpmCache: null,
+                isolateNetwork: true,
+                cancellationToken: cancellationToken,
+                readOnlyNuGetSource: packages,
+                sandboxEnvironment: DotNetSandboxEnvironment).ConfigureAwait(false);
+
+            return WriteDotNetReport(
+                test with
+                {
+                    Command = $"{prepared.Command} && {test.Command}",
+                    Output = Combine(prepared.Output, test.Output),
+                },
+                results,
+                reportDirectory);
+        }
+        finally
+        {
+            ApplicationProcessGate.Lock.Release();
+        }
+    }
+
+    internal async Task<ApplicationTestRun> BuildDotNetBackendAsync(
+        string workingDirectory,
+        CancellationToken cancellationToken)
+    {
+        if (!SandboxAvailable())
+        {
+            return SandboxUnavailable("dotnet build");
+        }
+
+        string? packages = NuGetPackageSource();
+        if (packages is null)
+        {
+            return new ApplicationTestRun("dotnet restore", true, false, -1, "The read-only NuGet dependency cache is unavailable.", SetupFailed: true);
+        }
+
+        using IsolatedRunner runner = IsolatedRunner.Create(workingDirectory);
+        string results = Path.Combine(runner.Root, "results");
+        Directory.CreateDirectory(results);
+        await ApplicationProcessGate.Lock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await RestoreAndBuildDotNetAsync(runner, results, packages, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            ApplicationProcessGate.Lock.Release();
+        }
+    }
+
+    private static async Task<ApplicationTestRun> RestoreAndBuildDotNetAsync(
+        IsolatedRunner runner,
+        string results,
+        string packages,
+        CancellationToken cancellationToken)
+    {
+        // --source is the only feed, so a restore cannot silently reach past the offline cache even if the
+        // generated output ships a NuGet.config naming a remote one.
+        ApplicationTestRun restore = await RunAsync(
+            "dotnet",
+            ["restore", s_dotNetSolution, "--source", "/nuget", "--disable-parallel", "--verbosity", "minimal"],
+            runner,
+            results,
+            readOnlyMavenRepository: null,
+            readOnlyNpmCache: null,
+            isolateNetwork: true,
+            cancellationToken: cancellationToken,
+            readOnlyNuGetSource: packages,
+            sandboxEnvironment: DotNetSandboxEnvironment).ConfigureAwait(false);
+        if (!Succeeded(restore))
+        {
+            return restore;
+        }
+
+        ApplicationTestRun build = await RunAsync(
+            "dotnet",
+            ["build", s_dotNetSolution, "-c", "Release", "--no-restore", "--nologo"],
+            runner,
+            results,
+            readOnlyMavenRepository: null,
+            readOnlyNpmCache: null,
+            isolateNetwork: true,
+            cancellationToken: cancellationToken,
+            readOnlyNuGetSource: packages,
+            sandboxEnvironment: DotNetSandboxEnvironment).ConfigureAwait(false);
+        return build with
+        {
+            Command = $"{restore.Command} && {build.Command}",
+            Output = Combine(restore.Output, build.Output),
+        };
     }
 
     internal async Task<ApplicationTestRun> BuildBackendAsync(
@@ -251,7 +428,9 @@ public sealed class ProcessApplicationTestGateway : IApplicationTestGateway
         string? readOnlyMavenRepository,
         string? readOnlyNpmCache,
         bool isolateNetwork,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? readOnlyNuGetSource = null,
+        IReadOnlyList<(string Name, string Value)>? sandboxEnvironment = null)
     {
         ProcessStartInfo start = new(isolateNetwork ? "/usr/bin/bwrap" : executable)
         {
@@ -270,7 +449,7 @@ public sealed class ProcessApplicationTestGateway : IApplicationTestGateway
 
         if (isolateNetwork)
         {
-            AddSandboxArguments(start, runner, reportDirectory, readOnlyMavenRepository, readOnlyNpmCache);
+            AddSandboxArguments(start, runner, reportDirectory, readOnlyMavenRepository, readOnlyNpmCache, readOnlyNuGetSource, sandboxEnvironment);
             start.ArgumentList.Add("--");
             start.ArgumentList.Add(executable);
         }
@@ -383,12 +562,158 @@ public sealed class ProcessApplicationTestGateway : IApplicationTestGateway
         return Directory.Exists(cache) ? cache : null;
     }
 
+    /// <summary>The offline NuGet folder feed; it holds .nupkg files, mirroring the Maven and npm caches.</summary>
+    private static string? NuGetPackageSource()
+    {
+        string cache = Environment.GetEnvironmentVariable("WORKBENCH_VERIFICATION_NUGET_CACHE")
+            ?? "/opt/ofm-verification-cache/nuget";
+        return Directory.Exists(cache) ? cache : null;
+    }
+
+    private static string Combine(params string[] outputs) =>
+        ProcessApplicationBuildGateway.Tail(string.Join('\n', outputs.Where(value => value.Length > 0)));
+
+    /// <summary>
+    /// Translates the runner's TRX into the single JUnit document the verification phase reads, and refuses
+    /// to let a run that executed nothing look like a pass.
+    /// </summary>
+    internal static ApplicationTestRun WriteDotNetReport(
+        ApplicationTestRun run,
+        string resultsDirectory,
+        string reportDirectory)
+    {
+        List<TrxCase> cases;
+        try
+        {
+            cases = ReadTrx(resultsDirectory);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Xml.XmlException or InvalidDataException)
+        {
+            return Unusable(exception.Message);
+        }
+
+        if (cases.Count == 0)
+        {
+            return Unusable("dotnet test recorded no TRX result, so no generated test outcome exists to read.");
+        }
+
+        int failures = cases.Count(result => result.Failure is not null);
+        int skipped = cases.Count(result => result.Skipped);
+        Directory.CreateDirectory(reportDirectory);
+        new XDocument(new XElement(
+            "testsuite",
+            new XAttribute("name", "generated-dotnet-backend"),
+            new XAttribute("tests", cases.Count),
+            new XAttribute("failures", failures),
+            new XAttribute("errors", 0),
+            new XAttribute("skipped", skipped),
+            cases.Select(result => new XElement(
+                "testcase",
+                new XAttribute("classname", result.ClassName),
+                new XAttribute("name", result.Name),
+                result.Failure is not null
+                    ? new XElement("failure", new XAttribute("message", result.Failure))
+                    : result.Skipped ? new XElement("skipped") : null))))
+            .Save(Path.Combine(reportDirectory, DotNetReportFileName));
+
+        return cases.Count == skipped
+            ? run with
+            {
+                ExitCode = run.ExitCode == 0 ? -1 : run.ExitCode,
+                Output = Combine(run.Output, $"All {cases.Count} generated .NET cases were skipped, so nothing was asserted."),
+            }
+            : run;
+
+        ApplicationTestRun Unusable(string reason) => run with
+        {
+            ExitCode = run.ExitCode == 0 ? -1 : run.ExitCode,
+            Output = Combine(run.Output, reason),
+        };
+    }
+
+    private static List<TrxCase> ReadTrx(string resultsDirectory)
+    {
+        List<TrxCase> cases = [];
+        string[] files = Directory.Exists(resultsDirectory)
+            ? Directory.GetFiles(resultsDirectory, "*.trx", SearchOption.AllDirectories)
+            : [];
+        if (files.Length > 64)
+        {
+            throw new InvalidDataException("The generated .NET test run produced more than 64 TRX result files.");
+        }
+
+        foreach (string file in files)
+        {
+            FileInfo info = new(file);
+            if ((info.Attributes & FileAttributes.ReparsePoint) != 0 || info.Length > 64L * 1024 * 1024)
+            {
+                throw new IOException("The generated .NET test run produced an unsafe TRX result file.");
+            }
+
+            XElement root = XDocument.Load(file).Root
+                ?? throw new InvalidDataException("The TRX result file has no root element.");
+
+            Dictionary<string, string> classNames = new(StringComparer.Ordinal);
+            foreach (XElement unit in root.Descendants(s_trx + "UnitTest"))
+            {
+                if ((string?)unit.Attribute("id") is { Length: > 0 } id)
+                {
+                    classNames[id] = (string?)unit.Element(s_trx + "TestMethod")?.Attribute("className")
+                        ?? "GeneratedApplication.Tests";
+                }
+            }
+
+            foreach (XElement result in root.Descendants(s_trx + "UnitTestResult"))
+            {
+                string name = Text((string?)result.Attribute("testName") ?? "unnamed", 400);
+                string outcome = (string?)result.Attribute("outcome") ?? "Failed";
+                string className = (string?)result.Attribute("testId") is { Length: > 0 } testId &&
+                    classNames.TryGetValue(testId, out string? declared)
+                        ? Text(declared, 400)
+                        : "GeneratedApplication.Tests";
+                bool skipped = outcome is "NotExecuted" or "Inconclusive" or "Pending" or "Disconnected" or "Warning";
+                bool passed = outcome == "Passed";
+                string? failure = passed || skipped
+                    ? null
+                    : Text(
+                        result.Descendants(s_trx + "Message").FirstOrDefault()?.Value is { Length: > 0 } message
+                            ? $"{outcome}: {message}"
+                            : outcome,
+                        2_000);
+                cases.Add(new TrxCase(className, name, failure, skipped));
+            }
+        }
+
+        return cases;
+    }
+
+    /// <summary>Bounds a TRX string and drops characters XML cannot carry in an attribute.</summary>
+    private static string Text(string value, int limit)
+    {
+        StringBuilder builder = new(Math.Min(value.Length, limit));
+        foreach (char character in value)
+        {
+            if (builder.Length == limit)
+            {
+                break;
+            }
+
+            builder.Append(char.IsControl(character) && character is not '\t' ? ' ' : character);
+        }
+
+        return builder.ToString();
+    }
+
+    private readonly record struct TrxCase(string ClassName, string Name, string? Failure, bool Skipped);
+
     private static void AddSandboxArguments(
         ProcessStartInfo start,
         IsolatedRunner runner,
         string reportDirectory,
         string? readOnlyMavenRepository,
-        string? readOnlyNpmCache)
+        string? readOnlyNpmCache,
+        string? readOnlyNuGetSource = null,
+        IReadOnlyList<(string Name, string Value)>? sandboxEnvironment = null)
     {
         foreach (string argument in new[]
         {
@@ -427,9 +752,17 @@ public sealed class ProcessApplicationTestGateway : IApplicationTestGateway
         {
             AddMount(start, "--ro-bind", readOnlyNpmCache, "/npm-cache");
         }
+        if (readOnlyNuGetSource is not null)
+        {
+            AddMount(start, "--ro-bind", readOnlyNuGetSource, "/nuget");
+        }
         AddTriple(start, "--setenv", "HOME", "/home/tester");
         AddTriple(start, "--setenv", "USERPROFILE", "/home/tester");
         AddTriple(start, "--setenv", "TMPDIR", "/tmp");
+        foreach ((string name, string value) in sandboxEnvironment ?? [])
+        {
+            AddTriple(start, "--setenv", name, value);
+        }
         AddPair(start, "--chdir", "/work");
     }
 

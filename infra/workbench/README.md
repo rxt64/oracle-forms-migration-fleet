@@ -57,10 +57,16 @@ the project-to-sandbox assignment is a durable deployment boundary, while an app
 human decision that may be requested again within that owner project.
 
 The Container App remains fixed at one replica. Browser disconnects resume through PostgreSQL event
-replay. Replica-specific workspace ownership prevents an overlapping replacement revision from claiming
-local bytes it does not hold. Started work is never executed twice; same-replica process loss records an
-`Interrupted` outcome, while replacement-replica history remains visible for reconciliation. Cross-replica
-execution requires a shared workspace volume and is intentionally unavailable in this stack.
+replay. When `workbenchArtifactStorageName` names an existing Container Apps environment storage link,
+the app mounts its classic Azure Files share at `/mnt/workbench-sources`; source snapshots and generated
+artifacts then survive revision replacement. Started work is never executed twice, and the single replica
+remains the execution concurrency boundary. Without that parameter the explicit `/tmp/workbench-sources`
+root preserves the earlier replica-local behavior.
+
+The development parameter file expects environment storage `dotnet-pilot-artifacts`, prepared by
+`infra/dotnet-pilot`. Apply and approve that additive foundation before applying this workbench template.
+The Azure Files account key is held by the managed-environment storage resource because Container Apps
+SMB mounts do not support identity-based share access; neither the workbench nor a generated app receives it.
 
 `Deploy-Workbench.ps1` is retained only for privileged first-time infrastructure and Entra bootstrap in an empty environment. It is not the application release path; routine releases must use the GitHub workflow. Bootstrap requires permission to create resource-group deployments and role assignments and to create or update an Entra application. It exposes that dedicated application as `api://<application-client-id>` and requests v2 access tokens so managed identities receive tokens from the same issuer the workbench validates. It never logs in on the user's behalf.
 

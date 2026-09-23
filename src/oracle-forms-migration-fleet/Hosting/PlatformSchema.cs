@@ -20,7 +20,7 @@ public static partial class PlatformSchema
 {
     public const string DefaultSchema = "ofm_platform";
 
-    public const int CurrentVersion = 4;
+    public const int CurrentVersion = 5;
 
     /// <summary>
     /// Lock key for <c>pg_advisory_lock</c>. Two replicas starting together must not both run V001;
@@ -275,6 +275,44 @@ public static partial class PlatformSchema
                 )
                 """,
                 $"create index if not exists ix_source_environment_profile_tenant_project on {schema}.source_environment_profile (tenant_id, project_id, source_environment_id, version desc)",
+            ]),
+            new Migration(5, "disposition-ledger",
+            [
+                $"""
+                create table if not exists {schema}.disposition_ledger (
+                    ledger_id text primary key,
+                    tenant_id text not null,
+                    project_id text not null references {schema}.project (project_id),
+                    run_id text not null,
+                    source_snapshot_hash text not null,
+                    source_root text not null,
+                    intermediate_content_sha256 text not null,
+                    created_utc timestamptz not null,
+                    created_by_object_id text not null,
+                    module_count integer not null,
+                    entry_count integer not null,
+                    version integer not null default 1
+                )
+                """,
+                $"""
+                create table if not exists {schema}.disposition_ledger_entry (
+                    ledger_id text not null references {schema}.disposition_ledger (ledger_id),
+                    entry_id text not null,
+                    tenant_id text not null,
+                    project_id text not null,
+                    source_snapshot_hash text not null,
+                    decision text not null,
+                    verification text not null,
+                    version integer not null default 1,
+                    entry_json jsonb not null,
+                    primary key (ledger_id, entry_id)
+                )
+                """,
+                // One run yields one ledger. Without this a second ingest forks one snapshot's record into
+                // two sets of decisions, and neither one is then the migration's answer.
+                $"create unique index if not exists ux_disposition_ledger_run on {schema}.disposition_ledger (tenant_id, project_id, run_id)",
+                $"create index if not exists ix_disposition_ledger_project on {schema}.disposition_ledger (tenant_id, project_id, created_utc desc)",
+                $"create index if not exists ix_disposition_ledger_entry_ledger on {schema}.disposition_ledger_entry (tenant_id, ledger_id)",
             ]),
         ];
     }

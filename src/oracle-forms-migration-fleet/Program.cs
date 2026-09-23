@@ -277,6 +277,11 @@ builder.Services.AddSingleton(new PlatformAccessService(
     platformStore, sandboxBinding, sandboxProjects: sandboxProjects));
 builder.Services.AddSingleton(new WorkbenchAuthorizationService(
     new PlatformAuthorizationStore(platformStore, sandboxBinding, sandboxProjects: sandboxProjects)));
+builder.Services.AddSingleton(provider => new DispositionLedgerService(
+    provider.GetRequiredService<IPlatformStateStore>(),
+    provider.GetRequiredService<PlatformAccessService>(),
+    provider.GetRequiredService<IMigrationRunStore>(),
+    provider.GetRequiredService<SourceWorkspaceService>()));
 
 bool migrate = migratePlatformStore;
 IPlatformStateStore startupStore = platformStore;

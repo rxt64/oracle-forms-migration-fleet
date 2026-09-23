@@ -179,12 +179,18 @@ export interface StreamStub {
   push(path: string, value: Frame): Promise<void>;
   pushAll(path: string, values: Frame[]): Promise<void>;
   close(path: string): Promise<void>;
+  /** Every body posted to the execute endpoint, in order, parsed. */
+  executeBodies(): Promise<Array<Record<string, unknown>>>;
+  /** Makes the next execute post answer like a server refusal, or clears one with null. */
+  refuseExecute(refusal: { status: number; error: string } | null): Promise<void>;
 }
 
 declare global {
   interface Window {
     __fleetStreamStub?: {
       opened: string[];
+      executed: string[];
+      refusal: { status: number; error: string } | null;
       push(path: string, payload: string): boolean;
       close(path: string): boolean;
     };
@@ -206,6 +212,8 @@ export async function installStreamStub(page: Page): Promise<StreamStub> {
 
     window.__fleetStreamStub = {
       opened,
+      executed: [],
+      refusal: null,
       push(path, payload) {
         const controller = controllers.get(path);
         if (!controller) return false;
@@ -224,6 +232,15 @@ export async function installStreamStub(page: Page): Promise<StreamStub> {
     window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
       if (url.includes(executePath) && (init?.method ?? "GET") === "POST") {
+        const stub = window.__fleetStreamStub!;
+        // Recorded before anything is answered, so a refused post is still observable as a post.
+        stub.executed.push(typeof init?.body === "string" ? init.body : "");
+        if (stub.refusal) {
+          return Promise.resolve(new Response(JSON.stringify({ error: stub.refusal.error }), {
+            status: stub.refusal.status,
+            headers: { "content-type": "application/json" },
+          }));
+        }
         return Promise.resolve(new Response(JSON.stringify({ runId: "run-e2e" }), {
           status: 202,
           headers: { "content-type": "application/json" },
@@ -294,6 +311,15 @@ export async function installStreamStub(page: Page): Promise<StreamStub> {
     },
     async close(path) {
       await page.evaluate((target) => window.__fleetStreamStub?.close(target) ?? false, path);
+    },
+    async executeBodies() {
+      const bodies = await page.evaluate(() => window.__fleetStreamStub?.executed ?? []);
+      return bodies.map((body) => JSON.parse(body) as Record<string, unknown>);
+    },
+    async refuseExecute(refusal) {
+      await page.evaluate((value) => {
+        if (window.__fleetStreamStub) window.__fleetStreamStub.refusal = value;
+      }, refusal);
     },
   };
 }

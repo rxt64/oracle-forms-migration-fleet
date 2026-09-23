@@ -364,7 +364,39 @@ public interface IPlatformStateStore
 
     /// <summary>Returns null when the stored version is not the one the caller read.</summary>
     Task<PlatformApproval?> UpdateApprovalAsync(PlatformApproval approval, int expectedVersion, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Writes a ledger and its entries together. Returns null when a ledger already covers that run, so a
+    /// second ingest cannot fork one snapshot's record into two sets of decisions.
+    /// </summary>
+    Task<DispositionLedger?> CreateDispositionLedgerAsync(
+        DispositionLedger ledger, IReadOnlyList<DispositionLedgerEntry> entries, CancellationToken cancellationToken);
+
+    Task<DispositionLedger?> GetDispositionLedgerAsync(string tenantId, string ledgerId, CancellationToken cancellationToken);
+
+    Task<IReadOnlyList<DispositionLedger>> DispositionLedgersAsync(
+        string tenantId, string projectId, CancellationToken cancellationToken);
+
+    Task<IReadOnlyList<DispositionLedgerEntry>> DispositionLedgerEntriesAsync(
+        string tenantId, string ledgerId, CancellationToken cancellationToken);
+
+    /// <summary>Returns null when the stored version is not the one the caller read.</summary>
+    Task<DispositionLedgerEntry?> UpdateDispositionLedgerEntryAsync(
+        DispositionLedgerEntry entry, int expectedVersion, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Applies every update or none of them, each against the version its caller read.
+    ///
+    /// Returns null when any expected version is not the stored one, and writes nothing in that case, so
+    /// a set of rows that describe one indivisible fact — the properties one generation covered — cannot
+    /// end up half carrying it.
+    /// </summary>
+    Task<IReadOnlyList<DispositionLedgerEntry>?> UpdateDispositionLedgerEntriesAsync(
+        IReadOnlyList<DispositionLedgerEntryUpdate> updates, CancellationToken cancellationToken);
 }
+
+/// <summary>One row of an all-or-nothing ledger write: the value to store and the version it replaces.</summary>
+public sealed record DispositionLedgerEntryUpdate(DispositionLedgerEntry Entry, int ExpectedVersion);
 
 public interface ISandboxProjectBindingStore
 {

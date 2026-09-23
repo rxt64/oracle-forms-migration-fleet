@@ -3,6 +3,7 @@
 using Azure.Core;
 using Npgsql;
 using NpgsqlTypes;
+using OracleFormsMigrationFleet.Fleet;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -516,6 +517,202 @@ public sealed class PostgresPlatformStateStore : IPlatformStateStore, IAsyncDisp
         return approval with { Version = expectedVersion + 1 };
     }
 
+    public async Task<DispositionLedger?> CreateDispositionLedgerAsync(
+        DispositionLedger ledger, IReadOnlyList<DispositionLedgerEntry> entries, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(ledger);
+        ArgumentNullException.ThrowIfNull(entries);
+
+        await using NpgsqlConnection connection = await ConnectAsync(cancellationToken).ConfigureAwait(false);
+        await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+
+        int affected;
+        await using (NpgsqlCommand command = new(DispositionLedgerInsertSql(_schema), connection, transaction))
+        {
+            BindDispositionLedger(command, ledger);
+            affected = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        if (affected == 0)
+        {
+            await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+            return null;
+        }
+
+        foreach (DispositionLedgerEntry entry in entries)
+        {
+            await using NpgsqlCommand command = new(DispositionLedgerEntryInsertSql(_schema), connection, transaction);
+            BindDispositionEntry(command, entry);
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return ledger;
+    }
+
+    public async Task<DispositionLedger?> GetDispositionLedgerAsync(
+        string tenantId, string ledgerId, CancellationToken cancellationToken)
+    {
+        await using NpgsqlConnection connection = await ConnectAsync(cancellationToken).ConfigureAwait(false);
+        await using NpgsqlCommand command = new(
+            $"{DispositionLedgerSelectSql(_schema)} where tenant_id = @tenant and ledger_id = @ledger", connection);
+        command.Parameters.AddWithValue("tenant", tenantId);
+        command.Parameters.AddWithValue("ledger", ledgerId);
+        await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadDispositionLedger(reader) : null;
+    }
+
+    public async Task<IReadOnlyList<DispositionLedger>> DispositionLedgersAsync(
+        string tenantId, string projectId, CancellationToken cancellationToken)
+    {
+        await using NpgsqlConnection connection = await ConnectAsync(cancellationToken).ConfigureAwait(false);
+        await using NpgsqlCommand command = new(
+            $"{DispositionLedgerSelectSql(_schema)} where tenant_id = @tenant and project_id = @project order by created_utc desc",
+            connection);
+        command.Parameters.AddWithValue("tenant", tenantId);
+        command.Parameters.AddWithValue("project", projectId);
+
+        List<DispositionLedger> ledgers = [];
+        await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            ledgers.Add(ReadDispositionLedger(reader));
+        }
+
+        return ledgers;
+    }
+
+    public async Task<IReadOnlyList<DispositionLedgerEntry>> DispositionLedgerEntriesAsync(
+        string tenantId, string ledgerId, CancellationToken cancellationToken)
+    {
+        await using NpgsqlConnection connection = await ConnectAsync(cancellationToken).ConfigureAwait(false);
+        await using NpgsqlCommand command = new(
+            $"{DispositionLedgerEntrySelectSql(_schema)} where tenant_id = @tenant and ledger_id = @ledger order by entry_id",
+            connection);
+        command.Parameters.AddWithValue("tenant", tenantId);
+        command.Parameters.AddWithValue("ledger", ledgerId);
+
+        List<DispositionLedgerEntry> entries = [];
+        await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            entries.Add(ReadDispositionEntry(reader));
+        }
+
+        return entries;
+    }
+
+    public async Task<DispositionLedgerEntry?> UpdateDispositionLedgerEntryAsync(
+        DispositionLedgerEntry entry, int expectedVersion, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(entry);
+
+        DispositionLedgerEntry next = entry with { Version = expectedVersion + 1 };
+        await using NpgsqlConnection connection = await ConnectAsync(cancellationToken).ConfigureAwait(false);
+        await using NpgsqlCommand command = new(DispositionLedgerEntryUpdateSql(_schema), connection);
+        BindDispositionEntryUpdate(command, next, expectedVersion);
+        return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 0 ? null : next;
+    }
+
+    public async Task<IReadOnlyList<DispositionLedgerEntry>?> UpdateDispositionLedgerEntriesAsync(
+        IReadOnlyList<DispositionLedgerEntryUpdate> updates, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(updates);
+
+        if (updates.Count == 0)
+        {
+            return [];
+        }
+
+        await using NpgsqlConnection connection = await ConnectAsync(cancellationToken).ConfigureAwait(false);
+        await using NpgsqlTransaction transaction =
+            await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+
+        List<DispositionLedgerEntry> written = [];
+        foreach (DispositionLedgerEntryUpdate update in updates)
+        {
+            DispositionLedgerEntry next = update.Entry with { Version = update.ExpectedVersion + 1 };
+            await using NpgsqlCommand command = new(DispositionLedgerEntryUpdateSql(_schema), connection, transaction);
+            BindDispositionEntryUpdate(command, next, update.ExpectedVersion);
+
+            // The version predicate is in the statement, so a row someone else moved matches nothing and
+            // the whole set rolls back rather than the remainder being applied over a changed decision.
+            if (await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 0)
+            {
+                await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+                return null;
+            }
+
+            written.Add(next);
+        }
+
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return written;
+    }
+
+    private static void BindDispositionEntryUpdate(NpgsqlCommand command, DispositionLedgerEntry next, int expectedVersion)
+    {
+        command.Parameters.AddWithValue("ledger", next.LedgerId);
+        command.Parameters.AddWithValue("entry", next.EntryId);
+        command.Parameters.AddWithValue("tenant", next.TenantId);
+        command.Parameters.AddWithValue("decision", next.Decision.ToString());
+        command.Parameters.AddWithValue("verification", next.Verification.ToString());
+        command.Parameters.AddWithValue("json", JsonSerializer.Serialize(next, s_json));
+        command.Parameters.AddWithValue("expected", expectedVersion);
+    }
+
+    private static void BindDispositionLedger(NpgsqlCommand command, DispositionLedger ledger)
+    {
+        command.Parameters.AddWithValue("ledger", ledger.LedgerId);
+        command.Parameters.AddWithValue("tenant", ledger.TenantId);
+        command.Parameters.AddWithValue("project", ledger.ProjectId);
+        command.Parameters.AddWithValue("run", ledger.RunId);
+        command.Parameters.AddWithValue("snapshot", ledger.SourceSnapshotHash);
+        command.Parameters.AddWithValue("root", ledger.SourceRoot);
+        command.Parameters.AddWithValue("content", ledger.IntermediateContentSha256);
+        command.Parameters.AddWithValue("created", NpgsqlDbType.TimestampTz, ledger.CreatedUtc);
+        command.Parameters.AddWithValue("createdBy", ledger.CreatedByObjectId);
+        command.Parameters.AddWithValue("modules", ledger.ModuleCount);
+        command.Parameters.AddWithValue("entries", ledger.EntryCount);
+        command.Parameters.AddWithValue("version", ledger.Version);
+    }
+
+    private static void BindDispositionEntry(NpgsqlCommand command, DispositionLedgerEntry entry)
+    {
+        command.Parameters.AddWithValue("ledger", entry.LedgerId);
+        command.Parameters.AddWithValue("entry", entry.EntryId);
+        command.Parameters.AddWithValue("tenant", entry.TenantId);
+        command.Parameters.AddWithValue("project", entry.ProjectId);
+        command.Parameters.AddWithValue("snapshot", entry.SourceSnapshotHash);
+        command.Parameters.AddWithValue("decision", entry.Decision.ToString());
+        command.Parameters.AddWithValue("verification", entry.Verification.ToString());
+        command.Parameters.AddWithValue("version", entry.Version);
+        command.Parameters.AddWithValue("json", JsonSerializer.Serialize(entry, s_json));
+    }
+
+    private static DispositionLedger ReadDispositionLedger(NpgsqlDataReader reader) => new()
+    {
+        LedgerId = reader.GetString(0),
+        TenantId = reader.GetString(1),
+        ProjectId = reader.GetString(2),
+        RunId = reader.GetString(3),
+        SourceSnapshotHash = reader.GetString(4),
+        SourceRoot = reader.GetString(5),
+        IntermediateContentSha256 = reader.GetString(6),
+        CreatedUtc = reader.GetFieldValue<DateTimeOffset>(7),
+        CreatedByObjectId = reader.GetString(8),
+        ModuleCount = reader.GetInt32(9),
+        EntryCount = reader.GetInt32(10),
+        Version = reader.GetInt32(11),
+    };
+
+    private static DispositionLedgerEntry ReadDispositionEntry(NpgsqlDataReader reader)
+    {
+        DispositionLedgerEntry entry = JsonSerializer.Deserialize<DispositionLedgerEntry>(reader.GetString(0), s_json)
+            ?? throw new InvalidOperationException("A stored disposition ledger entry could not be read.");
+        return entry with { Version = reader.GetInt32(1) };
+    }
+
     private async Task<IReadOnlyList<PlatformApproval>> ApprovalsAsync(
         string sql, string tenantId, string key, CancellationToken cancellationToken)
     {
@@ -632,6 +829,39 @@ public sealed class PostgresPlatformStateStore : IPlatformStateStore, IAsyncDisp
 
     public static string SourceEnvironmentProfileSelectSql(string schema) =>
         $"select profile_json::text, project_id, source_environment_id, version, tenant_id, canonical_hash, created_utc from {schema}.source_environment_profile";
+
+    public static string DispositionLedgerInsertSql(string schema) =>
+        $"""
+        insert into {schema}.disposition_ledger (ledger_id, tenant_id, project_id, run_id, source_snapshot_hash,
+            source_root, intermediate_content_sha256, created_utc, created_by_object_id, module_count, entry_count, version)
+        values (@ledger, @tenant, @project, @run, @snapshot, @root, @content, @created, @createdBy, @modules, @entries, @version)
+        on conflict do nothing
+        """;
+
+    public static string DispositionLedgerSelectSql(string schema) =>
+        $"""
+        select ledger_id, tenant_id, project_id, run_id, source_snapshot_hash, source_root,
+               intermediate_content_sha256, created_utc, created_by_object_id, module_count, entry_count, version
+        from {schema}.disposition_ledger
+        """;
+
+    public static string DispositionLedgerEntryInsertSql(string schema) =>
+        $"""
+        insert into {schema}.disposition_ledger_entry (ledger_id, entry_id, tenant_id, project_id,
+            source_snapshot_hash, decision, verification, version, entry_json)
+        values (@ledger, @entry, @tenant, @project, @snapshot, @decision, @verification, @version, cast(@json as jsonb))
+        on conflict (ledger_id, entry_id) do nothing
+        """;
+
+    public static string DispositionLedgerEntrySelectSql(string schema) =>
+        $"select entry_json::text, version from {schema}.disposition_ledger_entry";
+
+    public static string DispositionLedgerEntryUpdateSql(string schema) =>
+        $"""
+        update {schema}.disposition_ledger_entry
+        set decision = @decision, verification = @verification, version = version + 1, entry_json = cast(@json as jsonb)
+        where ledger_id = @ledger and entry_id = @entry and tenant_id = @tenant and version = @expected
+        """;
 
     public static string ApprovalSelectSql(string schema) =>
         $"""
