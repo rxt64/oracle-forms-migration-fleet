@@ -21,11 +21,33 @@ evidence. These labels are not interchangeable. Local implementation below remai
   That digest also appears in CI35916158560 deployment job107369985680.
 - Protected `.agent_configs/` and `eval.yaml` remain excluded and untouched.
 - Runtime verification/deployment follow-up is locally implemented, not yet released. Last full local
-  solution run: 1830 fleet tests plus 56 demo tests passed. Subsequent independent QA added two tests
-  and passed six fence/authorization cases and 20 policy/evidence cases; counts overlap.
+  solution run: 1949 tests passed across the solution before the final source-derived plan repair.
+  That repair passed two new regressions and 84 focused checks. Counts overlap; Docker containment
+  did not run locally and is now mandatory on the trusted CI runner.
 - Parent invoked independent QA as `GPT-5.6 Sol (copilot)`. Parent invoked the checkpoint reviewer as
   `GPT-6 Astra (copilot)`; its scoped PASS covered PR34, not this unpublished runtime follow-up.
   Routing labels are not independent serving-backend identity attestations.
+
+## Runtime Follow-up Review
+
+Draft PR35 publishes `cd78d878e9d8b1eeabd3b50aa0d74cf83b8aefea`; all four checks in CI35927480197
+passed, deployment skipped. Parent then invoked `functions.runSubagent` with model
+`GPT-6 Astra (copilot)` against that exact commit and base `0454f08cf45223491566433847dc0dc16d4b96f5`.
+The reviewer returned HOLD despite 392 focused tests passing. Its scope excluded dirty infrastructure
+and protected configuration; historical Azure evidence was not independently re-observed.
+
+Nine findings covered runner containment, late approval checks, dispatch authorization, report wire
+binding, atomic retry claims, incomplete verification plans, fixture cleanup ownership, exact revision
+readiness, and result storage coordinates. Repairs are implemented locally pending new exact-SHA CI
+and Astra review. Independent Sol QA closed eight, then found that deleting a source-required column
+shape from both plan and results evaded the self-consistency audit. The ledger now rebuilds expected
+probes from retained IR/mapping/source before admitting results; focused regressions passed.
+
+The generated build now executes inside the trusted Docker recipe, without host command files,
+credentials, or a Docker socket mounted into build steps. The executable containment regression is
+required in CI, not credited from its locally environment-gated return. Recovery uses ETag claims and
+refuses ambiguous dispatch rather than automatically risking a duplicate. Result schema v3 binds the
+operation/source/plan/target/artifact and declared readiness. None of this constitutes a live builder run.
 
 ## Current Operational Evidence
 
@@ -92,11 +114,10 @@ and the Key Vault secret identifier are listed in `OPERATIONS.md`, "Configure th
 builder". This is an external blocker — creating the App and its key needs a human with repository-admin
 and App-owner rights, and the federated CI identity cannot perform or bootstrap it.
 
-Two gaps remain open inside `generated-target.yml` itself. It cannot ask the product whether an approval
-was revoked mid-build, so it fails closed on expiry only. And generated code executes in the `build` job
-as the runner's user, so every later step of that job is estate-influenced: the host image recipe is
-pinned by digest in the workflow definition against exactly that, but nothing else in that workspace is.
-The job holds no Azure credential, which is what bounds the consequence.
+The workflow cannot ask the product whether an approval was revoked mid-build. The repaired workflow
+checks the immutable expiry before registry publication and again before updating the app; remote
+revocation after dispatch remains a limitation. Generated commands now run inside Docker build stages,
+not as the host runner user. Their success is not independent behavioral equivalence evidence.
 
 Historical PR34 checkpoint: full solution 1721/1721 passed after source-lab and filesystem hardening.
 The earlier real PostgreSQL acceptance remains separately snapshot-bound, not rerun after hardening.

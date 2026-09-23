@@ -5,6 +5,7 @@ using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Azure.Core;
 using Microsoft.Extensions.Configuration;
 using OracleFormsMigrationFleet.Fleet.Execution;
@@ -173,18 +174,29 @@ public sealed record GitHubActionsDeploymentOptions
 /// the runner's federated identity, not this process's.
 ///
 /// The operation identifier makes the whole thing idempotent: a result already present is returned as it
-/// stands, and a dispatch marker written with a conditional PUT means two replicas racing on the same run
-/// produce one build.
+/// stands, and a dispatch claim advanced only by compare-and-swap means two replicas racing on the same
+/// run produce one build.
+///
+/// The authorization this publish runs under is re-asked from the server at each checkpoint rather than
+/// captured when the gateway was entered. Packaging, uploading, reading a signing key and minting an
+/// installation token are all awaited, and an approval that was live before them says nothing about the
+/// instant the dispatch is sent — which is the only instant that mints an image.
 /// </summary>
-public sealed class GitHubActionsTargetDeploymentGateway : ITargetApplicationDeploymentGateway
+public sealed class GitHubActionsTargetDeploymentGateway : IRevalidatingTargetApplicationDeploymentGateway
 {
     private const string BlobApiVersion = "2021-12-02";
+
+    /// <summary>Shape of the durable claim this gateway writes. Read back strictly; an older one is refused.</summary>
+    private const string ClaimSchemaVersion = "fleet.target-deployment-claim/2";
+
+    /// <summary>Blob metadata name carrying the digest an uploaded bundle was stored under.</summary>
+    private const string ArchiveDigestMetadata = "x-ms-meta-archivesha256";
 
     /// <summary>
     /// How many times one operation may be dispatched before the gateway stops trying.
     ///
     /// A retry exists for exactly one failure: the process died after claiming the operation and before
-    /// GitHub accepted the dispatch, which would otherwise leave the operation pending until it timed out
+    /// it ever attempted a dispatch, which would otherwise leave the operation pending until it timed out
     /// on every later attempt. It is not a general retry loop, so it is small and it is counted durably.
     /// </summary>
     private const int MaxDispatchAttempts = 3;
@@ -192,27 +204,57 @@ public sealed class GitHubActionsTargetDeploymentGateway : ITargetApplicationDep
     private static readonly string[] s_vaultScope = ["https://vault.azure.net/.default"];
     private static readonly string[] s_storageScope = ["https://storage.azure.com/.default"];
 
-    /// <summary>How long an unconfirmed claim is left alone before recovery considers re-dispatching.</summary>
+    /// <summary>How long an unconfirmed claim is left alone before recovery considers taking it over.</summary>
     private static readonly TimeSpan s_recoveryGrace = TimeSpan.FromMinutes(2);
 
     /// <summary>Fixed entry timestamp so the same generated tier always produces the same archive digest.</summary>
     private static readonly DateTimeOffset s_epoch = new(1980, 1, 1, 0, 0, 0, TimeSpan.Zero);
 
-    private static readonly JsonSerializerOptions s_json = new()
+    /// <summary>How this gateway's own durable claim is written and read. Not a contract with the builder.</summary>
+    private static readonly JsonSerializerOptions s_claimJson = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        Converters = { new JsonStringEnumConverter() },
+    };
+
+    /// <summary>
+    /// The explicit contract the builder's result document is bound with.
+    ///
+    /// Stated rather than defaulted, because the default contract is PascalCase and the document is
+    /// camelCase: every property then binds to nothing, the record deserializes into all-nulls, and an
+    /// empty document and a real one become indistinguishable. Case-insensitivity is off deliberately —
+    /// matching loosely would hide exactly that mismatch instead of failing on it.
+    /// </summary>
+    private static readonly JsonSerializerOptions s_wireJson = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        PropertyNameCaseInsensitive = false,
+        NumberHandling = JsonNumberHandling.Strict,
+        AllowTrailingCommas = false,
+        ReadCommentHandling = JsonCommentHandling.Disallow,
     };
 
     private readonly GitHubActionsDeploymentOptions _options;
     private readonly TokenCredential _credential;
     private readonly HttpClient _http;
     private readonly TimeProvider _time;
+    private readonly ITargetDeploymentDispatchSentinel? _sentinel;
 
     public GitHubActionsTargetDeploymentGateway(
         GitHubActionsDeploymentOptions options,
         TokenCredential credential,
         HttpClient http,
         TimeProvider? time = null)
+        : this(options, credential, http, time, sentinel: null)
+    {
+    }
+
+    private GitHubActionsTargetDeploymentGateway(
+        GitHubActionsDeploymentOptions options,
+        TokenCredential credential,
+        HttpClient http,
+        TimeProvider? time,
+        ITargetDeploymentDispatchSentinel? sentinel)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(credential);
@@ -222,10 +264,50 @@ public sealed class GitHubActionsTargetDeploymentGateway : ITargetApplicationDep
         _credential = credential;
         _http = http;
         _time = time ?? TimeProvider.System;
+        _sentinel = sentinel;
     }
 
     public string Description =>
         $"the trusted '{_options.WorkflowFile}' builder in {_options.Owner}/{_options.Repository} on {_options.Ref}";
+
+    /// <summary>
+    /// The same builder, bound to one run's live server checks.
+    ///
+    /// A new instance rather than a mutation: the host's registration is shared by every run on the
+    /// process, and a gateway that could have its run swapped underneath it would revalidate against
+    /// whichever run bound it last.
+    /// </summary>
+    public ITargetApplicationDeploymentGateway BoundTo(ITargetDeploymentDispatchSentinel sentinel)
+    {
+        ArgumentNullException.ThrowIfNull(sentinel);
+
+        return new GitHubActionsTargetDeploymentGateway(_options, _credential, _http, _time, sentinel);
+    }
+
+    /// <summary>
+    /// The server's live answer at one checkpoint, or the reason this operation may not pass it.
+    ///
+    /// An unbound gateway has no live answer and says so rather than proceeding. That is not a theoretical
+    /// case: it is what a deployment attempted outside a durable run looks like, and such a run has no
+    /// claim to fence and no lease to lose, so there is nothing that could stop a stale dispatch later.
+    /// </summary>
+    private async Task<string?> WithheldAsync(
+        TargetDeploymentCheckpoint checkpoint,
+        string operationId,
+        CancellationToken cancellationToken)
+    {
+        if (_sentinel is null)
+        {
+            return "This deployment builder was never bound to a durable run, so nothing can re-ask the server whether " +
+                "this run may still publish at the moment it would. Nothing was dispatched.";
+        }
+
+        TargetDeploymentClearance clearance = await _sentinel
+            .RevalidateAsync(checkpoint, operationId, cancellationToken)
+            .ConfigureAwait(false);
+
+        return clearance.IsCleared ? null : clearance.Reason;
+    }
 
     public async Task<TargetDeploymentResult> PublishAsync(
         TargetDeploymentRequest request,
@@ -277,16 +359,7 @@ public sealed class GitHubActionsTargetDeploymentGateway : ITargetApplicationDep
 
         byte[] archive = Package(request.Bundle);
         string archiveSha = Convert.ToHexStringLower(SHA256.HashData(archive));
-        string prefix = $"operations/{request.OperationId}";
-        string artifactBlob = $"{prefix}/generated-application.zip";
-
-        // A completed operation is returned as it stands. This is what makes a resumed run after a lease
-        // expiry read the deployment that already happened instead of publishing the same bytes again.
-        if (await ReadResultAsync(prefix, authority, cancellationToken).ConfigureAwait(false) is { } existing)
-        {
-            return existing;
-        }
-
+        string artifactBlob = TargetDeploymentPolicy.ArtifactBlobName(request.OperationId);
         string artifactUri = $"{_options.StorageAccountUri.GetLeftPart(UriPartial.Authority)}/{_options.Container}/{artifactBlob}";
 
         if (TargetDeploymentPolicy.RejectArtifactUri(artifactUri) is string badUri)
@@ -296,11 +369,50 @@ public sealed class GitHubActionsTargetDeploymentGateway : ITargetApplicationDep
                 $"The artifact location this host would have handed to the builder was refused by the product's own rule: {badUri}");
         }
 
+        // Derived once, from what this process is about to dispatch, and then used both as a dispatch
+        // input and as the thing the builder's report is compared against. A report echoing a binding
+        // digest it was never given cannot be read as this operation's.
+        TargetDeploymentBuilderExpectation expectation = new(
+            request.OperationId,
+            request.Binding.RunId,
+            archiveSha,
+            _options.WorkbenchCommitSha,
+            request.Binding.SourceSnapshotHash,
+            TargetDeploymentPolicy.PlanDigest(request.Binding),
+            TargetDeploymentPolicy.TargetDigest(authority),
+            TargetDeploymentPolicy.BindingDigest(
+                request.Binding,
+                request.OperationId,
+                artifactUri,
+                archiveSha,
+                _options.WorkbenchCommitSha),
+            authority.TargetResourceId,
+            _time.GetUtcNow());
+
         try
         {
-            await PutBlobAsync(artifactBlob, archive, "application/zip", overwrite: true, cancellationToken).ConfigureAwait(false);
+            // A completed operation is returned as it stands. This is what makes a resumed run after a
+            // lease expiry read the deployment that already happened instead of publishing again.
+            if (await ReadResultAsync(expectation, cancellationToken).ConfigureAwait(false) is { } existing)
+            {
+                return existing;
+            }
 
-            if (await AdvanceAsync(request, artifactUri, archiveSha, prefix, cancellationToken).ConfigureAwait(false)
+            if (await WithheldAsync(TargetDeploymentCheckpoint.BeforeUpload, request.OperationId, cancellationToken)
+                .ConfigureAwait(false) is string beforeUpload)
+            {
+                return TargetDeploymentResult.Refused(
+                    TargetDeploymentState.NotAuthorized,
+                    $"Nothing was uploaded: {beforeUpload}");
+            }
+
+            if (await UploadArchiveAsync(artifactBlob, archive, archiveSha, cancellationToken).ConfigureAwait(false)
+                is string badUpload)
+            {
+                return TargetDeploymentResult.Refused(TargetDeploymentState.RefusedByPolicy, badUpload);
+            }
+
+            if (await AdvanceAsync(request, artifactUri, archiveSha, expectation, cancellationToken).ConfigureAwait(false)
                 is { } halted)
             {
                 return halted;
@@ -313,121 +425,317 @@ public sealed class GitHubActionsTargetDeploymentGateway : ITargetApplicationDep
                 $"The trusted builder could not be reached, so nothing was published: {exception.Message}");
         }
 
-        return await WaitAsync(prefix, request, cancellationToken).ConfigureAwait(false);
+        return await WaitAsync(request, expectation, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
-    /// Moves the operation from uploaded to dispatched, and recovers an operation that was claimed but
-    /// never dispatched.
+    /// Stores the bundle under this operation, without ever overwriting bytes already stored under it.
     ///
-    /// The failure this exists for is narrow and real: the process claims the operation with a conditional
-    /// write and then dies before GitHub accepts the dispatch. The claim outlives it, so every later
-    /// attempt used to see "already claimed", wait for a result that no builder was ever asked to produce,
-    /// and time out — permanently pending, with nothing anywhere saying why.
+    /// The identifier is derived from the bytes and the binding, so a second upload of the same operation
+    /// is the same archive — but "should be" is not a check. A blind overwrite would replace an artifact a
+    /// build may already be fetching, which is the one way this process could change what a running build
+    /// is building. So the write is create-only and a conflict is resolved by comparing the digest the
+    /// existing blob was stored under: equal is a resumption, different is a refusal.
+    /// </summary>
+    private async Task<string?> UploadArchiveAsync(
+        string blob,
+        byte[] archive,
+        string archiveSha,
+        CancellationToken cancellationToken)
+    {
+        BlobWrite stored = await PutBlobAsync(
+            blob,
+            archive,
+            "application/zip",
+            BlobPrecondition.CreateOnly,
+            null,
+            archiveSha,
+            cancellationToken).ConfigureAwait(false);
+
+        if (stored.Applied)
+        {
+            return null;
+        }
+
+        string? present = await ArchiveDigestAsync(blob, cancellationToken).ConfigureAwait(false);
+
+        if (present is null)
+        {
+            return "A bundle is already stored under this operation identifier and does not state the digest it was " +
+                "stored with, so this run could not confirm it is the same bytes. Nothing was overwritten and nothing " +
+                "was dispatched.";
+        }
+
+        return string.Equals(present, archiveSha, StringComparison.Ordinal)
+            ? null
+            : "Different bytes are already stored under this operation identifier. The identifier is derived from the " +
+                "bundle and the binding, so this cannot happen for a resumption of the same run, and the stored artifact " +
+                "was left exactly as it is rather than replaced under a build that may already be reading it.";
+    }
+
+    /// <summary>
+    /// Moves the operation from uploaded to dispatched, and decides what a claim it did not create means.
     ///
-    /// Recovery is bounded and evidence-led rather than optimistic. The claim is durable state carrying an
-    /// attempt count, and before re-dispatching anything the gateway asks GitHub whether a run for this
-    /// operation already exists. A run that exists is waited on; only the absence of one, after a grace
-    /// period and under a hard attempt ceiling, produces a second dispatch. Returning non-null stops the
-    /// operation instead of waiting.
+    /// Every transition is a compare-and-swap against the claim's entity tag, so two replicas that read
+    /// the same claim cannot both advance it: the loser's write is refused by the store and it falls
+    /// through to waiting rather than dispatching a second build of identical bytes. A blind upsert here
+    /// would make the claim a record of the last writer rather than a decision about who may dispatch.
+    ///
+    /// The states are kept apart because they mean genuinely different things. A claim that was never
+    /// attempted can be taken over after a grace period, once GitHub has been asked and says no run for
+    /// this operation exists. A claim whose dispatch was attempted and whose outcome is unknown — the
+    /// request left this process and the response never came back — is <em>not</em> re-dispatched. GitHub
+    /// may have accepted it, and a duplicate dispatch would build and deploy the same operation twice
+    /// under one run's provenance. That is answered by refusing, keeping the claim and its evidence, and
+    /// saying that re-entering the run resumes this exact operation once a run becomes visible.
+    ///
+    /// Returning non-null stops the operation instead of waiting.
     /// </summary>
     private async Task<TargetDeploymentResult?> AdvanceAsync(
         TargetDeploymentRequest request,
         string artifactUri,
         string archiveSha,
-        string prefix,
+        TargetDeploymentBuilderExpectation expectation,
         CancellationToken cancellationToken)
     {
-        string claimBlob = $"{prefix}/dispatch.json";
+        string claimBlob = TargetDeploymentPolicy.ClaimBlobName(request.OperationId);
         DateTimeOffset now = _time.GetUtcNow();
 
-        DispatchClaim claim = new(
+        if (await WithheldAsync(TargetDeploymentCheckpoint.BeforeClaim, request.OperationId, cancellationToken)
+            .ConfigureAwait(false) is string beforeClaim)
+        {
+            return TargetDeploymentResult.Refused(
+                TargetDeploymentState.NotAuthorized,
+                $"No builder was claimed or dispatched for this operation: {beforeClaim}");
+        }
+
+        DispatchClaim fresh = new(
+            ClaimSchemaVersion,
+            DispatchPhase.Claimed,
             request.OperationId,
             request.Binding.RunId,
             archiveSha,
+            expectation.BindingDigest,
             now,
             DispatchAttempts: 0,
             LastAttemptUtc: null,
-            DispatchedUtc: null);
+            DispatchedUtc: null,
+            Note: null);
 
-        // The first replica to claim the operation dispatches it; a second one falls through to the
-        // recovery path rather than starting a duplicate build of identical bytes.
-        bool mine = await PutBlobAsync(
-            claimBlob,
-            JsonSerializer.SerializeToUtf8Bytes(claim, s_json),
-            "application/json",
-            overwrite: false,
-            cancellationToken).ConfigureAwait(false);
+        BlobWrite created = await WriteClaimAsync(claimBlob, fresh, BlobPrecondition.CreateOnly, null, cancellationToken)
+            .ConfigureAwait(false);
 
-        if (!mine)
+        if (created.Applied)
         {
-            DispatchClaim? existing = await ReadClaimAsync(claimBlob, cancellationToken).ConfigureAwait(false);
-
-            if (existing is { DispatchedUtc: not null })
-            {
-                return null;
-            }
-
-            if (await RunExistsAsync(request.OperationId, cancellationToken).ConfigureAwait(false))
-            {
-                return null;
-            }
-
-            DateTimeOffset since = existing?.LastAttemptUtc ?? existing?.ClaimedUtc ?? now;
-            if (existing is not null && now - since < s_recoveryGrace)
-            {
-                return null;
-            }
-
-            int attempts = existing?.DispatchAttempts ?? 0;
-            if (attempts >= MaxDispatchAttempts)
-            {
-                return TargetDeploymentResult.Refused(
-                    TargetDeploymentState.NotAttempted,
-                    $"Operation {request.OperationId} was claimed {attempts.ToString(CultureInfo.InvariantCulture)} times and " +
-                    "no build for it exists, so this gateway stopped re-dispatching rather than looping. The bytes are " +
-                    "uploaded and the operation identifier is derived from them, so a later attempt re-enters the same " +
-                    "operation once the cause is fixed.",
-                    ["Nothing was deployed and nothing was left running. The claim is retained for inspection."]);
-            }
-
-            claim = (existing ?? claim) with { DispatchAttempts = attempts };
+            return await DispatchOnceAsync(
+                request, artifactUri, archiveSha, claimBlob, fresh, created.ETag, now, cancellationToken)
+                .ConfigureAwait(false);
         }
 
-        claim = claim with { DispatchAttempts = claim.DispatchAttempts + 1, LastAttemptUtc = now };
-        await PutBlobAsync(
-            claimBlob,
-            JsonSerializer.SerializeToUtf8Bytes(claim, s_json),
-            "application/json",
-            overwrite: true,
-            cancellationToken).ConfigureAwait(false);
+        (DispatchClaim Claim, string? ETag)? held =
+            await ReadClaimAsync(claimBlob, cancellationToken).ConfigureAwait(false);
 
-        await DispatchAsync(request, artifactUri, archiveSha, cancellationToken).ConfigureAwait(false);
+        if (held is not { } current)
+        {
+            return TargetDeploymentResult.Refused(
+                TargetDeploymentState.NotAttempted,
+                $"Operation {request.OperationId} is already claimed and the claim could not be read, so this run could " +
+                "not tell whether a build for it exists. Nothing was dispatched rather than risking a second build of the " +
+                "same bytes.");
+        }
 
-        // Written only after GitHub accepted the dispatch, so this is the fact recovery reads: a claim
-        // without it is a claim whose dispatch is unproven, which is exactly the state that used to hang.
-        await PutBlobAsync(
+        if (!string.Equals(current.Claim.RunId, request.Binding.RunId, StringComparison.Ordinal) ||
+            !string.Equals(current.Claim.ArtifactSha256, archiveSha, StringComparison.Ordinal) ||
+            !string.Equals(current.Claim.BindingDigest, expectation.BindingDigest, StringComparison.Ordinal))
+        {
+            return TargetDeploymentResult.Refused(
+                TargetDeploymentState.RefusedByPolicy,
+                $"Operation {request.OperationId} is claimed for a different run, artifact, or binding than this one. " +
+                "Nothing was dispatched, and the existing claim was left untouched.");
+        }
+
+        if (current.Claim.Phase == DispatchPhase.Dispatched)
+        {
+            return null;
+        }
+
+        DateTimeOffset since = current.Claim.LastAttemptUtc ?? current.Claim.ClaimedUtc;
+
+        if (current.Claim.Phase != DispatchPhase.Ambiguous && now - since < s_recoveryGrace)
+        {
+            // Another replica is inside the same window this one is. Waiting is correct: its dispatch
+            // either lands, in which case a result appears, or its claim ages into recovery below.
+            return null;
+        }
+
+        RunPresence presence = await RunPresenceAsync(request.OperationId, cancellationToken).ConfigureAwait(false);
+
+        if (presence == RunPresence.Present)
+        {
+            // Proven: a build for this operation exists. Recorded so no later attempt has to ask again.
+            await WriteClaimAsync(
+                claimBlob,
+                current.Claim with
+                {
+                    Phase = DispatchPhase.Dispatched,
+                    DispatchedUtc = current.Claim.DispatchedUtc ?? now,
+                    Note = "A run for this operation was observed in the trusted repository.",
+                },
+                BlobPrecondition.MatchETag,
+                current.ETag,
+                cancellationToken).ConfigureAwait(false);
+
+            return null;
+        }
+
+        if (presence == RunPresence.Unknown)
+        {
+            return TargetDeploymentResult.Refused(
+                TargetDeploymentState.NotAttempted,
+                $"Operation {request.OperationId} is already claimed and this run could not read the trusted repository's " +
+                "runs to find out whether a build for it exists. Nothing was dispatched: an unreadable list is not " +
+                "evidence that no build is running.");
+        }
+
+        if (current.Claim.Phase is DispatchPhase.Dispatching or DispatchPhase.Ambiguous)
+        {
+            return TargetDeploymentResult.Refused(
+                TargetDeploymentState.NotAttempted,
+                $"A dispatch for operation {request.OperationId} left this product and its outcome is unknown: no run for " +
+                "it is visible, and the request may still have been accepted. Nothing was dispatched again, because a " +
+                "second dispatch would build and deploy this one operation twice. The claim and its evidence are retained, " +
+                "and re-entering this run resumes this exact operation — its identifier is derived from the bytes and the " +
+                "binding, not from the attempt.",
+                [
+                    $"Claim phase: {current.Claim.Phase}.",
+                    $"Dispatch attempts recorded: {current.Claim.DispatchAttempts.ToString(CultureInfo.InvariantCulture)}.",
+                    current.Claim.Note is { Length: > 0 } note
+                        ? $"Recorded at the time: {note}"
+                        : "No further detail was recorded at the time.",
+                ]);
+        }
+
+        if (current.Claim.DispatchAttempts >= MaxDispatchAttempts)
+        {
+            return TargetDeploymentResult.Refused(
+                TargetDeploymentState.NotAttempted,
+                $"Operation {request.OperationId} was claimed " +
+                $"{current.Claim.DispatchAttempts.ToString(CultureInfo.InvariantCulture)} times and no build for it " +
+                "exists, so this gateway stopped re-dispatching rather than looping. The bytes are uploaded and the " +
+                "operation identifier is derived from them, so a later attempt re-enters the same operation once the " +
+                "cause is fixed.",
+                ["Nothing was deployed and nothing was left running. The claim is retained for inspection."]);
+        }
+
+        return await DispatchOnceAsync(
+            request, artifactUri, archiveSha, claimBlob, current.Claim, current.ETag, now, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Marks one dispatch attempt, sends it, and records what became of it.
+    ///
+    /// The attempt is written before the request leaves, under compare-and-swap, so the durable record of
+    /// "a dispatch was attempted" cannot be lost by the same crash that loses the response. Losing the
+    /// compare-and-swap means another replica advanced this claim first, and the correct answer is to wait
+    /// for its build rather than to start one.
+    /// </summary>
+    private async Task<TargetDeploymentResult?> DispatchOnceAsync(
+        TargetDeploymentRequest request,
+        string artifactUri,
+        string archiveSha,
+        string claimBlob,
+        DispatchClaim claim,
+        string? etag,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        DispatchClaim attempting = claim with
+        {
+            Phase = DispatchPhase.Dispatching,
+            DispatchAttempts = claim.DispatchAttempts + 1,
+            LastAttemptUtc = now,
+            Note = null,
+        };
+
+        BlobWrite marked = await WriteClaimAsync(
+            claimBlob, attempting, BlobPrecondition.MatchETag, etag, cancellationToken).ConfigureAwait(false);
+
+        if (!marked.Applied)
+        {
+            return null;
+        }
+
+        string? refusal;
+        try
+        {
+            refusal = await DispatchAsync(request, artifactUri, archiveSha, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is HttpRequestException or IOException or TaskCanceledException)
+        {
+            await WriteClaimAsync(
+                claimBlob,
+                attempting with
+                {
+                    Phase = DispatchPhase.Ambiguous,
+                    Note = $"The dispatch request failed without a usable response: {exception.Message}",
+                },
+                BlobPrecondition.MatchETag,
+                marked.ETag,
+                cancellationToken).ConfigureAwait(false);
+
+            return TargetDeploymentResult.Refused(
+                TargetDeploymentState.NotAttempted,
+                $"The dispatch for operation {request.OperationId} left this product without a usable response, so whether " +
+                "a build was started is unknown. Nothing was dispatched again. Re-entering this run resumes this exact " +
+                "operation, which will either find the run or report the same ambiguity rather than building twice.",
+                [$"Recorded at the time: {exception.Message}"]);
+        }
+
+        if (refusal is not null)
+        {
+            // Nothing left this process, so the attempt is unwound to the state it was taken from. The
+            // count is not spent on an attempt that was never made.
+            await WriteClaimAsync(
+                claimBlob,
+                claim with { Note = $"A dispatch was prepared and then refused before it was sent: {refusal}" },
+                BlobPrecondition.MatchETag,
+                marked.ETag,
+                cancellationToken).ConfigureAwait(false);
+
+            return TargetDeploymentResult.Refused(
+                TargetDeploymentState.NotAuthorized,
+                $"No builder was dispatched for operation {request.OperationId}: {refusal}");
+        }
+
+        await WriteClaimAsync(
             claimBlob,
-            JsonSerializer.SerializeToUtf8Bytes(claim with { DispatchedUtc = _time.GetUtcNow() }, s_json),
-            "application/json",
-            overwrite: true,
+            attempting with { Phase = DispatchPhase.Dispatched, DispatchedUtc = _time.GetUtcNow() },
+            BlobPrecondition.MatchETag,
+            marked.ETag,
             cancellationToken).ConfigureAwait(false);
 
         return null;
     }
 
-    private async Task<DispatchClaim?> ReadClaimAsync(string blob, CancellationToken cancellationToken)
+    private async Task<(DispatchClaim Claim, string? ETag)?> ReadClaimAsync(
+        string blob,
+        CancellationToken cancellationToken)
     {
-        byte[]? content = await GetBlobAsync(blob, cancellationToken).ConfigureAwait(false);
+        (byte[] Content, string? ETag)? stored = await GetBlobAsync(blob, cancellationToken).ConfigureAwait(false);
 
-        if (content is null)
+        if (stored is not { } found)
         {
             return null;
         }
 
         try
         {
-            return JsonSerializer.Deserialize<DispatchClaim>(content, s_json);
+            DispatchClaim? claim = JsonSerializer.Deserialize<DispatchClaim>(found.Content, s_claimJson);
+
+            return claim is null || !string.Equals(claim.SchemaVersion, ClaimSchemaVersion, StringComparison.Ordinal)
+                ? null
+                : (claim, found.ETag);
         }
         catch (JsonException)
         {
@@ -435,16 +743,30 @@ public sealed class GitHubActionsTargetDeploymentGateway : ITargetApplicationDep
         }
     }
 
-    /// <summary>
-    /// Whether GitHub already holds a run for this operation.
-    ///
-    /// The workflow names its run after the operation, which is the only handle a dispatch leaves behind:
-    /// the dispatch call itself returns no identifier, and the inputs a run was started with are not
-    /// listed. A failure to read this is answered as "a run exists" so an unreadable list can never be the
-    /// reason a second build starts.
-    /// </summary>
-    private async Task<bool> RunExistsAsync(string operationId, CancellationToken cancellationToken)
+    /// <summary>Whether the trusted repository holds a run for this operation, or whether that is unknown.</summary>
+    private enum RunPresence
     {
+        Present,
+        Absent,
+        Unknown,
+    }
+
+    /// <summary>
+    /// Asks the trusted repository whether a run for this operation exists.
+    ///
+    /// The dispatch call returns no identifier and the inputs a run was started with are not listed, so
+    /// the run's title is the only handle a dispatch leaves behind. The title is the one the workflow sets
+    /// from the operation identifier, and it is matched exactly: the previous reading of this looked at
+    /// the <c>name</c> field, which carries the workflow's own name and never the per-run title, so it
+    /// matched nothing and every recovery concluded that no build existed.
+    ///
+    /// A failure to read is <see cref="RunPresence.Unknown"/>, never "absent": an unreadable list must
+    /// never become the reason a second build starts.
+    /// </summary>
+    private async Task<RunPresence> RunPresenceAsync(string operationId, CancellationToken cancellationToken)
+    {
+        string expected = TargetDeploymentPolicy.ExpectedRunTitle(_options.WorkflowFile, operationId);
+
         try
         {
             string token = await InstallationTokenAsync(cancellationToken).ConfigureAwait(false);
@@ -452,7 +774,8 @@ public sealed class GitHubActionsTargetDeploymentGateway : ITargetApplicationDep
             using HttpRequestMessage message = new(
                 HttpMethod.Get,
                 $"https://api.github.com/repos/{_options.Owner}/{_options.Repository}/actions/workflows/" +
-                $"{_options.WorkflowFile}/runs?branch={Uri.EscapeDataString(_options.Ref)}&per_page=100");
+                $"{_options.WorkflowFile}/runs?branch={Uri.EscapeDataString(_options.Ref)}" +
+                "&event=workflow_dispatch&per_page=100");
             message.Headers.Authorization = new("Bearer", token);
             message.Headers.Accept.ParseAdd("application/vnd.github+json");
             message.Headers.UserAgent.ParseAdd("oracle-forms-migration-fleet");
@@ -464,26 +787,26 @@ public sealed class GitHubActionsTargetDeploymentGateway : ITargetApplicationDep
             using JsonDocument document = JsonDocument.Parse(
                 await response.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false));
 
-            if (!document.RootElement.TryGetProperty("workflow_runs", out JsonElement runs))
+            if (!document.RootElement.TryGetProperty("workflow_runs", out JsonElement runs) ||
+                runs.ValueKind != JsonValueKind.Array)
             {
-                return true;
+                return RunPresence.Unknown;
             }
 
             foreach (JsonElement run in runs.EnumerateArray())
             {
-                if (run.TryGetProperty("name", out JsonElement name) &&
-                    name.GetString() is { Length: > 0 } text &&
-                    text.Contains(operationId, StringComparison.Ordinal))
+                if (run.TryGetProperty("display_title", out JsonElement title) &&
+                    string.Equals(title.GetString(), expected, StringComparison.Ordinal))
                 {
-                    return true;
+                    return RunPresence.Present;
                 }
             }
 
-            return false;
+            return RunPresence.Absent;
         }
         catch (Exception exception) when (exception is HttpRequestException or JsonException or InvalidOperationException)
         {
-            return true;
+            return RunPresence.Unknown;
         }
     }
 
@@ -536,8 +859,8 @@ public sealed class GitHubActionsTargetDeploymentGateway : ITargetApplicationDep
     }
 
     private async Task<TargetDeploymentResult> WaitAsync(
-        string prefix,
         TargetDeploymentRequest request,
+        TargetDeploymentBuilderExpectation expectation,
         CancellationToken cancellationToken)
     {
         DateTimeOffset deadline = _time.GetUtcNow() + _options.Timeout;
@@ -549,7 +872,7 @@ public sealed class GitHubActionsTargetDeploymentGateway : ITargetApplicationDep
             TargetDeploymentResult? result;
             try
             {
-                result = await ReadResultAsync(prefix, request.Binding.Authority, cancellationToken).ConfigureAwait(false);
+                result = await ReadResultAsync(expectation, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception exception) when (exception is HttpRequestException or IOException)
             {
@@ -574,27 +897,32 @@ public sealed class GitHubActionsTargetDeploymentGateway : ITargetApplicationDep
     /// <summary>
     /// Reads the builder's result document, and refuses anything that is not a verifiable deployment.
     ///
-    /// The document is treated as a report, not as an authority: the digest shape, the URL host, the
-    /// operation identity, and the Azure resource it claims to have updated are re-checked here against
-    /// the destination this run was approved for, so a malformed, mismatched, or misdirected result is
-    /// recorded as a failed verification rather than as a deployment nobody confirmed.
+    /// The document is bound with an explicit camelCase contract rather than a host default, because the
+    /// default contract binds none of its properties: the record then deserializes into all-nulls and an
+    /// empty document becomes indistinguishable from a real one. Everything it claims is then compared
+    /// against what this process actually dispatched, and a deployment is only recorded when the builder
+    /// also states that it observed the revision it deployed answering.
+    ///
+    /// The server is asked one last time before a deployment is recorded under this run. A run whose
+    /// authorization lapsed while the builder worked does not get a deployment entered under its name —
+    /// and because something really is running, the refusal says what it is rather than staying silent.
     /// </summary>
     private async Task<TargetDeploymentResult?> ReadResultAsync(
-        string prefix,
-        TargetDeploymentAuthority? authority,
+        TargetDeploymentBuilderExpectation expectation,
         CancellationToken cancellationToken)
     {
-        byte[]? content = await GetBlobAsync($"{prefix}/result.json", cancellationToken).ConfigureAwait(false);
+        (byte[] Content, string? ETag)? stored = await GetBlobAsync(
+            TargetDeploymentPolicy.ResultBlobName(expectation.OperationId), cancellationToken).ConfigureAwait(false);
 
-        if (content is null)
+        if (stored is not { } found)
         {
             return null;
         }
 
-        BuilderResult? reported;
+        TargetDeploymentBuilderReport? reported;
         try
         {
-            reported = JsonSerializer.Deserialize<BuilderResult>(content);
+            reported = JsonSerializer.Deserialize<TargetDeploymentBuilderReport>(found.Content, s_wireJson);
         }
         catch (JsonException exception)
         {
@@ -603,14 +931,49 @@ public sealed class GitHubActionsTargetDeploymentGateway : ITargetApplicationDep
                 $"The builder's result document could not be read: {exception.Message}");
         }
 
-        if (reported is null)
+        TargetDeploymentBuilderExpectation now = expectation with { NowUtc = _time.GetUtcNow() };
+
+        if (TargetDeploymentPolicy.RejectReport(reported, now) is { Count: > 0 } rejections)
         {
-            return TargetDeploymentResult.Refused(
+            return new TargetDeploymentResult(
                 TargetDeploymentState.VerificationFailed,
-                "The builder's result document was empty.");
+                reported?.BuildRunId,
+                reported?.ImageDigest,
+                reported?.RevisionName,
+                reported?.ApplicationUrl,
+                rejections,
+                "The builder reported a deployment this product could not verify.")
+            {
+                DeployedResourceId = reported?.DeployedResourceId,
+            };
         }
 
-        TargetDeploymentResult candidate = new(
+        TargetDeploymentState state = TargetDeploymentPolicy.ReportedState(reported!.State)!.Value;
+
+        if (state != TargetDeploymentState.Deployed)
+        {
+            return TargetDeploymentResult.Refused(
+                state,
+                $"The trusted builder ran and reported {reported.State}. Nothing of this run's is serving.",
+                [$"Built by {_options.Owner}/{_options.Repository} run {reported.BuildRunId ?? "(unnamed)"}."]);
+        }
+
+        if (await WithheldAsync(
+                TargetDeploymentCheckpoint.BeforeResult, expectation.OperationId, cancellationToken)
+            .ConfigureAwait(false) is string beforeResult)
+        {
+            return TargetDeploymentResult.Refused(
+                TargetDeploymentState.NotAuthorized,
+                "The builder reported a deployment and this run may no longer record one, so nothing was entered under " +
+                $"its name: {beforeResult}",
+                [
+                    $"A revision really is running: {reported.RevisionName} on image {reported.ImageDigest}.",
+                    $"It was deployed to {reported.DeployedResourceId} by run {reported.BuildRunId}.",
+                    "This product did not undo it. It refused to claim it as this run's verified deployment.",
+                ]);
+        }
+
+        return new TargetDeploymentResult(
             TargetDeploymentState.Deployed,
             reported.BuildRunId,
             reported.ImageDigest,
@@ -619,40 +982,51 @@ public sealed class GitHubActionsTargetDeploymentGateway : ITargetApplicationDep
             [
                 $"Built by {_options.Owner}/{_options.Repository} run {reported.BuildRunId}.",
                 $"Workbench commit carried into the build: {reported.WorkbenchSha}.",
+                $"The builder observed {reported.ReadinessProbeUrl} answering at {reported.ReadinessObservedUtc}.",
             ],
             null)
         {
             DeployedResourceId = reported.DeployedResourceId,
         };
-
-        return TargetDeploymentPolicy.RejectResult(candidate, authority) is { Count: > 0 } rejections
-            ? candidate with
-            {
-                State = TargetDeploymentState.VerificationFailed,
-                FailureReason = "The builder reported a deployment this product could not verify.",
-                Findings = rejections,
-            }
-            : candidate;
     }
 
-    private async Task DispatchAsync(
+    /// <summary>
+    /// Sends the dispatch, or returns the reason it was not sent.
+    ///
+    /// Two checks sit between the token and the request, and their position is the point of them. Reading
+    /// the signing key out of Key Vault and minting an installation token are awaited round trips, so an
+    /// authorization confirmed before them is an authorization from before an unbounded wait. The server
+    /// is therefore asked again <em>after</em> the token is in hand and immediately before the request is
+    /// sent, and the approval's own expiry is re-read against the clock as it stands at that instant.
+    ///
+    /// A reason returned here means nothing left this process.
+    /// </summary>
+    private async Task<string?> DispatchAsync(
         TargetDeploymentRequest request,
         string artifactUri,
         string artifactSha256,
         CancellationToken cancellationToken)
     {
-        // The last check before anything leaves this process. Everything between the adapter's own
-        // re-check and here is time spent uploading, and an approval that lapsed during the upload is an
-        // approval no builder should be started under.
         if (TargetDeploymentPolicy.RejectAuthority(request.Binding.Authority, _time.GetUtcNow()) is { Count: > 0 } lapsed)
         {
-            throw new InvalidOperationException(
-                "The approval for this destination no longer holds, so no builder was dispatched: " +
-                string.Join(" ", lapsed));
+            return "The approval for this destination no longer holds: " + string.Join(" ", lapsed);
+        }
+
+        string token = await InstallationTokenAsync(cancellationToken).ConfigureAwait(false);
+
+        if (await WithheldAsync(TargetDeploymentCheckpoint.BeforeDispatch, request.OperationId, cancellationToken)
+            .ConfigureAwait(false) is string withheld)
+        {
+            return withheld;
+        }
+
+        if (TargetDeploymentPolicy.RejectAuthority(request.Binding.Authority, _time.GetUtcNow()) is { Count: > 0 } expired)
+        {
+            return "The approval for this destination lapsed while the builder credential was being acquired: " +
+                string.Join(" ", expired);
         }
 
         TargetDeploymentAuthority authority = request.Binding.Authority!;
-        string token = await InstallationTokenAsync(cancellationToken).ConfigureAwait(false);
 
         Dictionary<string, string> inputs = new(StringComparer.Ordinal)
         {
@@ -689,6 +1063,8 @@ public sealed class GitHubActionsTargetDeploymentGateway : ITargetApplicationDep
 
         using HttpResponseMessage response = await _http.SendAsync(message, cancellationToken).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
+
+        return null;
     }
 
     /// <summary>
@@ -760,21 +1136,72 @@ public sealed class GitHubActionsTargetDeploymentGateway : ITargetApplicationDep
             : throw new InvalidOperationException("The configured Key Vault secret carried no value.");
     }
 
-    /// <summary>Writes a blob. With <paramref name="overwrite"/> false a losing race returns false, not an error.</summary>
-    private async Task<bool> PutBlobAsync(
+    /// <summary>How a blob write is conditioned. There is no unconditional write in this gateway.</summary>
+    private enum BlobPrecondition
+    {
+        /// <summary>Only if nothing is there. A losing race is reported, never an error.</summary>
+        CreateOnly,
+
+        /// <summary>Only if the blob is still exactly the version that was read.</summary>
+        MatchETag,
+    }
+
+    /// <summary>Whether a conditional write was applied, and the version it produced.</summary>
+    private readonly record struct BlobWrite(bool Applied, string? ETag);
+
+    private Task<BlobWrite> WriteClaimAsync(
+        string name,
+        DispatchClaim claim,
+        BlobPrecondition precondition,
+        string? etag,
+        CancellationToken cancellationToken) =>
+        PutBlobAsync(
+            name,
+            JsonSerializer.SerializeToUtf8Bytes(claim, s_claimJson),
+            "application/json",
+            precondition,
+            etag,
+            archiveSha256: null,
+            cancellationToken);
+
+    /// <summary>
+    /// Writes a blob under a precondition the store enforces.
+    ///
+    /// Compare-and-swap rather than an upsert, because the claim is a decision about which replica may
+    /// dispatch, not a log of the last writer. A refused precondition returns false so the caller can do
+    /// the only safe thing — stop and let the replica that won proceed — instead of racing it.
+    /// </summary>
+    private async Task<BlobWrite> PutBlobAsync(
         string name,
         byte[] content,
         string contentType,
-        bool overwrite,
+        BlobPrecondition precondition,
+        string? etag,
+        string? archiveSha256,
         CancellationToken cancellationToken)
     {
         using HttpRequestMessage message = new(HttpMethod.Put, BlobUri(name));
         await AuthorizeStorageAsync(message, cancellationToken).ConfigureAwait(false);
         message.Headers.Add("x-ms-blob-type", "BlockBlob");
 
-        if (!overwrite)
+        if (precondition == BlobPrecondition.CreateOnly)
         {
             message.Headers.IfNoneMatch.ParseAdd("*");
+        }
+        else if (etag is { Length: > 0 })
+        {
+            message.Headers.IfMatch.ParseAdd(etag);
+        }
+        else
+        {
+            // A compare-and-swap with nothing to compare against is an upsert wearing its name.
+            throw new InvalidOperationException(
+                $"'{name}' was to be replaced without the version it was read at, so nothing was written.");
+        }
+
+        if (archiveSha256 is { Length: > 0 })
+        {
+            message.Headers.Add(ArchiveDigestMetadata, archiveSha256);
         }
 
         message.Content = new ByteArrayContent(content);
@@ -782,21 +1209,17 @@ public sealed class GitHubActionsTargetDeploymentGateway : ITargetApplicationDep
 
         using HttpResponseMessage response = await _http.SendAsync(message, cancellationToken).ConfigureAwait(false);
 
-        if (!overwrite && response.StatusCode == System.Net.HttpStatusCode.Conflict)
+        if (response.StatusCode is System.Net.HttpStatusCode.Conflict or System.Net.HttpStatusCode.PreconditionFailed
+            or System.Net.HttpStatusCode.NotModified)
         {
-            return false;
-        }
-
-        if (!overwrite && response.StatusCode == System.Net.HttpStatusCode.PreconditionFailed)
-        {
-            return false;
+            return new BlobWrite(false, null);
         }
 
         response.EnsureSuccessStatusCode();
-        return true;
+        return new BlobWrite(true, response.Headers.ETag?.ToString());
     }
 
-    private async Task<byte[]?> GetBlobAsync(string name, CancellationToken cancellationToken)
+    private async Task<(byte[] Content, string? ETag)?> GetBlobAsync(string name, CancellationToken cancellationToken)
     {
         using HttpRequestMessage message = new(HttpMethod.Get, BlobUri(name));
         await AuthorizeStorageAsync(message, cancellationToken).ConfigureAwait(false);
@@ -809,7 +1232,28 @@ public sealed class GitHubActionsTargetDeploymentGateway : ITargetApplicationDep
         }
 
         response.EnsureSuccessStatusCode();
-        return await response.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
+
+        return (
+            await response.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false),
+            response.Headers.ETag?.ToString());
+    }
+
+    /// <summary>The digest a stored bundle was uploaded under, or null when it does not state one.</summary>
+    private async Task<string?> ArchiveDigestAsync(string name, CancellationToken cancellationToken)
+    {
+        using HttpRequestMessage message = new(HttpMethod.Head, BlobUri(name));
+        await AuthorizeStorageAsync(message, cancellationToken).ConfigureAwait(false);
+
+        using HttpResponseMessage response = await _http.SendAsync(message, cancellationToken).ConfigureAwait(false);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            return null;
+        }
+
+        return response.Headers.TryGetValues(ArchiveDigestMetadata, out IEnumerable<string>? values)
+            ? values.FirstOrDefault()
+            : null;
     }
 
     private string BlobUri(string name) =>
@@ -829,33 +1273,44 @@ public sealed class GitHubActionsTargetDeploymentGateway : ITargetApplicationDep
         Convert.ToBase64String(value).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
     /// <summary>
-    /// What one replica recorded about one operation.
+    /// Where one operation's dispatch has got to, as a small state machine rather than a pair of flags.
     ///
-    /// <see cref="DispatchedUtc"/> is written only after GitHub accepted the dispatch. A claim without it
-    /// is the crash window this record exists to make recoverable: the bytes are uploaded, the operation
-    /// is claimed, and nothing was ever asked to build it.
+    /// The distinction that matters is between <see cref="DispatchPhase.Claimed"/> — nothing has been sent,
+    /// so another replica may take it over — and <see cref="DispatchPhase.Dispatching"/> or
+    /// <see cref="DispatchPhase.Ambiguous"/>, where a request left this product and may have been accepted.
+    /// Collapsing those into "not dispatched yet" is what turns one lost response into two builds.
+    /// </summary>
+    private enum DispatchPhase
+    {
+        /// <summary>The operation is claimed and no dispatch has been attempted.</summary>
+        Claimed,
+
+        /// <summary>A dispatch is in flight or died in flight. Its outcome is not known.</summary>
+        Dispatching,
+
+        /// <summary>A build for this operation is known to exist.</summary>
+        Dispatched,
+
+        /// <summary>A dispatch was sent and no usable response came back. Never re-sent automatically.</summary>
+        Ambiguous,
+    }
+
+    /// <summary>
+    /// What one replica recorded about one operation, advanced only by compare-and-swap.
+    ///
+    /// The artifact digest and binding digest are carried so a claim found under this operation identifier
+    /// can be checked to be about this run's bytes rather than assumed to be.
     /// </summary>
     private sealed record DispatchClaim(
+        string SchemaVersion,
+        DispatchPhase Phase,
         string OperationId,
         string RunId,
         string ArtifactSha256,
+        string BindingDigest,
         DateTimeOffset ClaimedUtc,
         int DispatchAttempts,
         DateTimeOffset? LastAttemptUtc,
-        DateTimeOffset? DispatchedUtc);
-
-    /// <summary>What the trusted builder writes. Read as a report and re-checked, never trusted as a verdict.</summary>
-    private sealed record BuilderResult(
-        string? SchemaVersion,
-        string? State,
-        string? OperationId,
-        string? RunId,
-        string? BuildRunId,
-        string? ArtifactSha256,
-        string? WorkbenchSha,
-        string? PlanDigest,
-        string? ImageDigest,
-        string? RevisionName,
-        string? ApplicationUrl,
-        string? DeployedResourceId);
+        DateTimeOffset? DispatchedUtc,
+        string? Note);
 }

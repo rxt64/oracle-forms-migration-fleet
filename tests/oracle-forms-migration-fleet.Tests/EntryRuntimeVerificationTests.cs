@@ -106,6 +106,32 @@ public sealed class EntryRuntimeVerificationTests : IDisposable
         EntryVerificationGap gap = Assert.Single(gaps);
         Assert.Equal("entry-a", gap.EntryId);
         Assert.Contains("no executed result", gap.Reason, StringComparison.Ordinal);
+
+        // An unanswered probe is a shortfall against the plan, not a statement that the run never asked.
+        // The two are separated because only the first may block a result from being recorded.
+        Assert.Equal(EntryVerificationGapKind.PlannedCaseUnanswered, gap.Kind);
+        Assert.Equal(expectation.TestId, gap.PlannedTestId);
+    }
+
+    /// <summary>
+    /// The distinction the whole repair rests on. A property this generator never re-expresses is a gap
+    /// the run planned to leave, so a structurally valid property is free to record alongside it. A probe
+    /// that was planned and never answered is a different thing and must block.
+    /// </summary>
+    [Fact]
+    public async Task A_property_this_run_never_probed_is_a_stated_gap_and_not_a_shortfall_against_the_plan()
+    {
+        Harness harness = await HarnessAsync();
+
+        EntryVerificationCoverage.VerificationPlan plan =
+            EntryVerificationCoverage.Plan(harness.Mapping, harness.Modules, harness.Coverage().CoveredEntries);
+
+        Assert.NotEmpty(plan.Gaps);
+        Assert.All(plan.Gaps, gap =>
+        {
+            Assert.Equal(EntryVerificationGapKind.NotProbed, gap.Kind);
+            Assert.Null(gap.PlannedTestId);
+        });
     }
 
     [Fact]
@@ -609,6 +635,318 @@ public sealed class EntryRuntimeVerificationTests : IDisposable
         Assert.Contains("did not hold at the moment", result.FailureReason!, StringComparison.Ordinal);
         Assert.Contains("revoked", result.FailureReason!, StringComparison.Ordinal);
         Assert.False(File.Exists(harness.Absolute(VerificationPath)));
+    }
+
+    /// <summary>
+    /// The repair. A block's table is asked two things — that it exists, and that this run's identity may
+    /// read it — and only the first comes back. Under the earlier design the phase saw no failed case and
+    /// reported success, and the ledger saw one passing result and moved the property to verified, so a
+    /// property whose table the migrated application may not be able to query read back as proved and the
+    /// deployment below it published.
+    /// </summary>
+    [Fact]
+    public async Task One_of_two_planned_probes_on_a_property_going_unanswered_fails_the_phase()
+    {
+        Harness harness = await HarnessAsync();
+        PartialVerifier partial = new(harness.ApprovedTarget, EntryVerificationCaseKind.TargetTableReadable);
+
+        PhaseExecutionResult result = await harness.VerifyAsync(partial);
+
+        Assert.NotNull(partial.Withheld);
+        Assert.False(result.Succeeded);
+        Assert.Contains("did not account for every case it planned", result.FailureReason!, StringComparison.Ordinal);
+
+        // The record is still written: the unanswered probe is the outcome and has to stay visible. The
+        // sibling probe passed, which is exactly the shape that used to read as a clean verification.
+        // A case identity is the pair, because two properties on one block share a table and so a TestId.
+        EntryVerificationCoverageRecord record = harness.Verification();
+        Assert.Contains(record.Cases, item =>
+            item.EntryId == partial.WithheldEntryId &&
+            item.Kind == EntryVerificationCaseKind.TargetTableExists &&
+            item.Outcome == DispositionVerificationStatus.Passed);
+        Assert.DoesNotContain(record.Cases, item =>
+            item.EntryId == partial.WithheldEntryId && item.TestId == partial.Withheld);
+        Assert.Contains(record.Gaps, gap =>
+            gap.Kind == EntryVerificationGapKind.PlannedCaseUnanswered &&
+            gap.EntryId == partial.WithheldEntryId &&
+            gap.PlannedTestId == partial.Withheld);
+        Assert.Contains(record.Planned, item =>
+            item.EntryId == partial.WithheldEntryId && item.TestId == partial.Withheld);
+    }
+
+    /// <summary>
+    /// The same partly answered record offered to the ledger. Both gates hold independently, and no
+    /// property — not even one whose own probes all came back — reads verified, because one verification
+    /// is one fact about one output set.
+    /// </summary>
+    [Fact]
+    public async Task A_partly_answered_record_records_no_verified_disposition_at_all()
+    {
+        Harness harness = await HarnessAsync();
+        await harness.VerifyAsync(new PartialVerifier(harness.ApprovedTarget, EntryVerificationCaseKind.TargetTableReadable));
+
+        PlatformResult<DispositionLedgerVerification> recorded = await harness.RecordVerificationAsync();
+
+        Assert.False(recorded.Succeeded);
+        Assert.Equal(409, recorded.Status);
+        Assert.Contains("every case it planned", recorded.Error!, StringComparison.Ordinal);
+        Assert.All(
+            await harness.EntriesAsync(),
+            entry => Assert.Equal(DispositionVerificationStatus.NotExecuted, entry.Verification));
+    }
+
+    /// <summary>
+    /// A record made to look complete by deleting the evidence of what went missing: the result is gone
+    /// and so is the gap that stated it, leaving only passing cases. The plan it stated is what catches
+    /// it, which is why the plan is written down before anything answers.
+    /// </summary>
+    [Fact]
+    public async Task A_record_that_deletes_its_own_unanswered_probe_to_look_complete_is_refused()
+    {
+        Harness harness = await HarnessAsync();
+        await harness.VerifyAsync(harness.Verifier());
+
+        EntryVerificationCoverageRecord record = harness.Verification();
+        EntryVerificationCase dropped = record.Cases.First(item => item.Kind == EntryVerificationCaseKind.TargetTableReadable);
+
+        await harness.RewriteVerificationAsync(record with
+        {
+            Cases = [.. record.Cases.Where(item => item != dropped)],
+        });
+
+        PlatformResult<DispositionLedgerVerification> recorded = await harness.RecordVerificationAsync();
+
+        Assert.False(recorded.Succeeded);
+        Assert.Equal(409, recorded.Status);
+        Assert.Contains("neither reports a result", recorded.Error!, StringComparison.Ordinal);
+        Assert.All(
+            await harness.EntriesAsync(),
+            entry => Assert.Equal(DispositionVerificationStatus.NotExecuted, entry.Verification));
+    }
+
+    /// <summary>
+    /// The same forgery carried one step further: the plan is trimmed to match what is left, so the record
+    /// is internally consistent. The probe pairings this run always plans together are what is left to
+    /// catch it, and a table asked whether it exists but never whether it can be read is not a plan this
+    /// build produces.
+    /// </summary>
+    [Fact]
+    public async Task A_record_that_shrinks_its_own_plan_to_match_what_ran_is_refused()
+    {
+        Harness harness = await HarnessAsync();
+        await harness.VerifyAsync(harness.Verifier());
+
+        EntryVerificationCoverageRecord record = harness.Verification();
+        EntryVerificationCase dropped = record.Cases.First(item => item.Kind == EntryVerificationCaseKind.TargetTableReadable);
+
+        await harness.RewriteVerificationAsync(record with
+        {
+            Cases = [.. record.Cases.Where(item => item != dropped)],
+            Planned =
+            [
+                .. record.Planned.Where(item =>
+                    item.EntryId != dropped.EntryId || item.TestId != dropped.TestId),
+            ],
+        });
+
+        PlatformResult<DispositionLedgerVerification> recorded = await harness.RecordVerificationAsync();
+
+        Assert.False(recorded.Succeeded);
+        Assert.Equal(409, recorded.Status);
+        Assert.Contains("this run always plans together", recorded.Error!, StringComparison.Ordinal);
+        Assert.All(
+            await harness.EntriesAsync(),
+            entry => Assert.Equal(DispositionVerificationStatus.NotExecuted, entry.Verification));
+    }
+
+    /// <summary>
+    /// The forgery the record's own plan cannot catch, because the record it leaves behind is one this
+    /// build legitimately produces. A column's shape probe is removed from the plan and from the results
+    /// together; what remains is a column asked only whether it exists, which is exactly the plan a
+    /// source that resolves no type for the column yields. The record therefore passes its own audit, and
+    /// the property would read back verified with the shape it was migrated at never having been looked
+    /// at.
+    ///
+    /// The plan the source actually requires is what catches it: rebuilt from the normalized
+    /// representation this ledger was projected from, the mapping the generation was produced against,
+    /// and the decisions that stand. That source resolves a type for this column, so the shape probe is
+    /// required and its absence is a shortfall, whatever the record says it planned.
+    /// </summary>
+    [Fact]
+    public async Task A_record_that_drops_a_shape_probe_the_source_requires_from_its_plan_and_its_results_is_refused()
+    {
+        Harness harness = await HarnessAsync();
+        await harness.VerifyAsync(harness.Verifier());
+
+        EntryVerificationCoverageRecord record = harness.Verification();
+        EntryVerificationCase dropped = record.Cases.First(item => item.Kind == EntryVerificationCaseKind.TargetColumnShape);
+
+        EntryVerificationCoverageRecord forged = record with
+        {
+            Cases = [.. record.Cases.Where(item => item != dropped)],
+            Planned =
+            [
+                .. record.Planned.Where(item =>
+                    item.EntryId != dropped.EntryId || item.TestId != dropped.TestId),
+            ],
+        };
+
+        // The forgery is internally consistent: every case it states it planned came back, and a column
+        // probed only for existence is a family this build produces when the source has no type to ask
+        // about. Nothing inside the record distinguishes it from an honest one.
+        Assert.Empty(EntryVerificationCoverage.Audit(forged));
+
+        await harness.RewriteVerificationAsync(forged);
+
+        PlatformResult<DispositionLedgerVerification> recorded = await harness.RecordVerificationAsync();
+
+        Assert.False(recorded.Succeeded);
+        Assert.Equal(409, recorded.Status);
+        Assert.Contains("The source requires case", recorded.Error!, StringComparison.Ordinal);
+        Assert.Contains(dropped.TestId, recorded.Error!, StringComparison.Ordinal);
+
+        Assert.All(
+            await harness.EntriesAsync(),
+            entry =>
+            {
+                Assert.Equal(DispositionVerificationStatus.NotExecuted, entry.Verification);
+                Assert.Empty(entry.TestRefs);
+            });
+    }
+
+    /// <summary>
+    /// A column the source resolves no type for is asked only whether it exists, and that is a complete
+    /// plan rather than a trimmed one. The rebuilt plan derives the same single probe from the same
+    /// source, so an honest existence-only family still reconciles — the check above must not make an
+    /// unresolvable shape indistinguishable from a deleted one.
+    /// </summary>
+    [Fact]
+    public async Task A_column_the_source_resolves_no_shape_for_is_planned_for_existence_alone()
+    {
+        Harness harness = await HarnessAsync();
+        await harness.VerifyAsync(harness.Verifier());
+
+        EntryVerificationCoverageRecord record = harness.Verification();
+        EntryVerificationPlannedCase shaped =
+            record.Planned.First(item => item.Kind == EntryVerificationCaseKind.TargetColumnShape);
+
+        IReadOnlyList<GenerationCoveredEntry> covered =
+        [
+            .. (await harness.EntriesAsync())
+                .Where(entry => entry.Decision is DispositionDecision.Preserve or DispositionDecision.Transform)
+                .Select(entry => new GenerationCoveredEntry(
+                    entry.EntryId, entry.DecisionRevision, entry.Decision, entry.MappingRuleId, entry.MappingRuleVersion)),
+        ];
+
+        TargetMapping unresolved = harness.Mapping with
+        {
+            Carried = [.. harness.Mapping.Carried.Select(property => property with { TargetType = null })],
+        };
+
+        EntryVerificationCoverage.VerificationPlan plan =
+            EntryVerificationCoverage.Plan(unresolved, harness.Modules, covered);
+
+        Assert.DoesNotContain(plan.Expectations, expectation => expectation.Kind == EntryVerificationCaseKind.TargetColumnShape);
+        Assert.Contains(plan.Expectations, expectation =>
+            expectation.Kind == EntryVerificationCaseKind.TargetColumnExists && expectation.EntryId == shaped.EntryId);
+
+        // The pairing rule reads that family as complete, which is what keeps an unresolvable shape a
+        // stated absence rather than a missing probe.
+        Assert.Empty(EntryVerificationCoverage.Audit(record with
+        {
+            Planned = [.. plan.Expectations.Select(expectation => expectation.AsPlanned())],
+            Cases = [.. record.Cases.Where(item => item.Kind != EntryVerificationCaseKind.TargetColumnShape)],
+            Gaps = [.. record.Gaps.Where(gap => gap.Kind == EntryVerificationGapKind.NotProbed)],
+        }));
+    }
+
+    /// <summary>
+    /// The opposite forgery: a result for a probe the run never asked. It answers a question nothing
+    /// derived from the source, so it is not evidence about any decision.
+    /// </summary>
+    [Fact]
+    public async Task A_result_for_a_probe_the_run_never_planned_is_refused()
+    {
+        Harness harness = await HarnessAsync();
+        await harness.VerifyAsync(harness.Verifier());
+
+        EntryVerificationCoverageRecord record = harness.Verification();
+        await harness.RewriteVerificationAsync(record with
+        {
+            Cases = [.. record.Cases, record.Cases[0] with { TestId = "TargetTableExists:some_other_table" }],
+        });
+
+        PlatformResult<DispositionLedgerVerification> recorded = await harness.RecordVerificationAsync();
+
+        Assert.False(recorded.Succeeded);
+        Assert.Equal(409, recorded.Status);
+        Assert.Contains("never planned", recorded.Error!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Completeness is measured against the plan and against nothing else. A run that answered every probe
+    /// it planned records normally, even though it states many properties it never probed at all — a
+    /// retirement, a name no catalog is asked about, and the standing absence of any executed application
+    /// behaviour. Treating those as shortfalls would make a correct verification impossible to record.
+    /// </summary>
+    [Fact]
+    public async Task Gaps_the_run_never_planned_a_probe_for_do_not_block_recording()
+    {
+        Harness harness = await HarnessAsync();
+        await harness.VerifyAsync(harness.Verifier());
+
+        EntryVerificationCoverageRecord record = harness.Verification();
+        Assert.Contains(record.Gaps, gap => gap.Kind == EntryVerificationGapKind.NotProbed);
+        Assert.DoesNotContain(record.Gaps, gap => gap.Kind == EntryVerificationGapKind.PlannedCaseUnanswered);
+        Assert.Equal(record.Planned.Count, record.Cases.Count);
+        Assert.Empty(EntryVerificationCoverage.Audit(record));
+
+        PlatformResult<DispositionLedgerVerification> recorded = await harness.RecordVerificationAsync();
+
+        Assert.True(recorded.Succeeded, recorded.Error);
+        Assert.True(recorded.Value!.GapsDeclared > 0);
+        Assert.Contains(
+            await harness.EntriesAsync(),
+            entry => entry.Verification == DispositionVerificationStatus.Passed);
+    }
+
+    /// <summary>Answers every planned case but one, so one property keeps a passing sibling probe.</summary>
+    private sealed class PartialVerifier(EntryVerificationTargetBinding target, EntryVerificationCaseKind withhold)
+        : IEntryRuntimeVerificationGateway
+    {
+        public EntryVerificationTargetBinding Target => target;
+
+        public string? Withheld { get; private set; }
+
+        public string? WithheldEntryId { get; private set; }
+
+        public Task<EntryRuntimeVerificationRun> InspectAsync(
+            EntryVerificationTargetBinding approved,
+            IReadOnlyList<EntryVerificationExpectation> expectations,
+            CancellationToken cancellationToken)
+        {
+            EntryVerificationExpectation skipped = expectations.First(expectation => expectation.Kind == withhold);
+            Withheld = skipped.TestId;
+            WithheldEntryId = skipped.EntryId;
+
+            return Task.FromResult(new EntryRuntimeVerificationRun(
+                "stub target",
+                ToolAvailable: true,
+                TimedOut: false,
+                SetupFailed: false,
+                Failure: null,
+                [
+                    .. expectations
+                        .Where(expectation =>
+                            expectation.EntryId != skipped.EntryId || expectation.TestId != skipped.TestId)
+                        .Select(expectation => new EntryVerificationObservation(
+                            expectation.EntryId,
+                            expectation.TestId,
+                            DispositionVerificationStatus.Passed,
+                            expectation.Expected,
+                            "Observed in the approved target.")),
+                ]));
+        }
     }
 
     /// <summary>A verifier that is reached, answers nothing, and so leaves every planned case a gap.</summary>

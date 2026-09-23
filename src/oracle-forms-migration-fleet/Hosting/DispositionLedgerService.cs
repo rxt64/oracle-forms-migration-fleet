@@ -218,6 +218,12 @@ public sealed class DispositionLedgerService(
     /// <summary>Ceiling on the coverage record this server reads back out of a run's output.</summary>
     public const long MaxCoverageBytes = 4L * 1024 * 1024;
 
+    /// <summary>Ceiling on the retained source files this server walks to re-derive a verification's plan.</summary>
+    private const int MaxSourceFiles = 20_000;
+
+    /// <summary>Ceiling on one retained source file read while re-deriving a verification's plan.</summary>
+    private const long MaxSourceTextBytes = 8L * 1024 * 1024;
+
     private static readonly JsonSerializerOptions s_coverageJson = new()
     {
         Converters = { new JsonStringEnumConverter() },
@@ -1299,6 +1305,7 @@ public sealed class DispositionLedgerService(
 
         MigrationRunArtifact? verification = Single(artifacts, run.RunId, $"{expectedOutputRoot}/{EntryVerificationCoverage.RecordPath}");
         MigrationRunArtifact? generation = Single(artifacts, run.RunId, $"{expectedOutputRoot}/{GenerationCoverage.RecordPath}");
+        MigrationRunArtifact? intermediate = Single(artifacts, run.RunId, $"{expectedOutputRoot}{IntermediateArtifactSuffix}");
 
         if (verification is null)
         {
@@ -1312,6 +1319,13 @@ public sealed class DispositionLedgerService(
             return Refuse(409,
                 "That run retained no single generation coverage at its own output root, so the output its results were executed " +
                 "against cannot be re-derived and no result was recorded.");
+        }
+
+        if (intermediate is null)
+        {
+            return Refuse(409,
+                "That run retained no single normalized Forms representation at its own output root, so the cases its source " +
+                "requires of a verification cannot be re-derived and no result was recorded.");
         }
 
         string? workspaceRoot = workspaces.ResolveRoot(run.WorkspaceOwnerId, run.WorkspaceId)
@@ -1390,8 +1404,15 @@ public sealed class DispositionLedgerService(
         // Re-derived, not believed. The digest the cases were executed against has to be the digest this
         // server computes from the run's own generation, or the results describe output that has since
         // been replaced.
-        PlatformResult<string> tested =
-            await TestedOutputDigestAsync(workspaceRoot, expectedOutputRoot, generation, cancellationToken).ConfigureAwait(false);
+        PlatformResult<GenerationCoverageRecord> generated =
+            await ReadCoverageAsync(workspaceRoot, generation, cancellationToken).ConfigureAwait(false);
+        if (!generated.Succeeded)
+        {
+            return Refuse(generated.Status, generated.Error!);
+        }
+
+        PlatformResult<string> tested = await TestedOutputDigestAsync(
+            workspaceRoot, expectedOutputRoot, generated.Value!, cancellationToken).ConfigureAwait(false);
         if (!tested.Succeeded)
         {
             return Refuse(tested.Status, tested.Error!);
@@ -1447,6 +1468,48 @@ public sealed class DispositionLedgerService(
                     "A case in that record reports nothing having been executed. An unexecuted case is a gap, and a gap is not " +
                     "recorded as a result about a property.");
             }
+        }
+
+        // Every result binds; the remaining question is whether they are all of them. A property whose
+        // table was found but whose readability probe never came back was only half asked about, and
+        // admitting the half that passed would move it off unexecuted on evidence that does not cover the
+        // decision — which is what a single passing sibling probe used to do. The plan is reconciled as a
+        // whole, so an unanswered probe anywhere refuses the record rather than recording the properties
+        // that happened to come back complete. Gaps the run never planned a probe for are not a shortfall
+        // against the plan and block nothing.
+        if (EntryVerificationCoverage.Audit(record) is { Count: > 0 } incomplete)
+        {
+            return Refuse(409,
+                "That verification does not account for every case it planned, so no property in it is completely covered and " +
+                $"nothing was recorded: {string.Join(" ", incomplete.Take(5))}");
+        }
+
+        // The audit above reads the record against its own plan, which a record is free to write. A probe
+        // removed from the plan and from the results together leaves a record that accounts for
+        // everything it claims to have asked while asking less than its source requires. The plan is
+        // therefore rebuilt here from bytes this server re-hashes — the normalized representation this
+        // ledger was projected from, the target mapping the generation was produced against, and the
+        // decisions standing over the output just digested — and the record is measured against that
+        // rather than against itself.
+        PlatformResult<EntryVerificationCoverage.VerificationPlan> expected = await ExpectedPlanAsync(
+            workspaceRoot,
+            WorkspacePath.Normalize(run.Request.SourceRoot),
+            ledger,
+            intermediate,
+            generated.Value!.MappingManifestSha256,
+            CoveredForVerification(entries, run, tested.Value!),
+            cancellationToken).ConfigureAwait(false);
+
+        if (!expected.Succeeded)
+        {
+            return Refuse(expected.Status, expected.Error!);
+        }
+
+        if (EntryVerificationCoverage.Reconcile(expected.Value!, record) is { Count: > 0 } diverged)
+        {
+            return Refuse(409,
+                "That verification does not ask what this ledger's retained source and standing decisions require of it, so " +
+                $"nothing it reports is evidence about any property and nothing was recorded: {string.Join(" ", diverged.Take(5))}");
         }
 
         // The claim this worker holds is re-established against the run store immediately before anything
@@ -1563,17 +1626,9 @@ public sealed class DispositionLedgerService(
     private static async Task<PlatformResult<string>> TestedOutputDigestAsync(
         string workspaceRoot,
         string outputRoot,
-        MigrationRunArtifact generation,
+        GenerationCoverageRecord record,
         CancellationToken cancellationToken)
     {
-        PlatformResult<GenerationCoverageRecord> coverage =
-            await ReadCoverageAsync(workspaceRoot, generation, cancellationToken).ConfigureAwait(false);
-        if (!coverage.Succeeded)
-        {
-            return PlatformResult<string>.Fail(coverage.Status, coverage.Error);
-        }
-
-        GenerationCoverageRecord record = coverage.Value!;
         if (record.OutputFiles.Count == 0 || record.OutputFiles.Count > GenerationCoverage.MaxOutputFiles)
         {
             return PlatformResult<string>.Fail(409,
@@ -1602,6 +1657,179 @@ public sealed class DispositionLedgerService(
         }
 
         return PlatformResult<string>.Ok(GenerationCoverage.OutputSetDigest(hashed));
+    }
+
+    /// <summary>
+    /// The decisions a verification of this run may speak about, read from the rows as they stand and
+    /// bound to the generation this run still owns over the output just re-hashed.
+    ///
+    /// It is the same reading <see cref="ClaimGenerationForVerificationAsync"/> grants a phase, taken
+    /// again at the moment of recording, so a record cannot be measured against a wider set of decisions
+    /// than the one it was entitled to ask about.
+    /// </summary>
+    private static IReadOnlyList<GenerationCoveredEntry> CoveredForVerification(
+        IReadOnlyList<DispositionLedgerEntry> entries,
+        MigrationRunRecord run,
+        string outputSetSha256)
+    {
+        List<GenerationCoveredEntry> covered = [];
+
+        foreach (DispositionLedgerEntry entry in entries)
+        {
+            DispositionGeneratedReference? standing =
+                DispositionLedgerRules.StandingGeneration(entry.DecisionRevision, entry.GeneratedRefs);
+
+            if (standing is null ||
+                !string.Equals(standing.RunId, run.RunId, StringComparison.Ordinal) ||
+                standing.RunFenceToken != run.FenceToken ||
+                !string.Equals(standing.ContentSha256, outputSetSha256, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            covered.Add(new GenerationCoveredEntry(
+                entry.EntryId, entry.DecisionRevision, entry.Decision, entry.MappingRuleId, entry.MappingRuleVersion));
+        }
+
+        return covered;
+    }
+
+    /// <summary>
+    /// The cases this ledger's retained source requires of a verification, rebuilt from bytes this server
+    /// re-hashes rather than from anything a run reported about them.
+    ///
+    /// Both inputs are pinned. The normalized representation must hash to the one the ledger was
+    /// projected from, and the target mapping must hash to the one the generation these results speak
+    /// about was produced against, so neither can be exchanged after the fact for one that derives fewer
+    /// probes. The planner is the same pure builder the verification phase used, so a column the source
+    /// resolves no type for is expected to carry no shape probe here either — an unresolvable shape is a
+    /// stated gap, not a missing case.
+    /// </summary>
+    private static async Task<PlatformResult<EntryVerificationCoverage.VerificationPlan>> ExpectedPlanAsync(
+        string workspaceRoot,
+        string sourceRoot,
+        DispositionLedger ledger,
+        MigrationRunArtifact intermediate,
+        string mappingManifestSha256,
+        IReadOnlyList<GenerationCoveredEntry> covered,
+        CancellationToken cancellationToken)
+    {
+        if (!TryResolveRunArtifact(workspaceRoot, intermediate.Path, out string irAbsolute))
+        {
+            return Refuse(410,
+                "The run's normalized representation is retained in its manifest, but the workspace bytes have expired, so the " +
+                "cases its source requires could not be re-derived.");
+        }
+
+        string irJson;
+        try
+        {
+            FileInfo file = new(irAbsolute);
+            if (file.Length != intermediate.ByteLength || file.Length > FormsIntermediateReader.MaxDocumentBytes)
+            {
+                return Refuse(409,
+                    "The retained normalized representation no longer matches the size its run recorded, so the cases its source " +
+                    "requires could not be re-derived.");
+            }
+
+            byte[] bytes = await File.ReadAllBytesAsync(irAbsolute, cancellationToken).ConfigureAwait(false);
+            string digest = Convert.ToHexStringLower(SHA256.HashData(bytes));
+
+            if (!string.Equals(digest, intermediate.ContentSha256, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(digest, ledger.IntermediateContentSha256, StringComparison.OrdinalIgnoreCase))
+            {
+                return Refuse(409,
+                    "The retained normalized representation is not the one this ledger was projected from, so the cases its " +
+                    "source requires could not be re-derived.");
+            }
+
+            irJson = Encoding.UTF8.GetString(bytes).TrimStart('\uFEFF');
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or FormatException)
+        {
+            return Refuse(500, "The normalized representation this run wrote could not be read.");
+        }
+
+        FormsIntermediateRead read = FormsIntermediateReader.Read(irJson, sourceRoot);
+        if (read.Modules is not { } modules)
+        {
+            return Refuse(409,
+                $"The retained normalized representation was refused, so the cases its source requires could not be re-derived: {read.Error}");
+        }
+
+        string manifestPath = $"{sourceRoot}/{TargetMappingReader.ConventionalPath}";
+        if (!TryResolveWithin(workspaceRoot, sourceRoot, manifestPath, out string manifestAbsolute))
+        {
+            return Refuse(410,
+                $"The target mapping at '{manifestPath}' is no longer readable in this run's workspace, so the cases the source " +
+                "requires could not be re-derived.");
+        }
+
+        WorkspaceWriter source = new(workspaceRoot);
+        string manifestJson;
+        List<OracleSchema> schemas = [];
+
+        try
+        {
+            FileInfo manifestFile = new(manifestAbsolute);
+            if (manifestFile.Length > TargetMappingReader.MaxManifestBytes)
+            {
+                return Refuse(413, "The target mapping is larger than this server reads, so it was not read at all.");
+            }
+
+            byte[] bytes = await File.ReadAllBytesAsync(manifestAbsolute, cancellationToken).ConfigureAwait(false);
+            if (!string.Equals(
+                    Convert.ToHexStringLower(SHA256.HashData(bytes)), mappingManifestSha256, StringComparison.OrdinalIgnoreCase))
+            {
+                return Refuse(409,
+                    "The target mapping in this run's source is not the one its generation was produced against, so the cases " +
+                    "the source requires could not be re-derived.");
+            }
+
+            manifestJson = Encoding.UTF8.GetString(bytes).TrimStart('\uFEFF');
+
+            foreach (WorkspaceFile candidate in source.EnumerateFiles(sourceRoot, MaxSourceFiles))
+            {
+                if (OracleSourceFile.IsSqlText(candidate.RelativePath))
+                {
+                    schemas.Add(OracleSchemaParser.Parse(source.ReadText(candidate.RelativePath, MaxSourceTextBytes)));
+                }
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or FormatException
+            or WorkspaceLimitExceededException or WorkspacePathException)
+        {
+            return Refuse(500,
+                "This run's retained source could not be read, so the cases it requires of a verification could not be re-derived.");
+        }
+
+        if (schemas.Count == 0)
+        {
+            return Refuse(409,
+                "No parsed Oracle schema remains under this run's source root, so the target shape a carried property should have " +
+                "could not be re-derived from the source.");
+        }
+
+        TargetMappingRead mapping;
+        try
+        {
+            mapping = TargetMappingReader.Read(manifestJson, OracleSchema.Merge(schemas), modules);
+        }
+        catch (JsonException)
+        {
+            return Refuse(409,
+                "The target mapping this run's source retains could not be read, so the cases it requires could not be re-derived.");
+        }
+
+        return mapping.Mapping is { } resolved
+            ? PlatformResult<EntryVerificationCoverage.VerificationPlan>.Ok(
+                EntryVerificationCoverage.Plan(resolved, modules, covered))
+            : Refuse(409,
+                "The declared target mapping no longer resolves against this run's retained source, so the cases it requires " +
+                $"could not be re-derived: {string.Join(" ", mapping.Rejections.Take(5))}");
+
+        static PlatformResult<EntryVerificationCoverage.VerificationPlan> Refuse(int status, string error) =>
+            PlatformResult<EntryVerificationCoverage.VerificationPlan>.Fail(status, error);
     }
 
     private static async Task<PlatformResult<EntryVerificationCoverageRecord>> ReadEntryVerificationAsync(

@@ -77,10 +77,27 @@ public sealed record EntryVerificationExpectation(
     string Expected)
 {
     /// <summary>Stable identity of this case within one entry, so re-running it is the same fact twice.</summary>
-    public string TestId => Column is { Length: > 0 } column
-        ? $"{Kind}:{Table}.{column}"
-        : $"{Kind}:{Table}";
+    public string TestId => EntryVerificationCoverage.TestId(Kind, Table, Column);
+
+    /// <summary>This case as the record states it was asked, before anything answered it.</summary>
+    public EntryVerificationPlannedCase AsPlanned() => new(EntryId, TestId, Kind, Table, Column);
 }
+
+/// <summary>
+/// One question this verification decided to ask, written down before any answer arrived.
+///
+/// The executed cases alone cannot say whether a property was completely covered: a record holding one
+/// passing probe reads identically whether that was the only probe planned for the property or the only
+/// one that came back. Stating the plan separately is what makes "every probe this property needed was
+/// executed" a checkable fact rather than an assumption, and it carries the coordinates so the probe
+/// family can be re-derived instead of parsed back out of an identifier.
+/// </summary>
+public sealed record EntryVerificationPlannedCase(
+    string EntryId,
+    string TestId,
+    EntryVerificationCaseKind Kind,
+    string Table,
+    string? Column);
 
 /// <summary>What the verifier observed for one expectation. <paramref name="Actual"/> is null when nothing answered.</summary>
 public sealed record EntryVerificationObservation(
@@ -198,17 +215,47 @@ public sealed record EntryVerificationCase(
     string Detail);
 
 /// <summary>
+/// Why a verification does not speak about something: because it never asked, or because it asked and
+/// got no answer.
+///
+/// The two are not the same shortfall and must not be collapsed. A property this generator does not
+/// re-express, or a decision to retire, is a gap by design — the run never planned a probe there, and a
+/// record full of those is still a complete account of what it set out to check. A planned probe that
+/// came back with nothing is an incomplete account: the property it belongs to was only partly asked
+/// about, so a sibling probe that passed cannot stand in for the one that never ran.
+/// </summary>
+public enum EntryVerificationGapKind
+{
+    /// <summary>
+    /// No case was ever planned here. Stated so the record says what it leaves undemonstrated, and
+    /// deliberately not a shortfall against the plan: it is the plan.
+    /// </summary>
+    NotProbed,
+
+    /// <summary>
+    /// A case this run planned returned no executed result. The property it names is not completely
+    /// covered, and no result about it may be recorded until it is.
+    /// </summary>
+    PlannedCaseUnanswered,
+}
+
+/// <summary>
 /// Something this verification does not demonstrate, stated rather than omitted.
 ///
-/// <paramref name="EntryId"/> is empty for a gap about a class of behaviour rather than one row. A gap is
-/// never a softer pass: the ledger row it names stays unexecuted and keeps blocking completion.
+/// <paramref name="EntryId"/> is empty for a gap about a class of behaviour rather than one row, and
+/// <paramref name="PlannedTestId"/> is set only when <paramref name="Kind"/> is
+/// <see cref="EntryVerificationGapKind.PlannedCaseUnanswered"/>, so an unanswered probe names the exact
+/// question that went unanswered instead of describing it in prose nothing can check. A gap is never a
+/// softer pass: the ledger row it names stays unexecuted and keeps blocking completion.
 /// </summary>
 public sealed record EntryVerificationGap(
+    EntryVerificationGapKind Kind,
     string EntryId,
     string ModulePath,
     string ObjectPath,
     string PropertyName,
-    string Reason);
+    string Reason,
+    string? PlannedTestId = null);
 
 /// <summary>
 /// What one run's trusted verifier read from the approved target, written beside the run's reports so the
@@ -222,6 +269,12 @@ public sealed record EntryVerificationGap(
 /// <paramref name="Target"/> is the destination that was read. The server compares it against the
 /// project's target profile, so a result read from somewhere nobody approved is refused rather than
 /// recorded.
+///
+/// <paramref name="Planned"/> is every case this run decided to ask, stated before any of them was
+/// answered. It is what makes completeness checkable: the server reconciles it against
+/// <paramref name="Cases"/> and <paramref name="Gaps"/> and refuses a record that does not account for
+/// each planned probe exactly once, so a property cannot read back verified on the strength of one probe
+/// while a sibling probe it also needed never ran.
 /// </summary>
 public sealed record EntryVerificationCoverageRecord(
     string SchemaVersion,
@@ -235,6 +288,7 @@ public sealed record EntryVerificationCoverageRecord(
     string VerifierId,
     EntryVerificationTargetBinding Target,
     DateTimeOffset VerifiedUtc,
+    IReadOnlyList<EntryVerificationPlannedCase> Planned,
     IReadOnlyList<EntryVerificationCase> Cases,
     IReadOnlyList<EntryVerificationGap> Gaps);
 
@@ -249,13 +303,26 @@ public sealed record EntryVerificationCoverageRecord(
 public static partial class EntryVerificationCoverage
 {
     /// <summary>The only schema version this build reads. A record is data, so the version is frozen text.</summary>
-    public const string SchemaVersion = "2.0";
+    public const string SchemaVersion = "3.0";
 
     /// <summary>Where the record sits, relative to the run's own output root.</summary>
     public const string RecordPath = "reports/entry-verification.json";
 
     /// <summary>Identifier of the planner that produced these cases, retained in the record.</summary>
-    public const string VerifierId = "ofm.entry-runtime-verification/2";
+    public const string VerifierId = "ofm.entry-runtime-verification/3";
+
+    /// <summary>How many refusals one audit reports. The record always holds everything they are about.</summary>
+    private const int MaxAuditRefusals = 25;
+
+    /// <summary>
+    /// The identity of one case within one entry, derived from what it asks rather than stored beside it.
+    ///
+    /// Both the planned statement and the executed result spell it through here, so a record whose
+    /// identifier and coordinates disagree is a record the server can catch rather than one it has to
+    /// believe.
+    /// </summary>
+    public static string TestId(EntryVerificationCaseKind kind, string table, string? column) =>
+        column is { Length: > 0 } named ? $"{kind}:{table}.{named}" : $"{kind}:{table}";
 
     /// <summary>Ceiling on one record, applied to cases and to gaps separately.</summary>
     public const int MaxCases = 20_000;
@@ -370,6 +437,7 @@ public static partial class EntryVerificationCoverage
             if (!qualifiedByPath.TryGetValue(property.ModulePath, out string? qualified))
             {
                 gaps.Add(new EntryVerificationGap(
+                    EntryVerificationGapKind.NotProbed,
                     string.Empty, property.ModulePath, property.ObjectPath, property.PropertyName,
                     "The normalized representation this verification read declares no module at that path, so the ledger row " +
                     "this property belongs to could not be identified and no case was executed for it."));
@@ -381,6 +449,7 @@ public static partial class EntryVerificationCoverage
             if (!byEntry.TryGetValue(entryId, out GenerationCoveredEntry? decision))
             {
                 gaps.Add(new EntryVerificationGap(
+                    EntryVerificationGapKind.NotProbed,
                     entryId, property.ModulePath, property.ObjectPath, property.PropertyName,
                     "The generation this verification read does not cover that property, so there is no recorded decision a " +
                     "result about it could be bound to."));
@@ -390,6 +459,7 @@ public static partial class EntryVerificationCoverage
             if (decision.Decision is not (DispositionDecision.Preserve or DispositionDecision.Transform))
             {
                 gaps.Add(new EntryVerificationGap(
+                    EntryVerificationGapKind.NotProbed,
                     entryId, property.ModulePath, property.ObjectPath, property.PropertyName,
                     $"That property is recorded {decision.Decision}, which is not a decision to carry it into the target. " +
                     "Executing a case that passed because the target happens to hold the object would report that decision " +
@@ -405,6 +475,7 @@ public static partial class EntryVerificationCoverage
             if (!IsVerifiableIdentifier(table) || (column is not null && !IsVerifiableIdentifier(column)))
             {
                 gaps.Add(new EntryVerificationGap(
+                    EntryVerificationGapKind.NotProbed,
                     entryId, property.ModulePath, property.ObjectPath, property.PropertyName,
                     "The target object this property maps to is named in a way this verifier will not ask a catalog about, " +
                     "so no case was executed for it."));
@@ -422,7 +493,8 @@ public static partial class EntryVerificationCoverage
             }
         }
 
-        gaps.Add(new EntryVerificationGap(string.Empty, string.Empty, string.Empty, string.Empty, RuntimeServiceGap));
+        gaps.Add(new EntryVerificationGap(
+            EntryVerificationGapKind.NotProbed, string.Empty, string.Empty, string.Empty, string.Empty, RuntimeServiceGap));
 
         return new VerificationPlan(expectations, gaps);
     }
@@ -490,9 +562,11 @@ public static partial class EntryVerificationCoverage
                 observed.Outcome == DispositionVerificationStatus.NotExecuted)
             {
                 gaps.Add(new EntryVerificationGap(
+                    EntryVerificationGapKind.PlannedCaseUnanswered,
                     expectation.EntryId, expectation.ModulePath, expectation.ObjectPath, expectation.PropertyName,
                     $"Case '{expectation.TestId}' was planned and the verifier returned no executed result for it" +
-                    (observed is null ? "." : $": {observed.Detail}")));
+                    (observed is null ? "." : $": {observed.Detail}"),
+                    expectation.TestId));
                 continue;
             }
 
@@ -513,6 +587,297 @@ public static partial class EntryVerificationCoverage
         return (cases, gaps);
     }
 
+    /// <summary>
+    /// Why a record does not completely account for the cases it planned, or nothing at all.
+    ///
+    /// This is the rule the whole file exists for. A property is covered when every probe planned for it
+    /// was executed, and not when one of them passed: the table a block queries existing says nothing
+    /// about whether the run's identity may read it, so a record carrying only the first has demonstrated
+    /// half of what it set out to and must not be recorded as evidence about that property. The plan is
+    /// reconciled as a whole, so a single unanswered probe anywhere refuses the record rather than
+    /// admitting the properties that happened to come back complete — one verification is one fact about
+    /// one output set, and half of one is not a smaller fact.
+    ///
+    /// Gaps of kind <see cref="EntryVerificationGapKind.NotProbed"/> are ignored here on purpose. They are
+    /// the plan stating what it never asked — a retired decision, a name no catalog is asked about, the
+    /// absence of any executed application behaviour — and a structurally valid property is free to record
+    /// alongside them, because nothing in the record claims those gaps were verified.
+    ///
+    /// What it cannot check is a plan that was shrunk before it was written: this reads the record
+    /// against itself, and only the source says how many probes it implied. The pairing it does check is
+    /// the part that is unconditional — a table probe always comes with a readability probe, and a
+    /// column's shape is never asked without its existence. <see cref="Reconcile"/> is what closes the
+    /// rest, by rebuilding the plan the source requires instead of believing the one the record states.
+    /// </summary>
+    public static IReadOnlyList<string> Audit(EntryVerificationCoverageRecord record)
+    {
+        ArgumentNullException.ThrowIfNull(record);
+
+        List<string> refusals = [];
+
+        if (record.Planned.Count == 0)
+        {
+            refusals.Add(
+                "The record states no planned case, so what it executed cannot be read as everything it set out to ask.");
+            return refusals;
+        }
+
+        if (record.Planned.Count > MaxCases)
+        {
+            refusals.Add("The record states more planned cases than one record describes.");
+            return refusals;
+        }
+
+        Dictionary<string, EntryVerificationPlannedCase> planned = [];
+        foreach (EntryVerificationPlannedCase candidate in record.Planned)
+        {
+            if (!string.Equals(candidate.TestId, TestId(candidate.Kind, candidate.Table, candidate.Column), StringComparison.Ordinal))
+            {
+                Refuse(refusals,
+                    $"Planned case '{candidate.TestId}' on '{candidate.EntryId}' does not name the probe its own coordinates describe.");
+            }
+            else if (!planned.TryAdd(Key(candidate.EntryId, candidate.TestId), candidate))
+            {
+                Refuse(refusals,
+                    $"Planned case '{candidate.TestId}' on '{candidate.EntryId}' is stated more than once, so how many results it needs is ambiguous.");
+            }
+        }
+
+        foreach (string incomplete in IncompleteProbeFamilies(record.Planned))
+        {
+            Refuse(refusals, incomplete);
+        }
+
+        HashSet<string> executed = new(StringComparer.Ordinal);
+        foreach (EntryVerificationCase item in record.Cases)
+        {
+            string key = Key(item.EntryId, item.TestId);
+            if (!planned.TryGetValue(key, out EntryVerificationPlannedCase? match))
+            {
+                Refuse(refusals,
+                    $"Case '{item.TestId}' on '{item.EntryId}' reports a result for a probe this run never planned, so what it " +
+                    "answers is not a question the source asked.");
+                continue;
+            }
+
+            if (match.Kind != item.Kind)
+            {
+                Refuse(refusals,
+                    $"Case '{item.TestId}' on '{item.EntryId}' reports a different probe than the one planned under that identifier.");
+            }
+
+            executed.Add(key);
+        }
+
+        HashSet<string> stated = new(StringComparer.Ordinal);
+        foreach (EntryVerificationGap gap in record.Gaps)
+        {
+            if (gap.Kind != EntryVerificationGapKind.PlannedCaseUnanswered)
+            {
+                continue;
+            }
+
+            if (gap.PlannedTestId is not { Length: > 0 } testId || !planned.ContainsKey(Key(gap.EntryId, testId)))
+            {
+                Refuse(refusals,
+                    $"A gap on '{gap.EntryId}' says a planned case went unanswered without naming one this run planned.");
+                continue;
+            }
+
+            stated.Add(Key(gap.EntryId, testId));
+        }
+
+        foreach ((string key, EntryVerificationPlannedCase candidate) in planned)
+        {
+            bool ran = executed.Contains(key);
+            bool unanswered = stated.Contains(key);
+
+            if (ran && unanswered)
+            {
+                Refuse(refusals,
+                    $"Case '{candidate.TestId}' on '{candidate.EntryId}' is reported both as executed and as unanswered.");
+            }
+            else if (ran)
+            {
+                continue;
+            }
+            else if (unanswered)
+            {
+                Refuse(refusals,
+                    $"Case '{candidate.TestId}' on '{candidate.EntryId}' was planned and went unanswered, so that property was " +
+                    "only partly asked about and no result about it is complete.");
+            }
+            else
+            {
+                Refuse(refusals,
+                    $"Case '{candidate.TestId}' on '{candidate.EntryId}' was planned and the record neither reports a result for " +
+                    "it nor states it went unanswered, so the record does not account for what it asked.");
+            }
+        }
+
+        return refusals;
+
+        static void Refuse(List<string> refusals, string reason)
+        {
+            if (refusals.Count < MaxAuditRefusals)
+            {
+                refusals.Add(reason);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Every way a record's account of what it asked differs from the plan the source requires of it.
+    ///
+    /// <see cref="Audit"/> reads a record against itself, so a record that removed a probe from its plan
+    /// and from its results together is internally consistent and passes: the family it leaves behind is
+    /// one this build legitimately produces when the source resolves no type for a column. This reads the
+    /// record against something it did not write — <paramref name="expected"/>, planned from the retained
+    /// mapping, the normalized source, and the decisions the server holds — so a probe the source
+    /// requires is missing whether or not the record admits it.
+    ///
+    /// The expected value is compared too, and not only the identity of the case. A record free to name
+    /// its own expectation could answer a question the source never asked: a column declared
+    /// <c>numeric(12,2)</c> in the source and reported as expecting <c>text</c> passes against a target
+    /// that lost the precision, and passes correctly, because it was asked the easier question.
+    ///
+    /// An empty <paramref name="expected"/> refuses outright. A ledger whose source and standing
+    /// decisions derive no case has nothing a result could be evidence of, so a record offered against it
+    /// is a record about nothing.
+    /// </summary>
+    public static IReadOnlyList<string> Reconcile(
+        VerificationPlan expected,
+        EntryVerificationCoverageRecord record)
+    {
+        ArgumentNullException.ThrowIfNull(expected);
+        ArgumentNullException.ThrowIfNull(record);
+
+        List<string> refusals = [];
+
+        if (expected.Expectations.Count == 0)
+        {
+            refusals.Add(
+                "This ledger's retained source and standing decisions require no case at all, so there is nothing a result " +
+                "could be evidence of.");
+            return refusals;
+        }
+
+        Dictionary<string, EntryVerificationExpectation> required = [];
+        foreach (EntryVerificationExpectation expectation in expected.Expectations)
+        {
+            required[Key(expectation.EntryId, expectation.TestId)] = expectation;
+        }
+
+        Dictionary<string, EntryVerificationPlannedCase> stated = [];
+        foreach (EntryVerificationPlannedCase candidate in record.Planned)
+        {
+            stated[Key(candidate.EntryId, candidate.TestId)] = candidate;
+        }
+
+        foreach ((string key, EntryVerificationExpectation expectation) in required)
+        {
+            if (!stated.TryGetValue(key, out EntryVerificationPlannedCase? claimed))
+            {
+                Refuse(refusals,
+                    $"The source requires case '{expectation.TestId}' on '{expectation.EntryId}' and the record states no such " +
+                    "planned case, so it accounts completely for a plan smaller than the one its source asks for.");
+                continue;
+            }
+
+            if (claimed.Kind != expectation.Kind ||
+                !string.Equals(claimed.Table, expectation.Table, StringComparison.Ordinal) ||
+                !string.Equals(claimed.Column ?? string.Empty, expectation.Column ?? string.Empty, StringComparison.Ordinal))
+            {
+                Refuse(refusals,
+                    $"Planned case '{expectation.TestId}' on '{expectation.EntryId}' names a different probe than the source " +
+                    "derives under that identifier.");
+            }
+        }
+
+        foreach ((string key, EntryVerificationPlannedCase claimed) in stated)
+        {
+            if (!required.ContainsKey(key))
+            {
+                Refuse(refusals,
+                    $"The record states planned case '{claimed.TestId}' on '{claimed.EntryId}', which this ledger's source and " +
+                    "standing decisions do not derive.");
+            }
+        }
+
+        foreach (EntryVerificationCase item in record.Cases)
+        {
+            if (!required.TryGetValue(Key(item.EntryId, item.TestId), out EntryVerificationExpectation? expectation))
+            {
+                Refuse(refusals,
+                    $"Case '{item.TestId}' on '{item.EntryId}' reports a result for a probe the source does not derive.");
+                continue;
+            }
+
+            if (item.Kind != expectation.Kind ||
+                !string.Equals(item.Expected, expectation.Expected, StringComparison.Ordinal))
+            {
+                Refuse(refusals,
+                    $"Case '{item.TestId}' on '{item.EntryId}' was executed against '{item.Expected}' where the source resolves " +
+                    $"'{expectation.Expected}', so it answers an easier question than the one the source asks.");
+            }
+        }
+
+        return refusals;
+
+        static void Refuse(List<string> refusals, string reason)
+        {
+            if (refusals.Count < MaxAuditRefusals)
+            {
+                refusals.Add(reason);
+            }
+        }
+    }
+
+    private static string Key(string entryId, string testId) => $"{entryId}\u0000{testId}";
+
+    /// <summary>
+    /// The probe pairings that hold for every planned case regardless of the source, so a plan trimmed to
+    /// match what came back is recognisable as trimmed.
+    ///
+    /// A block's table is always asked both whether it exists and whether this run's identity may read it,
+    /// because either alone would let a migrated application that cannot query the table read back as
+    /// verified. A column's declared shape is never asked without asking whether the column is there at
+    /// all. Whether a shape probe was planned depends on the source type resolving, so its absence is not
+    /// a shortfall and is not treated as one.
+    /// </summary>
+    private static IEnumerable<string> IncompleteProbeFamilies(IReadOnlyList<EntryVerificationPlannedCase> planned)
+    {
+        foreach (IGrouping<(string Entry, string Table, string Column), EntryVerificationPlannedCase> family in
+            planned.GroupBy(item => (Entry: item.EntryId, Table: item.Table, Column: item.Column ?? string.Empty)))
+        {
+            HashSet<EntryVerificationCaseKind> kinds = [.. family.Select(item => item.Kind)];
+            bool scopedToColumn = family.Key.Column.Length > 0;
+
+            if (scopedToColumn != (kinds.Contains(EntryVerificationCaseKind.TargetColumnExists) ||
+                    kinds.Contains(EntryVerificationCaseKind.TargetColumnShape)))
+            {
+                yield return $"The planned cases for '{family.Key.Table}' on '{family.Key.Entry}' mix table probes with column " +
+                    "probes, so which object this run asked about is ambiguous.";
+                continue;
+            }
+
+            if (scopedToColumn)
+            {
+                if (!kinds.Contains(EntryVerificationCaseKind.TargetColumnExists))
+                {
+                    yield return $"'{family.Key.Table}.{family.Key.Column}' on '{family.Key.Entry}' was planned with a shape probe " +
+                        "and no existence probe, so the plan is not one this run could have produced.";
+                }
+            }
+            else if (!kinds.Contains(EntryVerificationCaseKind.TargetTableExists) ||
+                !kinds.Contains(EntryVerificationCaseKind.TargetTableReadable))
+            {
+                yield return $"'{family.Key.Table}' on '{family.Key.Entry}' was planned without both the existence and the " +
+                    "readability probe this run always plans together, so the plan is not one this run could have produced.";
+            }
+        }
+    }
+
     /// <summary>A one-line reading of a record, for a run event and the aggregate report.</summary>
     public static string Describe(EntryVerificationCoverageRecord record)
     {
@@ -521,11 +886,14 @@ public static partial class EntryVerificationCoverage
         int passed = record.Cases.Count(item => item.Outcome == DispositionVerificationStatus.Passed);
         int failed = record.Cases.Count(item => item.Outcome == DispositionVerificationStatus.Failed);
         int entries = record.Cases.Select(item => item.EntryId).Distinct(StringComparer.Ordinal).Count();
+        int unanswered = record.Gaps.Count(gap => gap.Kind == EntryVerificationGapKind.PlannedCaseUnanswered);
 
         StringBuilder text = new();
         text.Append(CultureInfo.InvariantCulture,
-            $"{record.Cases.Count} executed case(s) over {entries} recorded decision(s): {passed} passed, {failed} failed. ");
-        text.Append(CultureInfo.InvariantCulture, $"{record.Gaps.Count} stated gap(s). ");
+            $"{record.Cases.Count} of {record.Planned.Count} planned case(s) executed over {entries} recorded decision(s): " +
+            $"{passed} passed, {failed} failed. ");
+        text.Append(CultureInfo.InvariantCulture,
+            $"{unanswered} planned case(s) went unanswered and {record.Gaps.Count - unanswered} gap(s) were never probed. ");
         text.Append("The approved target was read only; no generated service was started, so nothing here is evidence of " +
             "application behaviour.");
         return text.ToString();

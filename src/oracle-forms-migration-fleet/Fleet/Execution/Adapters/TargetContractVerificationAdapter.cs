@@ -191,8 +191,11 @@ public sealed class TargetContractVerificationAdapter(
             EntryVerificationCoverage.Join(plan.Expectations, run.Observations);
 
         EntryVerificationGap[] gaps = [.. plan.Gaps, .. unanswered];
+        EntryVerificationPlannedCase[] planned = [.. plan.Expectations.Select(expectation => expectation.AsPlanned())];
 
-        if (cases.Count > EntryVerificationCoverage.MaxCases || gaps.Length > EntryVerificationCoverage.MaxCases)
+        if (cases.Count > EntryVerificationCoverage.MaxCases ||
+            gaps.Length > EntryVerificationCoverage.MaxCases ||
+            planned.Length > EntryVerificationCoverage.MaxCases)
         {
             return PhaseExecutionResult.Failure(
                 "This verification produced more cases or gaps than one record describes, so none was written rather than a " +
@@ -211,6 +214,7 @@ public sealed class TargetContractVerificationAdapter(
             EntryVerificationCoverage.VerifierId,
             claim.ApprovedTarget,
             DateTimeOffset.UtcNow,
+            planned,
             [.. cases.Select(item => item with { Detail = Scrub(item.Detail), Actual = Scrub(item.Actual) })],
             [.. gaps.Select(gap => gap with { Reason = Scrub(gap.Reason) })]);
 
@@ -252,6 +256,24 @@ public sealed class TargetContractVerificationAdapter(
                 $"No case was executed against {claim.ApprovedTarget.Describe()} for any recorded decision, so this run " +
                 $"demonstrated nothing about the migrated target. {gaps.Length.ToString(CultureInfo.InvariantCulture)} " +
                 "gap(s) are recorded above and every property they name stays unexecuted.");
+        }
+
+        // Passing cases are not a verification unless they are all of the cases the run planned. A block's
+        // table existing while the probe of whether this run's identity may read it never came back leaves
+        // the property half-asked, and a record the ledger will refuse for that reason must not read as a
+        // clean phase first — that ordering is what let a deployment publish underneath an incomplete read.
+        IReadOnlyList<string> incomplete = EntryVerificationCoverage.Audit(record);
+        if (incomplete.Count > 0)
+        {
+            int missing = record.Gaps.Count(gap => gap.Kind == EntryVerificationGapKind.PlannedCaseUnanswered);
+
+            return new PhaseExecutionResult(
+                false,
+                [artifact],
+                [summary, .. incomplete.Take(MaxReportedGaps)],
+                $"This verification did not account for every case it planned against {claim.ApprovedTarget.Describe()}, so no " +
+                $"property in it is completely covered and none may be recorded as verified. {missing.ToString(CultureInfo.InvariantCulture)} " +
+                "planned case(s) went unanswered.");
         }
 
         return failed == 0

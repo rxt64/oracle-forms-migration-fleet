@@ -10,6 +10,7 @@ app/**/.github
 app/**/node_modules
 app/**/bin
 app/**/obj
+app/**/TestResults
 app/frontend/dist
 app/**/.env
 app/**/.env.*
@@ -17,3 +18,15 @@ app/**/*.pfx
 app/**/*.pem
 app/**/*.key
 app/deploy
+
+# Package-source and build-hook configuration. None of these is emitted by the generator, so one arriving
+# in the artifact is the estate choosing where the build fetches from or what MSBuild runs. The `RUN`
+# instructions are already confined to a container, but there is no reason to let a generated tree
+# redirect a restore at all.
+app/**/.npmrc
+app/**/NuGet.config
+app/**/NuGet.Config
+app/**/nuget.config
+app/**/Directory.Build.props
+app/**/Directory.Build.targets
+app/**/Directory.Packages.props

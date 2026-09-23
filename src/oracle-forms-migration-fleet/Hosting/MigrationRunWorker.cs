@@ -973,9 +973,66 @@ internal static class RunScopedGateway
         IMigrationRunStore store,
         string runId,
         long fenceToken,
-        TimeSpan lease) =>
-        new AuthorizingTargetApplicationDeploymentGateway(
-            new FencedTargetApplicationDeploymentGateway(inner, store, runId, fenceToken, lease), authorizer, request);
+        TimeSpan lease)
+    {
+        // A publish is not one instant. The wrappers below answer for the instant before the gateway is
+        // entered; the sentinel answers again inside it, after the uploads and the token acquisition that
+        // sit between that instant and the dispatch that actually mints an image. A builder that supports
+        // being bound gets the same two checks, in the same order, at the points that matter.
+        ITargetApplicationDeploymentGateway bound = inner is IRevalidatingTargetApplicationDeploymentGateway revalidating
+            ? revalidating.BoundTo(new RunScopedDispatchSentinel(authorizer, request, store, runId, fenceToken, lease))
+            : inner;
+
+        return new AuthorizingTargetApplicationDeploymentGateway(
+            new FencedTargetApplicationDeploymentGateway(bound, store, runId, fenceToken, lease), authorizer, request);
+    }
+}
+
+/// <summary>
+/// The server's live answer, asked from inside a publish that is still running.
+///
+/// It asks the same two questions the run-scoped wrappers ask, in the same order and for the same reasons:
+/// whether the operator's grant still authorizes this work, and then — because that answer is an awaited
+/// round trip during which a claim can be taken over — whether this process still owns the run. The fence
+/// is innermost so it is the last thing established before the caller acts on the answer.
+///
+/// Nothing here is supplied by the request being published. The authorizer, the run identifier and the
+/// fence token are fixed when the run is claimed, so a bundle, a binding, or an adapter cannot widen what
+/// is being asked about.
+/// </summary>
+internal sealed class RunScopedDispatchSentinel(
+    WorkbenchMutationAuthorizer authorizer,
+    MigrationRunRequest request,
+    IMigrationRunStore store,
+    string runId,
+    long fenceToken,
+    TimeSpan lease) : ITargetDeploymentDispatchSentinel
+{
+    public async Task<TargetDeploymentClearance> RevalidateAsync(
+        TargetDeploymentCheckpoint checkpoint,
+        string operationId,
+        CancellationToken cancellationToken)
+    {
+        MutationAuthorizationResult decision = await authorizer
+            .RecheckAsync(request, WorkbenchMutationScope.SandboxDatabaseWrite, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!decision.IsAuthorized)
+        {
+            return TargetDeploymentClearance.Withheld(
+                $"The operator's authorization for this run no longer holds at the {checkpoint} checkpoint of operation " +
+                $"{operationId}: {decision.Reason}");
+        }
+
+        if (!await store.RenewAsync(runId, fenceToken, lease, cancellationToken).ConfigureAwait(false))
+        {
+            return TargetDeploymentClearance.Withheld(
+                $"A newer claim owns this run, so at the {checkpoint} checkpoint of operation {operationId} this worker is " +
+                "no longer the one executing it.");
+        }
+
+        return TargetDeploymentClearance.Cleared(decision.Reason);
+    }
 }
 
 internal sealed class FencedDataMigrationGateway(

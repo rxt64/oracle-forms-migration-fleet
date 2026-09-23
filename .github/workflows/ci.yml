@@ -322,6 +322,36 @@ jobs:
           retention-days: 14
           path: ${{ runner.temp }}/generated-app-evidence/
 
+      - name: Verify generated build container containment
+        env:
+          RUN_GENERATED_TARGET_CONTAINER_ATTACK: 'true'
+        run: |
+          set -euo pipefail
+          docker info > /dev/null
+          dotnet test tests/oracle-forms-migration-fleet.Tests/oracle-forms-migration-fleet.Tests.csproj \
+            --no-build -c Release -p:SkipClientBuild=true \
+            --filter 'FullyQualifiedName~A_hostile_run_instruction_cannot_reach_the_runners_command_files_or_workspace' \
+            --results-directory "$RUNNER_TEMP/generated-target-containment" \
+            --logger 'trx;LogFileName=containment.trx'
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import xml.etree.ElementTree as ET
+          report = pathlib.Path(os.environ['RUNNER_TEMP']) / 'generated-target-containment' / 'containment.trx'
+          counters = ET.parse(report).find('.//{*}Counters')
+          if counters is None or counters.get('total') != '1' or counters.get('passed') != '1':
+              raise SystemExit('The required container containment regression did not execute successfully.')
+          PY
+
+      - name: Upload container containment evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-target-containment-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 14
+          path: ${{ runner.temp }}/generated-target-containment/
+
       - name: Test
         run: dotnet test --no-build -c Release -p:SkipClientBuild=true --logger "console;verbosity=normal"
 

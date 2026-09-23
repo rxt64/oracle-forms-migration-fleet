@@ -211,6 +211,120 @@ public interface ITargetApplicationDeploymentGateway
 }
 
 /// <summary>
+/// The points inside one publish at which the server's answer is asked again rather than remembered.
+///
+/// They exist as distinct values because the three questions are not the same question: an upload is
+/// recoverable and leaves nothing running, a claim decides which replica may dispatch, and a dispatch
+/// mints an image and a revision that this process cannot withdraw.
+/// </summary>
+public enum TargetDeploymentCheckpoint
+{
+    /// <summary>Before the bundle's bytes are written to the approved artifact container.</summary>
+    BeforeUpload,
+
+    /// <summary>Before the durable dispatch claim for this operation is created or advanced.</summary>
+    BeforeClaim,
+
+    /// <summary>After the builder credential was awaited and immediately before the dispatch is sent.</summary>
+    BeforeDispatch,
+
+    /// <summary>Before a builder's report is recorded against this run as a deployment.</summary>
+    BeforeResult,
+}
+
+/// <summary>
+/// The server's live answer to "may this exact operation still proceed", at one checkpoint.
+///
+/// It is a decision, not a flag a caller may fabricate: the only implementations are run-scoped and
+/// server-constructed, and a withheld clearance carries the reason so the refusal names what changed.
+/// </summary>
+public sealed record TargetDeploymentClearance(bool IsCleared, string Reason)
+{
+    public static TargetDeploymentClearance Cleared(string reason) => new(true, reason);
+
+    public static TargetDeploymentClearance Withheld(string reason) => new(false, reason);
+}
+
+/// <summary>
+/// Re-asks the server, mid-publish, whether this operation may still proceed.
+///
+/// A publish is not one instant. Uploading tens of megabytes, reading a signing key, and minting an
+/// installation token are all awaited round trips, and an authorization captured before them is an
+/// authorization that may have been revoked, expired, or replaced by the time the dispatch is sent. The
+/// sentinel is therefore consulted inside the gateway at each checkpoint above, not once around it: an
+/// outer wrapper answers only for the instant before the gateway was entered, which is precisely the
+/// instant that does not matter.
+///
+/// Implementations answer from the server's own state — the operator's grant and the run's durable claim
+/// — and never from anything the request carried in.
+/// </summary>
+public interface ITargetDeploymentDispatchSentinel
+{
+    Task<TargetDeploymentClearance> RevalidateAsync(
+        TargetDeploymentCheckpoint checkpoint,
+        string operationId,
+        CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// A gateway whose publish is long enough that the server's answer can change while it runs.
+///
+/// The host registers one builder for the process, but authorization and run ownership belong to a single
+/// run, so the run-scoped composition binds the builder to that run's sentinel and uses the result. A
+/// builder that was never bound has no live answer available to it and refuses to dispatch; it does not
+/// fall back to the answer it was given when it was constructed, because there was not one.
+/// </summary>
+public interface IRevalidatingTargetApplicationDeploymentGateway : ITargetApplicationDeploymentGateway
+{
+    ITargetApplicationDeploymentGateway BoundTo(ITargetDeploymentDispatchSentinel sentinel);
+}
+
+/// <summary>
+/// The document the trusted builder writes, exactly as it is on the wire.
+///
+/// Every property is nullable and every one is checked, because the failure this shape exists to prevent
+/// is a document that deserializes into all-nulls and is then read as a deployment with nothing in it.
+/// Wire names are camelCase and are bound with an explicit serializer contract rather than a host default.
+/// </summary>
+public sealed record TargetDeploymentBuilderReport(
+    string? SchemaVersion,
+    string? State,
+    string? OperationId,
+    string? RunId,
+    string? BuildRunId,
+    string? ArtifactSha256,
+    string? WorkbenchSha,
+    string? SourceSnapshotSha256,
+    string? PlanDigest,
+    string? TargetDigest,
+    string? BindingDigest,
+    string? ImageDigest,
+    string? RevisionName,
+    string? ApplicationUrl,
+    string? DeployedResourceId,
+    string? ReadinessProbeUrl,
+    string? ReadinessOutcome,
+    string? ReadinessObservedUtc);
+
+/// <summary>
+/// What the product itself dispatched, so the builder's report is compared against it rather than read.
+///
+/// None of these come from the document being validated. They are the values this process derived and
+/// sent, which is what makes the comparison worth making.
+/// </summary>
+public sealed record TargetDeploymentBuilderExpectation(
+    string OperationId,
+    string RunId,
+    string ArtifactSha256,
+    string WorkbenchCommitSha,
+    string SourceSnapshotSha256,
+    string PlanDigest,
+    string TargetDigest,
+    string BindingDigest,
+    string TargetResourceId,
+    DateTimeOffset NowUtc);
+
+/// <summary>
 /// Every deterministic rule a deployment is held to. Pure: no file, process, clock, network, or random source.
 ///
 /// It exists as its own type because these are the checks that have to hold identically in two places —
@@ -756,6 +870,221 @@ public static class TargetDeploymentPolicy
                     "The builder updated a different Azure resource than the one this run's approved target profile names. " +
                     "It is recorded as unverified: a deployment that landed somewhere else is not this run's deployment.");
             }
+        }
+
+        return rejections;
+    }
+
+    /// <summary>
+    /// The only result-document contract this product reads.
+    ///
+    /// It is versioned because the set of facts a report must carry is part of the agreement: a builder
+    /// that cannot state the readiness it observed or echo the binding digest it was dispatched with is
+    /// not producing the document this product validates, and being told that plainly is better than
+    /// having its missing fields reported one at a time as if they were deployment failures.
+    /// </summary>
+    public const string ResultSchemaVersion = "fleet.target-deployment-result/3";
+
+    /// <summary>Where one operation's uploaded bundle lives, relative to the approved container.</summary>
+    public static string ArtifactBlobName(string operationId) =>
+        $"operations/{operationId}/generated-application.zip";
+
+    /// <summary>Where one operation's durable dispatch claim lives, relative to the approved container.</summary>
+    public static string ClaimBlobName(string operationId) => $"operations/{operationId}/dispatch.json";
+
+    /// <summary>Where the builder writes its report, relative to the approved container.</summary>
+    public static string ResultBlobName(string operationId) => $"operations/{operationId}/result.json";
+
+    /// <summary>
+    /// The run name the trusted builder gives a dispatch, which is the only handle a dispatch leaves.
+    ///
+    /// The dispatch call itself returns no identifier, so recovery has to recognise a run by the title the
+    /// workflow set. It is derived from the workflow file rather than written twice, and it is compared
+    /// exactly: a prefix or substring match would let an unrelated run whose title merely mentions this
+    /// operation stop a legitimate re-dispatch.
+    /// </summary>
+    public static string ExpectedRunTitle(string workflowFile, string operationId)
+    {
+        string slug = workflowFile is { Length: > 0 }
+            ? System.IO.Path.GetFileNameWithoutExtension(workflowFile)
+            : string.Empty;
+
+        return $"{slug} {operationId}";
+    }
+
+    /// <summary>
+    /// The state a builder reported, or null when it is not one this product accepts.
+    ///
+    /// Only three outcomes are a report at all. Anything else — an empty string, a state the builder
+    /// invented, a state this product uses to describe its own refusals — is not a conclusion the builder
+    /// is allowed to reach on this product's behalf.
+    /// </summary>
+    public static TargetDeploymentState? ReportedState(string? state) => state switch
+    {
+        "Deployed" => TargetDeploymentState.Deployed,
+        "BuildFailed" => TargetDeploymentState.BuildFailed,
+        "VerificationFailed" => TargetDeploymentState.VerificationFailed,
+        _ => null,
+    };
+
+    /// <summary>
+    /// Every reason a builder's report may not be read as this run's deployment.
+    ///
+    /// The document is a claim made by a process this one does not control, written to a container both
+    /// can reach. So every identity in it is compared against what this product actually dispatched, and
+    /// the readiness the builder says it observed is required rather than inferred from the workflow
+    /// having exited zero. A report that is merely well-formed proves nothing: the point of the digests is
+    /// that a document describing some other operation, some other run, or some other destination cannot
+    /// be echoed back into this run's provenance.
+    ///
+    /// Empty means the report may be read. It does not mean a deployment happened — <see cref="ReportedState"/>
+    /// decides that, and this method is applied to a failure report too, so a builder cannot report a
+    /// failure of a different operation either.
+    /// </summary>
+    public static IReadOnlyList<string> RejectReport(
+        TargetDeploymentBuilderReport? report,
+        TargetDeploymentBuilderExpectation expected,
+        IReadOnlyList<string>? allowedApplicationHostSuffixes = null)
+    {
+        ArgumentNullException.ThrowIfNull(expected);
+
+        if (report is null)
+        {
+            return ["The builder's result document was empty, so nothing states what it did."];
+        }
+
+        List<string> rejections = [];
+
+        if (!string.Equals(report.SchemaVersion, ResultSchemaVersion, StringComparison.Ordinal))
+        {
+            rejections.Add(
+                $"The builder's result document declares schema '{report.SchemaVersion ?? "(none)"}' and this product reads " +
+                $"only '{ResultSchemaVersion}'. Nothing was recorded, because a document of an unknown shape that happens to " +
+                "carry some recognised field names is not a report this product can hold a builder to.");
+        }
+
+        TargetDeploymentState? state = ReportedState(report.State);
+        if (state is null)
+        {
+            rejections.Add(
+                $"The builder reported state '{report.State ?? "(none)"}', which is not one of the three conclusions a " +
+                "builder may reach: Deployed, BuildFailed, VerificationFailed.");
+        }
+
+        void Same(string? actual, string expectedValue, string what)
+        {
+            if (!string.Equals(actual, expectedValue, StringComparison.Ordinal))
+            {
+                rejections.Add(
+                    $"The builder's result document reports {what} that is not the one this product dispatched, so it does " +
+                    "not describe this operation and was not recorded.");
+            }
+        }
+
+        Same(report.OperationId, expected.OperationId, "an operation identifier");
+        Same(report.RunId, expected.RunId, "a run identifier");
+        Same(report.ArtifactSha256, expected.ArtifactSha256, "an artifact digest");
+        Same(report.WorkbenchSha, expected.WorkbenchCommitSha, "a workbench commit");
+        Same(report.SourceSnapshotSha256, expected.SourceSnapshotSha256, "a source snapshot digest");
+        Same(report.PlanDigest, expected.PlanDigest, "a plan digest");
+        Same(report.TargetDigest, expected.TargetDigest, "a destination digest");
+        Same(report.BindingDigest, expected.BindingDigest, "a binding digest");
+
+        if (state != TargetDeploymentState.Deployed)
+        {
+            return rejections;
+        }
+
+        if (!IsImageDigest(report.ImageDigest))
+        {
+            rejections.Add(
+                "The builder reported a deployment without an immutable image digest. A tag can be moved after it was " +
+                "verified, so a deployment is only claimed against a digest.");
+        }
+
+        if (string.IsNullOrWhiteSpace(report.RevisionName))
+        {
+            rejections.Add("The builder reported a deployment without naming the revision that is running the image.");
+        }
+
+        if (string.IsNullOrWhiteSpace(report.BuildRunId))
+        {
+            rejections.Add("The builder reported a deployment without naming the build that produced it.");
+        }
+
+        if (!string.Equals(report.DeployedResourceId, expected.TargetResourceId, StringComparison.OrdinalIgnoreCase))
+        {
+            rejections.Add(
+                "The builder reported updating a different Azure resource than the one this run was approved for, so the " +
+                "report was not recorded as this run's deployment.");
+        }
+
+        IReadOnlyList<string> allowed = allowedApplicationHostSuffixes ?? AllowedApplicationHostSuffixes;
+
+        if (!Uri.TryCreate(report.ApplicationUrl, UriKind.Absolute, out Uri? applicationUrl) ||
+            !string.Equals(applicationUrl.Scheme, Uri.UriSchemeHttps, StringComparison.Ordinal) ||
+            !allowed.Any(suffix => applicationUrl.IdnHost.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)))
+        {
+            rejections.Add("The builder reported a deployment without an https URL on a host this product deploys to.");
+            applicationUrl = null;
+        }
+
+        rejections.AddRange(RejectReadiness(report, applicationUrl, allowed, expected.NowUtc));
+
+        return rejections;
+    }
+
+    /// <summary>
+    /// Whether the builder observed the deployed revision answering, and said so.
+    ///
+    /// A workflow that exits zero has shown that its own steps succeeded, not that anything is serving.
+    /// The readiness fields are the builder's statement that it probed the revision it deployed and got an
+    /// answer, and they are checked as a statement: the probe has to be on the application it named, the
+    /// outcome has to be the one word that means it answered, and the observation has to carry a time that
+    /// is not in the future.
+    /// </summary>
+    private static IReadOnlyList<string> RejectReadiness(
+        TargetDeploymentBuilderReport report,
+        Uri? applicationUrl,
+        IReadOnlyList<string> allowedHostSuffixes,
+        DateTimeOffset nowUtc)
+    {
+        List<string> rejections = [];
+
+        if (!string.Equals(report.ReadinessOutcome, "Passed", StringComparison.Ordinal))
+        {
+            rejections.Add(
+                $"The builder reported readiness '{report.ReadinessOutcome ?? "(none)"}' rather than 'Passed', so nothing " +
+                "here says the deployed revision answered. A successful workflow run is not a running application.");
+        }
+
+        if (!Uri.TryCreate(report.ReadinessProbeUrl, UriKind.Absolute, out Uri? probe) ||
+            !string.Equals(probe.Scheme, Uri.UriSchemeHttps, StringComparison.Ordinal) ||
+            !allowedHostSuffixes.Any(suffix => probe.IdnHost.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)))
+        {
+            rejections.Add("The builder reported no https readiness probe on a host this product deploys to.");
+        }
+        else if (applicationUrl is not null &&
+                 !string.Equals(probe.IdnHost, applicationUrl.IdnHost, StringComparison.OrdinalIgnoreCase))
+        {
+            rejections.Add(
+                "The builder probed a different host than the application it reported deploying, so the readiness it " +
+                "observed is not evidence about this deployment.");
+        }
+
+        if (!DateTimeOffset.TryParse(
+                report.ReadinessObservedUtc,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.RoundtripKind | DateTimeStyles.AssumeUniversal,
+                out DateTimeOffset observed))
+        {
+            rejections.Add("The builder reported no readable time at which it observed the deployed revision answering.");
+        }
+        else if (observed > nowUtc + TimeSpan.FromMinutes(5))
+        {
+            rejections.Add(
+                "The builder reported observing readiness in the future, so the report's own timeline does not hold and it " +
+                "was not recorded.");
         }
 
         return rejections;

@@ -88,8 +88,11 @@ and the WebSocket transport to four minutes.
 
 The harness uses only disposable MERIDIAN customer `19001` (`OFM Concurrency Fixture`) and article
 `29001` (`OFM Concurrency Fixture Article`). It refuses to start unless the exact `5 / 6 / 2 / 3`
-seed baseline is present, restores that baseline after each case, and has an exit trap that removes
-only those named rows and their generated orders on failure.
+seed baseline is present. Cleanup authority is false before that check and becomes true only after the
+setup transaction for this harness invocation commits both fixture rows. A refused or partially failed
+setup therefore issues no cleanup DML. Successful teardown clears authority before the next case, whose
+setup must independently acquire it. The exit trap removes the named rows and their generated orders
+only while this invocation owns that fixture.
 
 Observed live results:
 
@@ -102,6 +105,11 @@ The commit case proves the waiting order rechecked committed stock and rejected 
 rollback case proves the waiting order acquired the released lock and succeeded. The successful run
 ended with `OFM_CONCURRENCY|STATE=PASSED`, zero MERIDIAN compile errors, exact seed counts
 `5 / 6 / 2 / 3`, and unchanged BANKING inventory `19 / 0`.
+
+Those observed live results predate the cleanup ownership repair. Because that run followed the
+successful path, it does not prove the repaired abort behavior when customer `19001`, article `29001`,
+or the seed baseline is already occupied. No Azure or Oracle source rerun was performed for this repair.
+The abort behavior is covered instead by the executable local regression described below.
 
 The local source hashes recorded by that run were:
 
@@ -117,6 +125,18 @@ migration evidence, a customer-estate claim, or the separate two-order reversed-
 
 ## Offline validation
 
-The focused `MeridianSourceLabFixtureTests` suite passed `15/15` after the script changes. It pins the
-canonical fixture text, parser/mapping behavior, exact checkpoint safety contract, bounded transport,
-single-exec two-session harness shape, and prohibition on schema drops or BANKING mutation.
+The pre-existing focused `MeridianSourceLabFixtureTests` suite passed `15/15` after the ownership-guard
+script change. After adding the regression, the expanded suite passed `17/17`. The new theory executes
+the embedded production Bash harness through Git Bash with a fake `sqlplus`, no Oracle runtime, no
+sleeps, and no production data. Its collision case makes setup refuse and asserts one setup call, zero
+cleanup calls, and zero cleanup `DELETE` statements. Its owned case makes setup succeed and asserts the
+exit trap invokes cleanup containing the four scoped fixture deletes. The suite also pins the canonical
+fixture text, parser/mapping behavior, exact checkpoint safety contract, bounded transport, single-exec
+two-session harness shape, transactional setup rollback, and prohibition on schema drops or BANKING
+mutation.
+
+The ownership guarantee is intentionally limited to process-local state: the harness may delete fixed
+IDs `19001` and `29001` only after its own setup transaction succeeded in the exact seed baseline. It
+does not identify arbitrary row provenance, and it does not make the fixed-ID fixture safe for concurrent
+harness invocations. A second invocation is expected to fail setup and perform no deletion; the first
+invocation retains cleanup authority for its own fixture.

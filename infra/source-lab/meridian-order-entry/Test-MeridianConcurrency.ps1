@@ -56,13 +56,15 @@ work="$(mktemp -d /tmp/ofm-meridian-concurrency.XXXXXX)"
 s1_pid=''
 s2_pid=''
 done_pid=''
+fixture_owned=0
 
 cleanup_fixture() {
   set +e
   for pid in "$s1_pid" "$s2_pid" "$done_pid"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
-  sqlplus -s / as sysdba <<'SQL' >/dev/null 2>&1
+  if [ "$fixture_owned" -eq 1 ]; then
+    sqlplus -s / as sysdba <<'SQL' >/dev/null 2>&1
 WHENEVER OSERROR EXIT FAILURE ROLLBACK
 WHENEVER SQLERROR CONTINUE
 SET FEEDBACK OFF
@@ -76,6 +78,7 @@ DELETE FROM MRD_CUSTOMER WHERE CUST_NO = 19001;
 COMMIT;
 EXIT SUCCESS
 SQL
+  fi
   rm -rf "$work"
 }
 trap cleanup_fixture EXIT
@@ -210,6 +213,7 @@ run_scenario() {
   lower="$(printf '%s' "$label" | tr '[:upper:]' '[:lower:]')"
 
   sqlplus -s / as sysdba @setup.sql >"$lower-setup.log" 2>&1
+  fixture_owned=1
   cat "$lower-setup.log"
   mkfifo "$lower-locked" "$lower-release" "$lower-started" "$lower-done"
 
@@ -314,6 +318,7 @@ SQL
   grep -Fq "OFM_CONCURRENCY|$label|S2|CODE=$expected_code" "$lower-s2.log"
 
   sqlplus -s / as sysdba @teardown.sql >"$lower-teardown.log" 2>&1
+  fixture_owned=0
   cat "$lower-teardown.log"
   rm -f "$lower-locked" "$lower-release" "$lower-started" "$lower-done"
 }

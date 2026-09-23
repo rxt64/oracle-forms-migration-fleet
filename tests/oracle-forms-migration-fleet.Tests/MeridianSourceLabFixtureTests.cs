@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft. All rights reserved.
 
 using System.Text.Json;
+using System.Diagnostics;
 using OracleFormsMigrationFleet.Fleet.Execution;
 
 namespace OracleFormsMigrationFleet.Tests;
@@ -293,11 +294,118 @@ public class MeridianSourceLabFixtureTests
         Assert.Contains("OFM_CONCURRENCY|COMMIT|S2|CODE=-20105", concurrency, StringComparison.Ordinal);
         Assert.Contains("OFM_CONCURRENCY|ROLLBACK|S2|CODE=0", concurrency, StringComparison.Ordinal);
         Assert.Contains("WAIT_CENTISECONDS", concurrency, StringComparison.Ordinal);
+        Assert.Contains("fixture_owned=0", concurrency, StringComparison.Ordinal);
+        Assert.Equal(1, Count(concurrency, "fixture_owned=1"));
+        Assert.Equal(2, Count(concurrency, "fixture_owned=0"));
+        Assert.Contains("if [ \"$fixture_owned\" -eq 1 ]; then", concurrency, StringComparison.Ordinal);
+        Assert.Contains("WHENEVER SQLERROR EXIT SQL.SQLCODE ROLLBACK", concurrency, StringComparison.Ordinal);
         Assert.Contains("OFM_CONCURRENCY|FINAL|MERIDIAN_COMPILE_ERRORS=0", concurrency, StringComparison.Ordinal);
         Assert.Contains("OFM_CONCURRENCY|FINAL|SEED=5|6|2|3", concurrency, StringComparison.Ordinal);
         Assert.Contains("OFM_CONCURRENCY|FINAL|BANKING=19|0", concurrency, StringComparison.Ordinal);
         Assert.DoesNotContain("DROP USER", concurrency, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("ALTER USER BANKING", concurrency, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("collision", 20, false)]
+    [InlineData("owned", 0, true)]
+    public void The_concurrency_harness_cleans_only_a_fixture_created_by_this_invocation(
+        string setupResult,
+        int expectedExitCode,
+        bool expectCleanup)
+    {
+        string temporaryRoot = Path.Combine(
+            Path.GetTempPath(), $"ofm-meridian-guard-{Guid.NewGuid():N}");
+        string fakeBin = Path.Combine(temporaryRoot, "bin");
+        string harnessPath = Path.Combine(temporaryRoot, "guard-probe.sh");
+        string callLog = Path.Combine(temporaryRoot, "calls.log");
+        string stdinLog = Path.Combine(temporaryRoot, "stdin.log");
+
+        Directory.CreateDirectory(fakeBin);
+        try
+        {
+            string harness = ExtractConcurrencyHarness();
+            int scenarios = harness.IndexOf("run_scenario COMMIT -20105 COMMIT", StringComparison.Ordinal);
+            Assert.True(scenarios > 0, "The concurrency scenario tail was not found.");
+
+            string probe = harness[..scenarios] + """
+                sqlplus -s / as sysdba @setup.sql
+                fixture_owned=1
+                exit 0
+                """;
+            File.WriteAllText(harnessPath, probe);
+
+            string fakeSqlPlusPath = Path.Combine(fakeBin, "sqlplus");
+            File.WriteAllText(fakeSqlPlusPath, """
+                #!/usr/bin/env bash
+                set -euo pipefail
+                to_posix() {
+                  if command -v cygpath >/dev/null 2>&1; then cygpath -u "$1"; else printf '%s' "$1"; fi
+                }
+                call_log="$(to_posix "$OFM_FAKE_CALL_LOG")"
+                stdin_log="$(to_posix "$OFM_FAKE_STDIN_LOG")"
+                printf '%s\n' "$*" >>"$call_log"
+                if [[ "$*" == *"@setup.sql"* ]]; then
+                  if [ "$OFM_FAKE_SETUP_RESULT" = collision ]; then exit 20; fi
+                  exit 0
+                fi
+                cat >>"$stdin_log"
+                """);
+
+            if (!OperatingSystem.IsWindows())
+            {
+                File.SetUnixFileMode(
+                    fakeSqlPlusPath,
+                    UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            }
+
+            ProcessStartInfo start = new(FindBash(), harnessPath)
+            {
+                WorkingDirectory = temporaryRoot,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            };
+            start.Environment["OFM_FAKE_SQLPLUS_DIR"] = fakeBin;
+            start.Environment["OFM_FAKE_CALL_LOG"] = callLog;
+            start.Environment["OFM_FAKE_STDIN_LOG"] = stdinLog;
+            start.Environment["OFM_FAKE_SETUP_RESULT"] = setupResult;
+
+            string pathPrefix = OperatingSystem.IsWindows()
+                ? "$(cygpath -u \"$OFM_FAKE_SQLPLUS_DIR\")"
+                : "$OFM_FAKE_SQLPLUS_DIR";
+            File.WriteAllText(
+                harnessPath,
+                $"export PATH=\"{pathPrefix}:$PATH\"\n" + probe);
+
+            using Process process = Process.Start(start)
+                ?? throw new InvalidOperationException("Bash did not start.");
+            string stdout = process.StandardOutput.ReadToEnd();
+            string stderr = process.StandardError.ReadToEnd();
+            process.WaitForExit();
+
+            Assert.True(
+                process.ExitCode == expectedExitCode,
+                $"Unexpected Bash exit {process.ExitCode}. stdout: {stdout} stderr: {stderr}");
+            string calls = File.ReadAllText(callLog);
+            string cleanupSql = File.Exists(stdinLog) ? File.ReadAllText(stdinLog) : string.Empty;
+
+            Assert.Equal(expectCleanup ? 2 : 1, calls.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length);
+            if (expectCleanup)
+            {
+                Assert.Contains("DELETE FROM MRD_ORDER_ITEM", cleanupSql, StringComparison.Ordinal);
+                Assert.Contains("DELETE FROM MRD_ARTICLE WHERE ART_NO = 29001", cleanupSql, StringComparison.Ordinal);
+                Assert.Contains("DELETE FROM MRD_CUSTOMER WHERE CUST_NO = 19001", cleanupSql, StringComparison.Ordinal);
+            }
+            else
+            {
+                Assert.DoesNotContain("DELETE FROM", cleanupSql, StringComparison.Ordinal);
+            }
+        }
+        finally
+        {
+            Directory.Delete(temporaryRoot, recursive: true);
+        }
     }
 
     [Fact]
@@ -344,6 +452,32 @@ public class MeridianSourceLabFixtureTests
 
     private static int Count(string text, string value) =>
         text.Split(value, StringSplitOptions.None).Length - 1;
+
+    private static string ExtractConcurrencyHarness()
+    {
+        string script = Normalize(Read("Test-MeridianConcurrency.ps1"));
+        const string Start = "$harness = @'\n";
+        const string End = "\n'@\n";
+        int start = script.IndexOf(Start, StringComparison.Ordinal);
+        Assert.True(start >= 0, "The embedded concurrency harness start was not found.");
+        start += Start.Length;
+        int end = script.IndexOf(End, start, StringComparison.Ordinal);
+        Assert.True(end > start, "The embedded concurrency harness end was not found.");
+        return script[start..end];
+    }
+
+    private static string FindBash()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return "/bin/bash";
+        }
+
+        string path = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Git", "bin", "bash.exe");
+        Assert.True(File.Exists(path), $"Git Bash was not found at {path}.");
+        return path;
+    }
 
     private static string RepositoryRoot()
     {
