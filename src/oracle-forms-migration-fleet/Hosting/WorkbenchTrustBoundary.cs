@@ -515,6 +515,12 @@ public sealed class WorkbenchMutationAuthorizer(
         {
             MutationClass.SandboxDatabaseWrite => WorkbenchMutationScope.SandboxDatabaseWrite,
             MutationClass.ProductionWrite => WorkbenchMutationScope.ProductionWrite,
+
+            // Reading the approved sandbox target is covered by the sandbox grant the operator already
+            // issued for that exact target profile: the grant names the destination this read opens, and
+            // it is the narrowest scope that does. It is mapped explicitly here rather than by declaring
+            // the phase a write, so the phase says what it does and the grant it is held to is stated.
+            MutationClass.ExternalTargetRead => WorkbenchMutationScope.SandboxDatabaseWrite,
             _ => null,
         };
 
@@ -611,5 +617,72 @@ public sealed class AuthorizingDataMigrationGateway(
         {
             throw new UnauthorizedAccessException(decision.Reason);
         }
+    }
+}
+
+/// <summary>
+/// Re-checks the grant immediately before the approved target is read.
+///
+/// The phase gate answers once, when the verification phase starts. This answers again at the only point
+/// that matters — the instant before a connection to a customer database is opened — so a grant revoked
+/// while the run sat in the queue, or between the migration phase and this one, stops the read rather
+/// than being discovered afterwards. It fails closed: a denial throws, the adapter records the phase as
+/// failed, and nothing is offered to the ledger.
+/// </summary>
+public sealed class AuthorizingEntryRuntimeVerificationGateway(
+    IEntryRuntimeVerificationGateway inner,
+    WorkbenchMutationAuthorizer authorizer,
+    MigrationRunRequest request) : IEntryRuntimeVerificationGateway
+{
+    public EntryVerificationTargetBinding Target => inner.Target;
+
+    public async Task<EntryRuntimeVerificationRun> InspectAsync(
+        EntryVerificationTargetBinding approved,
+        IReadOnlyList<EntryVerificationExpectation> expectations,
+        CancellationToken cancellationToken)
+    {
+        MutationAuthorizationResult decision = await authorizer
+            .RecheckAsync(request, WorkbenchMutationScope.SandboxDatabaseWrite, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!decision.IsAuthorized)
+        {
+            throw new UnauthorizedAccessException(decision.Reason);
+        }
+
+        return await inner.InspectAsync(approved, expectations, cancellationToken).ConfigureAwait(false);
+    }
+}
+
+/// <summary>
+/// Re-checks the grant immediately before the bundle is handed to the trusted builder.
+///
+/// The deployment phase establishes its bindings, resolves a destination, and re-reads the server's
+/// authorization over the run's source before it dispatches. None of that asks whether the operator's
+/// grant for this run still holds at the instant the builder is reached, and a build that starts is a
+/// build that produces an image and a revision this process cannot withdraw. It fails closed: a denial
+/// throws, the phase is recorded failed, and nothing is dispatched.
+/// </summary>
+public sealed class AuthorizingTargetApplicationDeploymentGateway(
+    ITargetApplicationDeploymentGateway inner,
+    WorkbenchMutationAuthorizer authorizer,
+    MigrationRunRequest request) : ITargetApplicationDeploymentGateway
+{
+    public string Description => inner.Description;
+
+    public async Task<TargetDeploymentResult> PublishAsync(
+        TargetDeploymentRequest deployment,
+        CancellationToken cancellationToken)
+    {
+        MutationAuthorizationResult decision = await authorizer
+            .RecheckAsync(request, WorkbenchMutationScope.SandboxDatabaseWrite, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!decision.IsAuthorized)
+        {
+            throw new UnauthorizedAccessException(decision.Reason);
+        }
+
+        return await inner.PublishAsync(deployment, cancellationToken).ConfigureAwait(false);
     }
 }

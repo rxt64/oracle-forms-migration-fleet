@@ -1,0 +1,904 @@
+name: Deploy generated target application
+
+# The product's trusted builder. It is dispatched by the workbench, never by a person, and it is the only
+# place a fleet-generated application tier becomes a deployable image.
+#
+# What it is defending against, and how:
+#
+#  * The artifact is generated from a customer's Oracle Forms estate, so everything inside it is untrusted
+#    input. It is fetched by a job that runs none of it (`fetch`), built by a job that holds no Azure
+#    credential (`build`), and only then published by a job that does (`publish`).
+#  * `fetch` will only read an https blob on an allowlisted host with no query string, so a dispatch input
+#    cannot turn into a request to an attacker-chosen endpoint, and a shared-access signature can never
+#    travel as a workflow input.
+#  * The bytes are pinned by digest on arrival. A blob replaced between the workbench digesting it and this
+#    workflow reading it fails here rather than being built.
+#  * NOTHING OUT OF THE ARTIFACT EVER RUNS ON THE RUNNER. `build` does not install a .NET SDK or Node, and
+#    runs no `dotnet` and no `npm` over the generated tree. Every line of generated code, and every test
+#    over it, executes inside `docker build` as a `RUN` in the host-owned recipe. That is what closes the
+#    gap a digest check could not: a process running as the runner's own user can append to `$GITHUB_ENV`
+#    and `$GITHUB_PATH`, write `$BASH_ENV`, put a shim earlier on `$PATH`, or fork and return, and none of
+#    that is visible to a hash taken afterwards. A container filesystem is discarded, holds no credential,
+#    has no Docker socket, and cannot reach the runner's workspace or its command files.
+#  * The image is built from the host-owned recipe in `.github/generated-target/`, never from the
+#    `Dockerfile` the generator emits inside the artifact, and the generated tree is staged under `app/`
+#    where it cannot shadow that recipe. The recipe is checked against digests pinned in this file before
+#    it is staged, and the staged copy is checked again immediately before the build, so an expansion that
+#    escaped `app/` would be caught even though the expander refuses to produce one.
+#  * `docker build` is invoked with no `--secret`, no `--ssh`, no `--network host`, no `--add-host`, no
+#    `--security-opt`, and no bind of the Docker socket, and the recipe declares no secret or ssh mount.
+#    The context is a directory the runner assembled; the only outputs are the image and its tar.
+#  * The container image is produced ENTIRELY inside the uncredentialed `build` job and leaves it as an
+#    immutable tar. `publish` loads, tags, and pushes that tar: it never runs a Dockerfile, never runs
+#    `npm` or `dotnet`, and never uses a registry-side build. There is therefore no step anywhere in this
+#    workflow where generated code executes while an Azure token exists in the job.
+#  * The revision is pinned to the immutable digest the registry returned. A tag is never deployed, the
+#    revision that is verified is the one selected by that digest, and the health probe is sent to that
+#    revision's own endpoint rather than to the application FQDN, which can still be serving the previous
+#    revision while the new one is failing to pull.
+#  * The destination is the exact Container App the workbench's run was approved for. Its ARM identifier
+#    arrives as a dispatch input, is re-derived from this workflow's own configuration, and the two must
+#    agree. The approval's expiry is re-checked four times — before anything is built, again before the
+#    registry push, once more in the moment between the image finishing loading and the push itself, and
+#    again before the Container App is updated — each time against the binding payload `fetch` emitted as
+#    job outputs, never against anything the build produced. GAP: this workflow cannot ask the product
+#    whether the approval was revoked mid-build. It fails closed on expiry only, against the runner's own
+#    clock. See docs/DELIVERY_TRACKER.md.
+
+
+run-name: generated-target ${{ inputs.operation_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation_id:
+        description: 'Deterministic identity of this publish attempt (64 lowercase hex characters)'
+        required: true
+        type: string
+      artifact_uri:
+        description: 'https blob URI of the generated application bundle. No query string.'
+        required: true
+        type: string
+      artifact_sha256:
+        description: 'SHA-256 of the bundle the workbench uploaded (64 lowercase hex characters)'
+        required: true
+        type: string
+      run_id:
+        description: 'Workbench migration run this deployment belongs to'
+        required: true
+        type: string
+      workbench_sha:
+        description: 'Full commit SHA of the workbench that generated the bundle'
+        required: true
+        type: string
+      source_snapshot_sha256:
+        description: 'Digest of the source snapshot the tier was generated from'
+        required: true
+        type: string
+      plan_digest:
+        description: 'Digest over the normalized source, the target mapping, and the recorded decisions'
+        required: true
+        type: string
+      target:
+        description: 'Approved Container App name. Must be the last segment of target_resource_id.'
+        required: true
+        type: string
+      target_resource_id:
+        description: 'ARM identifier of the exact Container App the run was approved to deploy to'
+        required: true
+        type: string
+      target_digest:
+        description: 'Digest over the approved target profile, its Azure coordinates, and the approval'
+        required: true
+        type: string
+      approval_expires_utc:
+        description: 'Immutable expiry of the approval this deployment is performed under (ISO 8601 UTC)'
+        required: true
+        type: string
+      binding_digest:
+        description: 'Digest over every input above, so a rewritten dispatch no longer matches'
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  # The workbench derives operation_id from the bytes, the decisions, the destination and the approval, so
+  # a retried run re-joins the build already in flight instead of publishing the same artifact twice.
+  group: generated-target-${{ inputs.operation_id }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: acrofmfleedevykbpnrpd
+  IMAGE: generated-target
+  RESOURCE_GROUP: rg-oracle-forms-migration-fleet-dev-b9f0e875
+  # The generated .NET pilot target provisioned by infra/dotnet-pilot/main.bicep. That template owns the
+  # name and the narrow 'Generated Application Deployer' role assigned over this app alone.
+  CONTAINER_APP: ca-ofmfleet-dotnet-dev-ykbpnrpd
+  RESULT_CONTAINER: generated-target
+  ALLOWED_ARTIFACT_HOST_SUFFIX: .blob.core.windows.net
+  ALLOWED_APPLICATION_HOST_SUFFIX: .azurecontainerapps.io
+
+jobs:
+  # -------------------------------------------------------------------------------------------------
+  # 1. Read the bundle. Holds Azure credentials and executes nothing that came out of the artifact.
+  # -------------------------------------------------------------------------------------------------
+  fetch:
+    name: Fetch and pin the generated bundle
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      # The binding payload every later job re-checks against. It leaves this job, which runs nothing out
+      # of the artifact, and it reaches `publish` through GitHub rather than through a build artifact, so
+      # the values the credentialed job re-validates are not values the build could have rewritten.
+      operation_id: ${{ steps.binding.outputs.operation_id }}
+      artifact_uri: ${{ steps.binding.outputs.artifact_uri }}
+      artifact_sha256: ${{ steps.binding.outputs.artifact_sha256 }}
+      run_id: ${{ steps.binding.outputs.run_id }}
+      workbench_sha: ${{ steps.binding.outputs.workbench_sha }}
+      source_snapshot_sha256: ${{ steps.binding.outputs.source_snapshot_sha256 }}
+      plan_digest: ${{ steps.binding.outputs.plan_digest }}
+      target_digest: ${{ steps.binding.outputs.target_digest }}
+      target_resource_id: ${{ steps.binding.outputs.target_resource_id }}
+      approval_expires_utc: ${{ steps.binding.outputs.approval_expires_utc }}
+      binding_digest: ${{ steps.binding.outputs.binding_digest }}
+      # Where the bundle actually came from, parsed and allowlisted here. The result document is written
+      # back to this same account and container rather than to whichever storage account in the resource
+      # group happens to sort first under a name prefix.
+      artifact_account: ${{ steps.binding.outputs.artifact_account }}
+      artifact_container: ${{ steps.binding.outputs.artifact_container }}
+      artifact_blob: ${{ steps.binding.outputs.artifact_blob }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Refuse anything that is not a well-formed dispatch
+        env:
+          OPERATION_ID: ${{ inputs.operation_id }}
+          ARTIFACT_URI: ${{ inputs.artifact_uri }}
+          ARTIFACT_SHA256: ${{ inputs.artifact_sha256 }}
+          WORKBENCH_SHA: ${{ inputs.workbench_sha }}
+          SOURCE_SNAPSHOT_SHA256: ${{ inputs.source_snapshot_sha256 }}
+          PLAN_DIGEST: ${{ inputs.plan_digest }}
+          RUN_ID: ${{ inputs.run_id }}
+          TARGET: ${{ inputs.target }}
+          TARGET_RESOURCE_ID: ${{ inputs.target_resource_id }}
+          TARGET_DIGEST: ${{ inputs.target_digest }}
+          APPROVAL_EXPIRES_UTC: ${{ inputs.approval_expires_utc }}
+          BINDING_DIGEST: ${{ inputs.binding_digest }}
+          EXPECTED_SUBSCRIPTION: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set -euo pipefail
+
+          # Only the trusted branch may build a customer artifact. A fork or a topic branch that reached
+          # this workflow would be running its own version of every step below.
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "This workflow only runs from the trusted main branch." >&2
+            exit 1
+          fi
+
+          hex64() { [[ "$1" =~ ^[0-9a-f]{64}$ ]]; }
+
+          hex64 "$OPERATION_ID"            || { echo "operation_id is not a 64-character lowercase hex digest." >&2; exit 1; }
+          hex64 "$ARTIFACT_SHA256"         || { echo "artifact_sha256 is not a 64-character lowercase hex digest." >&2; exit 1; }
+          hex64 "$SOURCE_SNAPSHOT_SHA256"  || { echo "source_snapshot_sha256 is not a 64-character lowercase hex digest." >&2; exit 1; }
+          hex64 "$PLAN_DIGEST"             || { echo "plan_digest is not a 64-character lowercase hex digest." >&2; exit 1; }
+          hex64 "$TARGET_DIGEST"           || { echo "target_digest is not a 64-character lowercase hex digest." >&2; exit 1; }
+          hex64 "$BINDING_DIGEST"          || { echo "binding_digest is not a 64-character lowercase hex digest." >&2; exit 1; }
+
+          [[ "$WORKBENCH_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "workbench_sha must be a full lowercase 40-character SHA." >&2; exit 1; }
+          [[ "$RUN_ID" =~ ^[A-Za-z0-9_.-]{1,128}$ ]] || { echo "run_id carries characters this workflow will not accept." >&2; exit 1; }
+          [[ "$TARGET" =~ ^[A-Za-z0-9_.-]{1,64}$ ]] || { echo "target carries characters this workflow will not accept." >&2; exit 1; }
+
+          # The expiry is shaped before any clock is asked about it, because the comparison below is made
+          # by `date -d`, which also accepts relative English. An approval that said "next year" would
+          # otherwise parse. The product writes round-trip UTC, so that is what is accepted.
+          [[ "$APPROVAL_EXPIRES_UTC" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|\+00:00)$ ]] || {
+            echo "approval_expires_utc is not a round-trip UTC instant: $APPROVAL_EXPIRES_UTC" >&2
+            exit 1
+          }
+
+          # The destination is re-derived from this workflow's own configuration and compared, rather than
+          # taken from the dispatch. A deployment that the product believes is going to the approved app
+          # and that this builder would send somewhere else is refused by both sides or by neither.
+          EXPECTED_RESOURCE_ID="/subscriptions/$EXPECTED_SUBSCRIPTION/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.App/containerApps/$CONTAINER_APP"
+          if [[ "$TARGET_RESOURCE_ID" != "$EXPECTED_RESOURCE_ID" ]]; then
+            echo "target_resource_id names a resource this builder is not configured to deploy to." >&2
+            echo "  dispatched: $TARGET_RESOURCE_ID" >&2
+            echo "  this builder deploys only: $EXPECTED_RESOURCE_ID" >&2
+            exit 1
+          fi
+          [[ "$TARGET" == "$CONTAINER_APP" ]] || { echo "target is not the last segment of target_resource_id." >&2; exit 1; }
+
+          # The artifact location is the one input that becomes an outbound request, so it is parsed
+          # rather than pattern-matched loosely. No query string: a SAS must never be a workflow input.
+          #
+          # Reduced to URI characters before anything is derived from it, because the host and path below
+          # are written to $GITHUB_ENV. A newline anywhere in this input would otherwise let a dispatch
+          # append its own assignments to the environment of every later step in this credentialed job.
+          # The length is bounded separately rather than as a regex repetition, which is not portable
+          # past RE_DUP_MAX and would fail the match rather than the input.
+          [[ "$ARTIFACT_URI" =~ ^[A-Za-z0-9._~%:/-]+$ ]] || {
+            echo "artifact_uri carries characters outside the unreserved URI set." >&2
+            exit 1
+          }
+          [[ ${#ARTIFACT_URI} -ge 12 && ${#ARTIFACT_URI} -le 2048 ]] || {
+            echo "artifact_uri is an implausible length: ${#ARTIFACT_URI} characters." >&2
+            exit 1
+          }
+
+          case "$ARTIFACT_URI" in
+            https://*) ;;
+            *) echo "artifact_uri must use https." >&2; exit 1 ;;
+          esac
+          case "$ARTIFACT_URI" in
+            *'?'*|*'#'*|*'@'*|*'..'*) echo "artifact_uri carries a query, fragment, user info, or traversal." >&2; exit 1 ;;
+          esac
+
+          authority="${ARTIFACT_URI#https://}"
+          host="${authority%%/*}"
+          path="/${authority#*/}"
+          case "$host" in
+            *"$ALLOWED_ARTIFACT_HOST_SUFFIX") ;;
+            *) echo "artifact_uri host '$host' is not an allowlisted artifact host." >&2; exit 1 ;;
+          esac
+          [[ "$host" != *":"* ]] || { echo "artifact_uri must use the default https port." >&2; exit 1; }
+          [[ ${#path} -gt 1 ]] || { echo "artifact_uri names no blob." >&2; exit 1; }
+
+          # Split into the exact storage coordinates, and check each field rather than the whole string,
+          # so the account and container that the result document is later written to are the ones the
+          # product uploaded to. The host must be the account name followed by exactly the allowlisted
+          # suffix, so a name that merely ends in it is not read as an account.
+          account="${host%%.*}"
+          container="$(echo "$path" | cut -d/ -f2)"
+          blob="$(echo "$path" | cut -d/ -f3-)"
+          [[ "$host" == "$account$ALLOWED_ARTIFACT_HOST_SUFFIX" ]] || { echo "artifact_uri host is not <account>$ALLOWED_ARTIFACT_HOST_SUFFIX." >&2; exit 1; }
+          [[ "$account" =~ ^[a-z0-9]{3,24}$ ]] || { echo "artifact_uri names an implausible storage account: $account" >&2; exit 1; }
+          [[ "$container" =~ ^[a-z0-9][a-z0-9-]{2,62}$ ]] || { echo "artifact_uri names an implausible container: $container" >&2; exit 1; }
+          [[ "$blob" == "operations/$OPERATION_ID/generated-application.zip" ]] || {
+            echo "artifact_uri does not name this operation's bundle: $blob" >&2
+            exit 1
+          }
+
+          {
+            echo "ARTIFACT_ACCOUNT=$account"
+            echo "ARTIFACT_CONTAINER=$container"
+            echo "ARTIFACT_BLOB=$blob"
+          } >> "$GITHUB_ENV"
+
+      - name: Refuse a rewritten dispatch or a lapsed approval
+        id: binding
+        env:
+          OPERATION_ID: ${{ inputs.operation_id }}
+          ARTIFACT_URI: ${{ inputs.artifact_uri }}
+          ARTIFACT_SHA256: ${{ inputs.artifact_sha256 }}
+          RUN_ID: ${{ inputs.run_id }}
+          WORKBENCH_SHA: ${{ inputs.workbench_sha }}
+          SOURCE_SNAPSHOT_SHA256: ${{ inputs.source_snapshot_sha256 }}
+          PLAN_DIGEST: ${{ inputs.plan_digest }}
+          TARGET_DIGEST: ${{ inputs.target_digest }}
+          TARGET_RESOURCE_ID: ${{ inputs.target_resource_id }}
+          APPROVAL_EXPIRES_UTC: ${{ inputs.approval_expires_utc }}
+          BINDING_DIGEST: ${{ inputs.binding_digest }}
+        run: |
+          set -euo pipefail
+
+          # Inputs reach the digest through the environment, never interpolated into a script, and the
+          # canonical form is the product's: NUL-separated fields, one trailing newline. A dispatch with
+          # any field rewritten in transit no longer hashes to the digest the product derived. The field
+          # order below is repeated verbatim in `publish`; the two are asserted identical by test.
+          DERIVED="$(printf '%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\n' \
+            'fleet.target-deployment-binding/1' \
+            "$OPERATION_ID" \
+            "$ARTIFACT_URI" \
+            "$ARTIFACT_SHA256" \
+            "$RUN_ID" \
+            "$WORKBENCH_SHA" \
+            "$SOURCE_SNAPSHOT_SHA256" \
+            "$PLAN_DIGEST" \
+            "$TARGET_DIGEST" \
+            "$TARGET_RESOURCE_ID" \
+            "$APPROVAL_EXPIRES_UTC" | sha256sum | cut -d' ' -f1)"
+
+          if [[ "$DERIVED" != "$BINDING_DIGEST" ]]; then
+            echo "The dispatch inputs do not match binding_digest. Expected $BINDING_DIGEST, derived $DERIVED." >&2
+            echo "Nothing was built." >&2
+            exit 1
+          fi
+
+          # The approval is immutable, so this is a comparison and never an extension. A build that starts
+          # after its approval lapsed is refused here rather than deploying under an approval nobody holds.
+          EXPIRES_EPOCH="$(date -u -d "$APPROVAL_EXPIRES_UTC" +%s)"
+          NOW_EPOCH="$(date -u +%s)"
+          if [[ "$NOW_EPOCH" -ge "$EXPIRES_EPOCH" ]]; then
+            echo "The approval for this deployment expired at $APPROVAL_EXPIRES_UTC and it is now $(date -u -Is)." >&2
+            echo "Nothing was built. A fresh approval produces a new operation." >&2
+            exit 1
+          fi
+          echo "Dispatch binding verified. Approval valid until $APPROVAL_EXPIRES_UTC."
+
+          # Published for the later jobs. Every value here has been validated above, so what `publish`
+          # re-checks is a payload this job vouched for rather than one a build step could have written.
+          {
+            echo "operation_id=$OPERATION_ID"
+            echo "artifact_uri=$ARTIFACT_URI"
+            echo "artifact_sha256=$ARTIFACT_SHA256"
+            echo "run_id=$RUN_ID"
+            echo "workbench_sha=$WORKBENCH_SHA"
+            echo "source_snapshot_sha256=$SOURCE_SNAPSHOT_SHA256"
+            echo "plan_digest=$PLAN_DIGEST"
+            echo "target_digest=$TARGET_DIGEST"
+            echo "target_resource_id=$TARGET_RESOURCE_ID"
+            echo "approval_expires_utc=$APPROVAL_EXPIRES_UTC"
+            echo "binding_digest=$BINDING_DIGEST"
+            echo "artifact_account=$ARTIFACT_ACCOUNT"
+            echo "artifact_container=$ARTIFACT_CONTAINER"
+            echo "artifact_blob=$ARTIFACT_BLOB"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Sign in to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Download the bundle and pin it to the digest the workbench recorded
+        env:
+          ARTIFACT_SHA256: ${{ inputs.artifact_sha256 }}
+        run: |
+          set -euo pipefail
+          mkdir -p bundle
+
+          az storage blob download \
+            --auth-mode login \
+            --account-name "$ARTIFACT_ACCOUNT" \
+            --container-name "$ARTIFACT_CONTAINER" \
+            --name "$ARTIFACT_BLOB" \
+            --file bundle/generated-application.zip \
+            --no-progress \
+            --only-show-errors
+
+          actual="$(sha256sum bundle/generated-application.zip | cut -d' ' -f1)"
+          if [[ "$actual" != "$ARTIFACT_SHA256" ]]; then
+            echo "The bundle does not match the digest the workbench recorded. Expected $ARTIFACT_SHA256, read $actual." >&2
+            exit 1
+          fi
+          echo "Bundle pinned at sha256:$actual"
+
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: generated-application-bundle
+          path: bundle/generated-application.zip
+          retention-days: 7
+          if-no-files-found: error
+
+  # -------------------------------------------------------------------------------------------------
+  # 2. Build and test the generated tier. This job holds NO Azure credential: no `id-token: write`, no
+  #    `azure/login`, no registry access. It also installs no toolchain and executes nothing out of the
+  #    artifact on the runner. It assembles a context, verifies the recipe, and hands both to
+  #    `docker build`; the generated code compiles and its tests run inside that build, in containers
+  #    that are discarded. A compromised generated tree can fail this job and nothing more.
+  # -------------------------------------------------------------------------------------------------
+  build:
+    name: Build generated tier in a container without cloud credentials
+    needs: fetch
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: generated-application-bundle
+          path: bundle
+
+      - name: Stage the host-owned recipe before anything from the artifact is written
+        env:
+          # The digests of .github/generated-target/Dockerfile and .dockerignore as this workflow was
+          # written. They live in the workflow definition, which GitHub loads from the trusted ref, so
+          # they are the one reference in this job that nothing on the runner can reach. Declared on the
+          # step rather than on the job because a step's own env outranks anything an earlier step wrote
+          # to $GITHUB_ENV.
+          EXPECTED_DOCKERFILE_SHA256: ccd752341cb33625b3b4be96e6da21acee9694bcb177faa810f6b3e0fb1d95c9
+          EXPECTED_DOCKERIGNORE_SHA256: 2a25421f085d4833bd67be8921077dd3e4a366babac94490132c8be34cf044ad
+        run: |
+          set -euo pipefail
+
+          rm -rf stage
+          mkdir -p stage/app
+
+          printf '%s  %s\n' \
+            "$EXPECTED_DOCKERFILE_SHA256"   .github/generated-target/Dockerfile \
+            "$EXPECTED_DOCKERIGNORE_SHA256" .github/generated-target/.dockerignore \
+            | sha256sum --check --status || {
+              echo "The host-owned image recipe does not match the digest pinned in this workflow." >&2
+              echo "Either the recipe changed and the pin was not updated, or the checkout is not the trusted one." >&2
+              exit 1
+            }
+
+          cp .github/generated-target/Dockerfile stage/Dockerfile
+          cp .github/generated-target/.dockerignore stage/.dockerignore
+
+      - name: Stage the generated tree under app/ and strip its packaging
+        env:
+          ARTIFACT_SHA256: ${{ needs.fetch.outputs.artifact_sha256 }}
+        run: |
+          set -euo pipefail
+
+          actual="$(sha256sum bundle/generated-application.zip | cut -d' ' -f1)"
+          [[ "$actual" == "$ARTIFACT_SHA256" ]] || { echo "The bundle digest changed between jobs." >&2; exit 1; }
+
+          # Expanded entry by entry rather than with `unzip`, so an absolute, traversing, or symlinked
+          # entry is refused outright instead of being written somewhere outside the staging directory.
+          # This reads the archive; it never runs anything out of it.
+          python3 - "$PWD/bundle/generated-application.zip" "$PWD/stage/app" <<'PY'
+          import os, sys, zipfile
+
+          archive, destination = sys.argv[1], os.path.realpath(sys.argv[2])
+          with zipfile.ZipFile(archive) as bundle:
+              for entry in bundle.infolist():
+                  name = entry.filename
+                  if name.endswith('/'):
+                      continue
+                  if name.startswith('/') or '\\' in name or os.path.isabs(name):
+                      raise SystemExit(f'Refused absolute or windows-rooted entry: {name}')
+                  target = os.path.realpath(os.path.join(destination, name))
+                  if not target.startswith(destination + os.sep):
+                      raise SystemExit(f'Refused traversal entry: {name}')
+                  if entry.external_attr >> 16 & 0o170000 == 0o120000:
+                      raise SystemExit(f'Refused symbolic link entry: {name}')
+                  os.makedirs(os.path.dirname(target), exist_ok=True)
+                  with bundle.open(entry) as source, open(target, 'wb') as sink:
+                      sink.write(source.read())
+          PY
+
+          # The expander refuses a link entry, so this finds nothing. It is asserted anyway: a link on
+          # disk is how a context ends up carrying a file from outside it, and the cost of looking is one
+          # `find`. Same for anything that is neither a regular file nor a directory.
+          ! find stage/app -type l | grep . || { echo "The staged tree carries a symbolic link." >&2; exit 1; }
+          ! find stage/app ! -type f ! -type d | grep . || { echo "The staged tree carries a special file." >&2; exit 1; }
+
+          # The generator emits its own Dockerfile and deployment manifest. They are documentation for the
+          # operator, not build inputs here: the image is built from the host-owned recipe staged above.
+          find stage/app -iname 'Dockerfile' -delete
+          find stage/app -iname '.dockerignore' -delete
+          rm -rf stage/app/deploy
+
+          # A generated tree that still carries one would be a recipe the estate chose.
+          ! find stage/app -iname 'Dockerfile' | grep . || { echo "The generated tree still carries a Dockerfile." >&2; exit 1; }
+
+          test -f stage/app/backend/Api/Api.csproj
+          test -f stage/app/backend/GeneratedBackend.slnx
+          test -f stage/app/frontend/package.json
+
+      # The whole image is produced here, in the job that holds no Azure credential, and leaves as a tar.
+      # This is the point of the split: the recipe runs `npm ci`, `npm run test`, `dotnet test` and
+      # `dotnet publish` over generated code, so it must never run in a job where an Azure token exists.
+      # `publish` receives an opaque archive it loads and pushes without executing anything inside it.
+      #
+      # The invocation carries no `--secret`, no `--ssh`, no `--network`, no `--add-host` and no
+      # `--security-opt`, and no Docker socket is bound into anything: there is nothing for a generated
+      # `RUN` to read, and no route from it back to this runner.
+      - name: Build the container image without cloud credentials
+        env:
+          OPERATION_ID: ${{ needs.fetch.outputs.operation_id }}
+          DOCKER_BUILDKIT: '1'
+          EXPECTED_DOCKERFILE_SHA256: ccd752341cb33625b3b4be96e6da21acee9694bcb177faa810f6b3e0fb1d95c9
+          EXPECTED_DOCKERIGNORE_SHA256: 2a25421f085d4833bd67be8921077dd3e4a366babac94490132c8be34cf044ad
+        run: |
+          set -euo pipefail
+          TAG="op-${OPERATION_ID:0:12}"
+
+          # Re-checked immediately before the build. The expander above refuses to write outside app/, so
+          # this should be impossible; it is the assertion that says so, and it costs one hash.
+          printf '%s  %s\n' \
+            "$EXPECTED_DOCKERFILE_SHA256"   stage/Dockerfile \
+            "$EXPECTED_DOCKERIGNORE_SHA256" stage/.dockerignore \
+            | sha256sum --check --status || {
+              echo "The staged image recipe changed after it was verified. Nothing was built." >&2
+              exit 1
+            }
+
+          docker build --pull --tag "$IMAGE:$TAG" --file stage/Dockerfile stage
+
+          mkdir -p image
+          docker save "$IMAGE:$TAG" --output "image/generated-target.tar"
+
+          IMAGE_TAR_SHA256="$(sha256sum image/generated-target.tar | cut -d' ' -f1)"
+          printf '%s\n' "$IMAGE_TAR_SHA256" > image/generated-target.tar.sha256
+          printf '%s\n' "$IMAGE:$TAG" > image/image-reference.txt
+          echo "Built $IMAGE:$TAG as an immutable archive sha256:$IMAGE_TAR_SHA256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: generated-target-image
+          path: image
+          retention-days: 7
+          if-no-files-found: error
+
+
+  # -------------------------------------------------------------------------------------------------
+  # 3. Publish and deploy. Holds Azure credentials, and runs only after the tier built and its tests
+  #    passed. It receives an already-built image archive: no Dockerfile is executed here, no `npm` or
+  #    `dotnet` runs here, and there is no registry-side build. The archive is verified against the
+  #    digest the uncredentialed job recorded, its entry names are checked, and only then is it loaded.
+  #    The revision is pinned to the digest the registry returned, never to a tag.
+  #
+  #    Everything this job decides with comes from `fetch`'s job outputs, not from the build: the build
+  #    ran generated code, so nothing it produced is an authority on where to deploy or for how long the
+  #    approval holds.
+  # -------------------------------------------------------------------------------------------------
+  publish:
+    name: Publish image and deploy revision
+    needs:
+      - fetch
+      - build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      OPERATION_ID: ${{ needs.fetch.outputs.operation_id }}
+      ARTIFACT_URI: ${{ needs.fetch.outputs.artifact_uri }}
+      ARTIFACT_SHA256: ${{ needs.fetch.outputs.artifact_sha256 }}
+      RUN_ID: ${{ needs.fetch.outputs.run_id }}
+      WORKBENCH_SHA: ${{ needs.fetch.outputs.workbench_sha }}
+      SOURCE_SNAPSHOT_SHA256: ${{ needs.fetch.outputs.source_snapshot_sha256 }}
+      PLAN_DIGEST: ${{ needs.fetch.outputs.plan_digest }}
+      TARGET_DIGEST: ${{ needs.fetch.outputs.target_digest }}
+      TARGET_RESOURCE_ID: ${{ needs.fetch.outputs.target_resource_id }}
+      APPROVAL_EXPIRES_UTC: ${{ needs.fetch.outputs.approval_expires_utc }}
+      BINDING_DIGEST: ${{ needs.fetch.outputs.binding_digest }}
+      ARTIFACT_ACCOUNT: ${{ needs.fetch.outputs.artifact_account }}
+      ARTIFACT_CONTAINER: ${{ needs.fetch.outputs.artifact_container }}
+      ARTIFACT_BLOB: ${{ needs.fetch.outputs.artifact_blob }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: generated-target-image
+          path: image
+
+      - name: Verify the archive and refuse unexpected entry names
+        run: |
+          set -euo pipefail
+
+          EXPECTED="$(cat image/generated-target.tar.sha256)"
+          [[ "$EXPECTED" =~ ^[0-9a-f]{64}$ ]] || { echo "The recorded image digest is not a sha256 digest." >&2; exit 1; }
+
+          ACTUAL="$(sha256sum image/generated-target.tar | cut -d' ' -f1)"
+          if [[ "$ACTUAL" != "$EXPECTED" ]]; then
+            echo "The image archive changed between jobs. Expected $EXPECTED, read $ACTUAL." >&2
+            exit 1
+          fi
+
+          IMAGE_REFERENCE="$(cat image/image-reference.txt)"
+          [[ "$IMAGE_REFERENCE" =~ ^[a-z0-9][a-z0-9._-]*:op-[0-9a-f]{12}$ ]] || {
+            echo "The archive names an unexpected image reference: $IMAGE_REFERENCE" >&2; exit 1; }
+
+          # Listed before anything reads the archive as an image. `docker load` writes into its own store
+          # rather than the workspace, but an archive whose entries are absolute, traversing, or otherwise
+          # not the flat layout `docker save` produces is not an archive this job will open.
+          tar -tf image/generated-target.tar > entries.txt
+          while IFS= read -r entry; do
+            case "$entry" in
+              /*|*..*|*'\'*) echo "Refused archive entry: $entry" >&2; exit 1 ;;
+            esac
+            [[ "$entry" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || { echo "Refused archive entry: $entry" >&2; exit 1; }
+          done < entries.txt
+
+          {
+            echo "IMAGE_TAR_SHA256=$EXPECTED"
+            echo "IMAGE_REFERENCE=$IMAGE_REFERENCE"
+            echo "IMAGE_TAG=${IMAGE_REFERENCE##*:}"
+          } >> "$GITHUB_ENV"
+
+      - name: Re-check the binding and the approval before anything is pushed
+        run: |
+          set -euo pipefail
+
+          # Same canonical form as the fetch job, over the payload the fetch job published. The build sat
+          # between the two and ran generated code, so the approval is re-derived and re-compared rather
+          # than assumed to have survived it.
+          DERIVED="$(printf '%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\n' \
+            'fleet.target-deployment-binding/1' \
+            "$OPERATION_ID" \
+            "$ARTIFACT_URI" \
+            "$ARTIFACT_SHA256" \
+            "$RUN_ID" \
+            "$WORKBENCH_SHA" \
+            "$SOURCE_SNAPSHOT_SHA256" \
+            "$PLAN_DIGEST" \
+            "$TARGET_DIGEST" \
+            "$TARGET_RESOURCE_ID" \
+            "$APPROVAL_EXPIRES_UTC" | sha256sum | cut -d' ' -f1)"
+
+          [[ "$DERIVED" == "$BINDING_DIGEST" ]] || {
+            echo "The binding payload no longer matches binding_digest. Nothing was pushed." >&2
+            exit 1
+          }
+
+          [[ "$APPROVAL_EXPIRES_UTC" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|\+00:00)$ ]] || {
+            echo "approval_expires_utc is not a round-trip UTC instant: $APPROVAL_EXPIRES_UTC" >&2
+            exit 1
+          }
+          if [[ "$(date -u +%s)" -ge "$(date -u -d "$APPROVAL_EXPIRES_UTC" +%s)" ]]; then
+            echo "The approval expired at $APPROVAL_EXPIRES_UTC during the build. Nothing was pushed." >&2
+            exit 1
+          fi
+
+          # The storage coordinates the result is written to are the ones the bundle was read from, so
+          # they are shaped here too before either is used. Checked as fields, not as a joined string.
+          [[ "$ARTIFACT_ACCOUNT" =~ ^[a-z0-9]{3,24}$ ]] || { echo "The artifact storage account is implausible." >&2; exit 1; }
+          [[ "$ARTIFACT_CONTAINER" == "$RESULT_CONTAINER" ]] || {
+            echo "The bundle came from container '$ARTIFACT_CONTAINER' and this builder writes results to '$RESULT_CONTAINER'." >&2
+            exit 1
+          }
+          [[ "$ARTIFACT_BLOB" == "operations/$OPERATION_ID/generated-application.zip" ]] || {
+            echo "The artifact blob is not this operation's bundle: $ARTIFACT_BLOB" >&2
+            exit 1
+          }
+          [[ "$ARTIFACT_URI" == "https://$ARTIFACT_ACCOUNT$ALLOWED_ARTIFACT_HOST_SUFFIX/$ARTIFACT_CONTAINER/$ARTIFACT_BLOB" ]] || {
+            echo "The artifact coordinates do not reassemble into the URI they were parsed from." >&2
+            exit 1
+          }
+          echo "RESULT_BLOB=operations/$OPERATION_ID/result.json" >> "$GITHUB_ENV"
+
+      - name: Sign in to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Load, tag, and push the image the uncredentialed job built
+        run: |
+          set -euo pipefail
+
+          docker load --input image/generated-target.tar
+          docker image inspect "$IMAGE_REFERENCE" --format 'loaded {{.Id}}'
+
+          az acr login --name "$REGISTRY"
+          REMOTE="$REGISTRY.azurecr.io/$IMAGE:$IMAGE_TAG"
+          docker tag "$IMAGE_REFERENCE" "$REMOTE"
+
+          # The previous step proved this expiry is the one `fetch` bound into binding_digest, and nothing
+          # since then could have altered it: APPROVAL_EXPIRES_UTC is job-level and comes from
+          # needs.fetch.outputs, so it is the same immutable value here and does not need re-deriving.
+          # What has changed is the clock. Loading a multi-gigabyte archive and authenticating to the
+          # registry are both waits, and an approval that was live when the step began can lapse across
+          # them, so it is re-read here rather than at the top of the step. Everything above this line is
+          # local and uncredentialed — `docker load` and `docker tag` touch only this runner's own image
+          # store — and `docker push` below is the first act that leaves it. The instant is read from the
+          # runner's own clock; no step argument, input, or artifact may say what time it is.
+          if [[ "$(date -u +%s)" -ge "$(date -u -d "$APPROVAL_EXPIRES_UTC" +%s)" ]]; then
+            echo "The approval expired at $APPROVAL_EXPIRES_UTC while the image was being loaded." >&2
+            echo "Nothing was pushed." >&2
+            exit 1
+          fi
+
+          docker push "$REMOTE" | tee push.log
+
+          # Two independent readings of the same manifest: what the daemon says it pushed, and what the
+          # registry says it holds. A mismatch means the tag moved between the push and the read.
+          PUSHED=$(grep -oE 'sha256:[0-9a-f]{64}' push.log | tail -n1)
+          DIGEST=$(az acr manifest show-metadata --registry "$REGISTRY" --name "$IMAGE:$IMAGE_TAG" --query digest --output tsv)
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "The registry returned an unusable digest: $DIGEST" >&2; exit 1; }
+          [[ "$PUSHED" == "$DIGEST" ]] || { echo "The daemon pushed $PUSHED and the registry holds $DIGEST." >&2; exit 1; }
+
+          {
+            echo "IMAGE_DIGEST=$DIGEST"
+            echo "IMAGE_REF=$REGISTRY.azurecr.io/$IMAGE@$DIGEST"
+          } >> "$GITHUB_ENV"
+
+      - name: Deploy the revision pinned to that digest
+        run: |
+          set -euo pipefail
+
+          # Re-read a third time, immediately before the only step that changes a customer-facing
+          # resource. The push that preceded it is not instantaneous and an approval can lapse during it.
+          if [[ "$(date -u +%s)" -ge "$(date -u -d "$APPROVAL_EXPIRES_UTC" +%s)" ]]; then
+            echo "The approval expired at $APPROVAL_EXPIRES_UTC before the Container App was updated." >&2
+            echo "The image was pushed and nothing was deployed." >&2
+            exit 1
+          fi
+
+          # Addressed by the ARM identifier the run was approved for, not by name plus ambient context, so
+          # the resource this step updates is the resource the approval named.
+          az containerapp update \
+            --ids "$TARGET_RESOURCE_ID" \
+            --image "$IMAGE_REF" \
+            --output none
+
+          DEPLOYED=$(az containerapp show --ids "$TARGET_RESOURCE_ID" \
+            --query 'properties.template.containers[0].image' --output tsv)
+          [[ "$DEPLOYED" == "$IMAGE_REF" ]] || { echo "The revision is running $DEPLOYED, not $IMAGE_REF." >&2; exit 1; }
+
+      - name: Select the revision running this digest and wait for it to be ready
+        run: |
+          set -euo pipefail
+
+          # The revision commands are addressed by name and resource group, so the identifier the approval
+          # named is re-composed from this builder's own configuration and the subscription actually signed
+          # in to, and the two must agree before a revision of that application is read at all.
+          EXPECTED_RESOURCE_ID="/subscriptions/$(az account show --query id --output tsv)/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.App/containerApps/$CONTAINER_APP"
+          [[ "$TARGET_RESOURCE_ID" == "$EXPECTED_RESOURCE_ID" ]] || {
+            echo "The approved resource is $TARGET_RESOURCE_ID and this builder reads revisions of $EXPECTED_RESOURCE_ID." >&2
+            exit 1
+          }
+
+          # Selected by the image it runs, not by being the newest active revision. "Newest active" is the
+          # previous revision for as long as the new one is still provisioning, and it stays the previous
+          # revision forever if the new one never pulls, which is exactly the failure a probe against the
+          # application FQDN would report as healthy.
+          REVISION=$(az containerapp revision list --name "$CONTAINER_APP" --resource-group "$RESOURCE_GROUP" \
+            --query "reverse(sort_by([?properties.template.containers[0].image=='$IMAGE_REF'], &properties.createdTime)) | [0].name" \
+            --output tsv)
+          [[ "$REVISION" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || {
+            echo "No revision of this application is running $IMAGE_REF." >&2
+            exit 1
+          }
+
+          # Readiness is read from the revision, and a terminal failure ends the wait immediately rather
+          # than being retried until the timeout hides what happened. An image that cannot be pulled
+          # surfaces here as a failed provisioning state instead of as a slow one.
+          READY=""
+          for attempt in $(seq 1 60); do
+            REVISION_JSON=$(az containerapp revision show --name "$CONTAINER_APP" --resource-group "$RESOURCE_GROUP" \
+              --revision "$REVISION" --output json)
+            PROVISIONING=$(jq -r '.properties.provisioningState // ""' <<<"$REVISION_JSON")
+            RUNNING=$(jq -r '.properties.runningState // ""' <<<"$REVISION_JSON")
+            HEALTH=$(jq -r '.properties.healthState // ""' <<<"$REVISION_JSON")
+            ACTIVE=$(jq -r '.properties.active // false' <<<"$REVISION_JSON")
+            WEIGHT=$(jq -r '.properties.trafficWeight // 0' <<<"$REVISION_JSON")
+            REVISION_IMAGE=$(jq -r '.properties.template.containers[0].image // ""' <<<"$REVISION_JSON")
+            REVISION_FQDN=$(jq -r '.properties.fqdn // ""' <<<"$REVISION_JSON")
+
+            echo "attempt $attempt: provisioning=$PROVISIONING running=$RUNNING health=$HEALTH active=$ACTIVE weight=$WEIGHT"
+
+            case "$PROVISIONING" in
+              Failed|Deprovisioning|Deprovisioned)
+                echo "Revision $REVISION reached provisioning state $PROVISIONING, so it never served this image." >&2
+                exit 1 ;;
+            esac
+            case "$RUNNING" in
+              Failed|Degraded|Stopped)
+                echo "Revision $REVISION reached running state $RUNNING, so this image did not start." >&2
+                exit 1 ;;
+            esac
+
+            if [[ "$PROVISIONING" == "Provisioned" && "$RUNNING" == "Running" && "$ACTIVE" == "true" ]]; then
+              READY="yes"
+              break
+            fi
+            sleep 10
+          done
+
+          [[ "$READY" == "yes" ]] || { echo "Revision $REVISION never became ready." >&2; exit 1; }
+
+          # The revision that is ready must still be running the digest this run pushed, and it must be the
+          # revision the application is actually serving. Both are read back rather than inferred from the
+          # update having succeeded.
+          [[ "$REVISION_IMAGE" == "$IMAGE_REF" ]] || {
+            echo "Revision $REVISION now reports $REVISION_IMAGE, not $IMAGE_REF." >&2; exit 1; }
+          [[ "$WEIGHT" == "100" ]] || {
+            echo "Revision $REVISION carries $WEIGHT% of traffic, so the application is not serving this image." >&2
+            exit 1
+          }
+          [[ "$HEALTH" == "Healthy" || "$HEALTH" == "None" ]] || {
+            echo "Revision $REVISION reports health state $HEALTH." >&2; exit 1; }
+
+          case "$REVISION_FQDN" in
+            *"$ALLOWED_APPLICATION_HOST_SUFFIX") ;;
+            *) echo "Revision $REVISION answers on an unexpected host: $REVISION_FQDN" >&2; exit 1 ;;
+          esac
+
+          APPLICATION_FQDN=$(az containerapp show --ids "$TARGET_RESOURCE_ID" \
+            --query 'properties.configuration.ingress.fqdn' --output tsv)
+          case "$APPLICATION_FQDN" in
+            *"$ALLOWED_APPLICATION_HOST_SUFFIX") ;;
+            *) echo "The application answers on an unexpected host: $APPLICATION_FQDN" >&2; exit 1 ;;
+          esac
+
+          {
+            echo "REVISION_NAME=$REVISION"
+            echo "REVISION_URL=https://$REVISION_FQDN"
+            echo "APPLICATION_URL=https://$APPLICATION_FQDN"
+          } >> "$GITHUB_ENV"
+
+
+      - name: Confirm the deployed revision answers
+        run: |
+          set -euo pipefail
+
+          # The revision's own endpoint first, and it is the one that decides. The application FQDN routes
+          # by traffic weight, so it can answer from the revision this run replaced and report a healthy
+          # deployment of an image that never started.
+          curl --fail --show-error --silent \
+            --connect-timeout 5 --max-time 20 \
+            --retry 18 --retry-delay 10 --retry-all-errors \
+            "$REVISION_URL/healthz" | grep -q '^ok$'
+
+          # Then the application endpoint, which is the URL the product records and therefore the one its
+          # readiness claim is about. It is only meaningful because the step above established that this
+          # run's revision is the one carrying 100% of the traffic.
+          curl --fail --show-error --silent \
+            --connect-timeout 5 --max-time 20 \
+            --retry 12 --retry-delay 10 --retry-all-errors \
+            "$APPLICATION_URL/healthz" | grep -q '^ok$'
+
+          {
+            echo "READINESS_OUTCOME=Passed"
+            echo "READINESS_OBSERVED_UTC=$(date -u -Is)"
+          } >> "$GITHUB_ENV"
+
+      - name: Record the result where the workbench reads it
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg operationId "$OPERATION_ID" \
+            --arg runId "$RUN_ID" \
+            --arg buildRunId "$GITHUB_RUN_ID" \
+            --arg artifactSha256 "$ARTIFACT_SHA256" \
+            --arg workbenchSha "$WORKBENCH_SHA" \
+            --arg planDigest "$PLAN_DIGEST" \
+            --arg sourceSnapshotSha256 "$SOURCE_SNAPSHOT_SHA256" \
+            --arg imageDigest "$IMAGE_DIGEST" \
+            --arg imageTarSha256 "$IMAGE_TAR_SHA256" \
+            --arg revisionName "$REVISION_NAME" \
+            --arg applicationUrl "$APPLICATION_URL" \
+            --arg deployedResourceId "$TARGET_RESOURCE_ID" \
+            --arg targetDigest "$TARGET_DIGEST" \
+            --arg bindingDigest "$BINDING_DIGEST" \
+            --arg approvalExpiresUtc "$APPROVAL_EXPIRES_UTC" \
+            --arg revisionUrl "$REVISION_URL" \
+            --arg readinessProbeUrl "$APPLICATION_URL/healthz" \
+            --arg revisionProbeUrl "$REVISION_URL/healthz" \
+            --arg readinessOutcome "$READINESS_OUTCOME" \
+            --arg readinessObservedUtc "$READINESS_OBSERVED_UTC" \
+            '{
+               schemaVersion: "fleet.target-deployment-result/3",
+               state: "Deployed",
+               status: "Deployed",
+               operationId: $operationId,
+               runId: $runId,
+               buildRunId: $buildRunId,
+               artifactSha256: $artifactSha256,
+               workbenchSha: $workbenchSha,
+               planDigest: $planDigest,
+               sourceSnapshotSha256: $sourceSnapshotSha256,
+               targetDigest: $targetDigest,
+               bindingDigest: $bindingDigest,
+               approvalExpiresUtc: $approvalExpiresUtc,
+               imageDigest: $imageDigest,
+               imageTarSha256: $imageTarSha256,
+               revisionName: $revisionName,
+               revisionUrl: $revisionUrl,
+               revisionProbeUrl: $revisionProbeUrl,
+               applicationUrl: $applicationUrl,
+               deployedResourceId: $deployedResourceId,
+               readinessProbeUrl: $readinessProbeUrl,
+               readinessOutcome: $readinessOutcome,
+               readinessObservedUtc: $readinessObservedUtc,
+               equivalenceClaim: "None. An image built from this run'\''s generated bytes is running against the converted database. No Oracle Forms runtime was contacted and no behavioral equivalence with the source is asserted."
+             }' > result.json
+
+
+          # Written to the account and container the bundle was read from, both parsed and allowlisted in
+          # the fetch job. Searching the resource group for a storage account by name prefix would pick
+          # whichever one sorted first, which is not necessarily the one the product is configured with.
+          az storage blob upload \
+            --auth-mode login \
+            --account-name "$ARTIFACT_ACCOUNT" \
+            --container-name "$ARTIFACT_CONTAINER" \
+            --name "$RESULT_BLOB" \
+            --file result.json \
+            --overwrite false \
+            --no-progress --only-show-errors

@@ -76,6 +76,26 @@ public enum MigrationPhase
 
     /// <summary>Executes tests against generated application output without asserting source equivalence.</summary>
     GeneratedApplicationVerification = 12,
+
+    /// <summary>
+    /// Publishes the verified generated application tier to its Azure target through a trusted builder.
+    ///
+    /// It is a sandbox-class mutation, not a cutover: it puts this run's generated output in front of the
+    /// converted database so the migrated application can be exercised, and it says nothing about the
+    /// customer's production estate, which <see cref="ProductionCutover"/> still governs.
+    /// </summary>
+    TargetApplicationDeployment = 13,
+
+    /// <summary>
+    /// Reads the approved target after the migration landed in it, and records what each recorded
+    /// disposition actually got.
+    ///
+    /// It is strictly read-only and runs after <see cref="SandboxDataMigration"/>, because until then
+    /// there is no migrated database to read. It is the only phase whose results are attributable to one
+    /// recorded decision each; <see cref="GeneratedApplicationVerification"/> above it runs generated test
+    /// suites and reports aggregates, which say how many cases ran and not which decision any was about.
+    /// </summary>
+    TargetContractVerification = 14,
 }
 
 /// <summary>What a phase is allowed to change. Drives which approval gate applies.</summary>
@@ -85,6 +105,18 @@ public enum MutationClass
     WorkspaceArtifactWrite,
     SandboxDatabaseWrite,
     ProductionWrite,
+
+    /// <summary>
+    /// Opens a connection to the customer's approved target and reads it, writing only its own report
+    /// into the session workspace.
+    ///
+    /// It changes nothing in the target, but it reaches a customer database, so it is held to the same
+    /// just-in-time grant check a write is instead of being counted as a workspace artifact write. The
+    /// earlier labelling said <see cref="WorkspaceArtifactWrite"/>, which was true about where the bytes
+    /// landed and false about what the phase touched: the executor's gate never fired and a revoked or
+    /// expired grant did not stop the connection.
+    /// </summary>
+    ExternalTargetRead,
 }
 
 /// <summary>Planning outcome for a single phase.</summary>

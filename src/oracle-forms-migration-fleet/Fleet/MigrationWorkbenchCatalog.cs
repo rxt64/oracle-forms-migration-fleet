@@ -189,8 +189,8 @@ public static class MigrationWorkbenchCatalog
 
         new(WorkbenchStep.MigrateAndValidate, 5,
             "Migrate and validate",
-            "Execute generated application tests, replay the regression baseline, load a representative data set into the sandbox, and reconcile it against the source.",
-            [MigrationPhase.GeneratedApplicationVerification, MigrationPhase.DifferentialBehaviorTesting, MigrationPhase.SandboxDataMigration, MigrationPhase.DataReconciliation],
+            "Execute generated application tests, replay the regression baseline, load a representative data set into the sandbox, reconcile it against the source, read the migrated target back against every recorded decision, and deploy the verified application tier to its Azure destination.",
+            [MigrationPhase.GeneratedApplicationVerification, MigrationPhase.DifferentialBehaviorTesting, MigrationPhase.SandboxDataMigration, MigrationPhase.DataReconciliation, MigrationPhase.TargetContractVerification, MigrationPhase.TargetApplicationDeployment],
             RequiresExecutionAdapter: true,
             // Generated application verification and sandbox migration run; differential testing has no adapter.
             AdapterConnected: true,

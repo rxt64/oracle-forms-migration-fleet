@@ -30,17 +30,19 @@ public class MigrationLifecycleTests
     [InlineData(MigrationPhase.ProductionCutover, 10)]
     [InlineData(MigrationPhase.SourceNormalization, 11)]
     [InlineData(MigrationPhase.GeneratedApplicationVerification, 12)]
+    [InlineData(MigrationPhase.TargetApplicationDeployment, 13)]
+    [InlineData(MigrationPhase.TargetContractVerification, 14)]
     public void Every_phase_keeps_its_persisted_numeric_value(MigrationPhase phase, int expected) =>
         Assert.Equal(expected, (int)phase);
 
     [Fact]
-    public void The_numeric_map_is_exactly_these_thirteen_phases()
+    public void The_numeric_map_is_exactly_these_fifteen_phases()
     {
         // Catches a phase added without deciding its wire value, and a value reused for two phases.
         MigrationPhase[] all = Enum.GetValues<MigrationPhase>();
 
-        Assert.Equal(13, all.Length);
-        Assert.Equal([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], all.Select(phase => (int)phase).Order());
+        Assert.Equal(15, all.Length);
+        Assert.Equal([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14], all.Select(phase => (int)phase).Order());
     }
 
     [Fact]
@@ -67,10 +69,46 @@ public class MigrationLifecycleTests
                 MigrationPhase.DifferentialBehaviorTesting,
                 MigrationPhase.SandboxDataMigration,
                 MigrationPhase.DataReconciliation,
+                MigrationPhase.TargetContractVerification,
+                MigrationPhase.TargetApplicationDeployment,
                 MigrationPhase.HumanAcceptance,
                 MigrationPhase.ProductionCutover,
             ],
             MigrationLifecycle.Order);
+    }
+
+    /// <summary>
+    /// The read-only target verification reads the database the sandbox migration landed in, so it can
+    /// never run before it. The adapter refuses on that relationship, and a reordering would turn the
+    /// refusal into the normal path.
+    /// </summary>
+    [Fact]
+    public void Target_contract_verification_runs_after_the_sandbox_data_migration()
+    {
+        Assert.True(
+            MigrationLifecycle.PositionOf(MigrationPhase.SandboxDataMigration)
+            < MigrationLifecycle.PositionOf(MigrationPhase.TargetContractVerification));
+
+        Assert.True(
+            MigrationLifecycle.PositionOf(MigrationPhase.TargetContractVerification)
+            < MigrationLifecycle.PositionOf(MigrationPhase.ProductionCutover));
+    }
+
+    /// <summary>
+    /// A deployment publishes the tier the verification phase executed, so it can never run first. The
+    /// numeric order gets this right by accident; the relationship is pinned because the adapter refuses
+    /// on it and a reordering would turn that refusal into the normal path.
+    /// </summary>
+    [Fact]
+    public void Generated_application_verification_runs_before_the_target_deployment()
+    {
+        Assert.True(
+            MigrationLifecycle.PositionOf(MigrationPhase.GeneratedApplicationVerification)
+            < MigrationLifecycle.PositionOf(MigrationPhase.TargetApplicationDeployment));
+
+        Assert.True(
+            MigrationLifecycle.PositionOf(MigrationPhase.TargetApplicationDeployment)
+            < MigrationLifecycle.PositionOf(MigrationPhase.ProductionCutover));
     }
 
     /// <summary>

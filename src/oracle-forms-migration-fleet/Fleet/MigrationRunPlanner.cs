@@ -274,6 +274,15 @@ public static class MigrationRunPlanner
             MigrationPhase.DataReconciliation or MigrationPhase.DifferentialBehaviorTesting =>
                 [EvidenceKind.DatabaseSchemaExport, EvidenceKind.TestBaseline],
 
+            // Publishes the tier this run already generated and verified. It opens no Forms module and
+            // reads no baseline: the claim it makes is that an image built from those bytes is running,
+            // not that it behaves like Oracle Forms.
+            MigrationPhase.TargetApplicationDeployment => [EvidenceKind.DatabaseSchemaExport],
+
+            // Reads the target the migration landed in and compares it with the source the ledger was
+            // projected from. It runs no baseline, so requiring one would block a check that never opens it.
+            MigrationPhase.TargetContractVerification => [EvidenceKind.DatabaseSchemaExport],
+
             _ => [],
         };
 
@@ -496,6 +505,40 @@ public static class MigrationRunPlanner
                 [nameof(EvidenceKind.DatabaseSchemaExport)],
                 [new ArtifactReference($"{root}/reports/data-reconciliation.json", ArtifactKind.ReconciliationReport, "Row counts, checksums, and tolerance breaches by table.")],
                 ["Reconciliation adapter (read-only against source, read-only against sandbox)"],
+                []),
+
+            new(MigrationPhase.TargetContractVerification, FleetRole.BuildAndTestEngineer, PhaseStatus.Planned,
+                // Read-only against the approved target, and it writes only its own report into the
+                // workspace. It is still declared as a side effect that reaches outside the workspace,
+                // because it opens a connection to a customer database: the executor re-asks the sandbox
+                // grant immediately before the phase runs, and the gateway re-asks it again before each
+                // read, so a grant revoked or expired between phases stops the connection rather than the
+                // next run. Labelling it a workspace artifact write would have been true about where the
+                // report lands and false about what the phase touches.
+                //
+                // It precedes deployment on purpose, and in the same order as MigrationLifecycle.Order:
+                // the deployment phase below describes what it publishes as verified, so the read that
+                // establishes that has to have happened first.
+                MutationClass.ExternalTargetRead, ExecutionMode.SandboxMigration, RequiresApproval: true,
+                "Read the migrated target and record, for each recorded disposition, whether the object that decision was carried into actually exists there with the shape the source resolved to.",
+                [nameof(EvidenceKind.DatabaseSchemaExport)],
+                [new ArtifactReference($"{root}/reports/entry-verification.json", ArtifactKind.ExecutableVerificationReport, "What the approved target held for each recorded disposition, and every gap this check leaves. No generated statement is executed and no generated service is started, so it asserts nothing about application behavior.")],
+                [
+                    "Host-held read-only connection to the project's approved target profile; the generated application is given no target and no credential",
+                    "Fixed parameterized catalog probes written in this build; no generated or caller-supplied SQL is executed",
+                ],
+                []),
+
+            new(MigrationPhase.TargetApplicationDeployment, FleetRole.Orchestrator, PhaseStatus.Planned,
+                MutationClass.SandboxDatabaseWrite, ExecutionMode.SandboxMigration, RequiresApproval: true,
+                "Hand the verified generated application tier to a trusted builder, and record the immutable image digest and URL of the revision it deployed against the converted database.",
+                [nameof(EvidenceKind.DatabaseSchemaExport)],
+                [new ArtifactReference($"{root}/reports/target-deployment.json", ArtifactKind.ValidationReport, "Which bytes were published, which build produced them, the immutable image digest a revision is running, and the URL it answers on. It asserts nothing about behavioral equivalence with Oracle Forms.")],
+                [
+                    "Trusted GitHub Actions builder invoked by the product; the run process holds no registry or subscription credential",
+                    "Host-owned container recipe; nothing executable inside the generated output is run to produce the image",
+                    "Azure Container Apps revision pinned to an immutable image digest",
+                ],
                 []),
 
             new(MigrationPhase.HumanAcceptance, FleetRole.AcceptanceCoordinator, PhaseStatus.Planned,

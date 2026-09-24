@@ -105,23 +105,3 @@ CREATE INDEX IX_MRD_ORDER_HEAD_CUST ON MRD_ORDER_HEAD (ORD_CUST);
 CREATE INDEX IX_MRD_ORDER_ITEM_ORD ON MRD_ORDER_ITEM (ITM_ORD);
 
 CREATE INDEX IX_MRD_ORDER_ITEM_ART ON MRD_ORDER_ITEM (ITM_ART);
-
--- Read-only reach for whichever application account the image created, when there is one. The
--- grant is conditional so this lab can also be built standalone, without the banking estate.
-DECLARE
-    v_app_user VARCHAR2(128) := 'BANKING';
-    v_exists   PLS_INTEGER;
-BEGIN
-    SELECT COUNT(*) INTO v_exists FROM DBA_USERS WHERE USERNAME = v_app_user;
-
-    IF v_exists = 1 THEN
-        FOR t IN (SELECT TABLE_NAME FROM DBA_TABLES WHERE OWNER = 'MERIDIAN') LOOP
-            EXECUTE IMMEDIATE 'GRANT SELECT ON MERIDIAN.' || DBMS_ASSERT.SIMPLE_SQL_NAME(t.TABLE_NAME)
-                || ' TO ' || DBMS_ASSERT.SIMPLE_SQL_NAME(v_app_user);
-        END LOOP;
-        DBMS_OUTPUT.PUT_LINE('MERIDIAN ORDER LAB: granted SELECT on the order estate to ' || v_app_user);
-    ELSE
-        DBMS_OUTPUT.PUT_LINE('MERIDIAN ORDER LAB: no ' || v_app_user || ' account present; no grant issued');
-    END IF;
-END;
-/

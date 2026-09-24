@@ -80,6 +80,89 @@ public class MigrationExecutorTests
     private static PhaseOutcome Outcome(MigrationExecutionResult result, MigrationPhase phase) =>
         result.Phases.Single(outcome => outcome.Phase == phase);
 
+    /// <summary>Answers every phase gate the same way, and records what it was asked.</summary>
+    private sealed class StubMutationAuthorizer(bool authorized) : IPhaseMutationAuthorizer
+    {
+        public List<MutationAuthorizationRequest> Asked { get; } = [];
+
+        public Task<MutationAuthorizationResult> AuthorizeAsync(
+            MutationAuthorizationRequest request,
+            CancellationToken cancellationToken)
+        {
+            Asked.Add(request);
+            return Task.FromResult(authorized
+                ? MutationAuthorizationResult.Allow("A grant covers this run.")
+                : MutationAuthorizationResult.Deny("The grant for this run was revoked after it was queued."));
+        }
+    }
+
+    /// <summary>
+    /// Reading the approved target is a side effect that leaves the session workspace, so the executor
+    /// re-asks the grant immediately before the phase runs. A grant revoked after the run was queued stops
+    /// the connection here, before the adapter is ever constructed with a target to open.
+    /// </summary>
+    [Fact]
+    public async Task A_target_read_the_server_will_not_authorize_never_reaches_its_adapter()
+    {
+        using TemporaryWorkspace workspace = SeededWorkspace();
+        RecordingAdapter adapter = new(MigrationPhase.TargetContractVerification);
+        StubMutationAuthorizer authorizer = new(authorized: false);
+
+        MigrationExecutionResult result = await new MigrationExecutor(workspace.Root, [adapter], authorizer)
+            .ExecuteAsync(
+                Request(mode: ExecutionMode.SandboxMigration, executionApproval: Requests.Approved("release@contoso.com")),
+                Operator);
+
+        PhaseOutcome outcome = Outcome(result, MigrationPhase.TargetContractVerification);
+        Assert.Equal(PhaseExecutionState.Failed, outcome.State);
+        Assert.Equal(0, adapter.Invocations);
+        Assert.Contains("revoked after it was queued", outcome.Detail!, StringComparison.Ordinal);
+        Assert.Contains("Nothing was read", outcome.Detail!, StringComparison.Ordinal);
+
+        Assert.Contains(
+            authorizer.Asked,
+            asked => asked.Phase == MigrationPhase.TargetContractVerification &&
+                asked.Mutation == MutationClass.ExternalTargetRead);
+    }
+
+    /// <summary>
+    /// The phase boundary the deployment below it depends on. A verification the server will not record is
+    /// a verification nothing attributes to a decision, so the phase ends Failed and the deployment adapter
+    /// sees a run with no per-entry evidence rather than publishing on the strength of an unrecorded read.
+    /// </summary>
+    [Fact]
+    public async Task A_verification_the_server_will_not_record_fails_that_phase_before_deployment()
+    {
+        using TemporaryWorkspace workspace = SeededWorkspace();
+        RecordingAdapter verification = new(MigrationPhase.TargetContractVerification);
+        List<MigrationPhase> observed = [];
+
+        MigrationExecutionResult result = await new MigrationExecutor(
+                workspace.Root,
+                [verification],
+                phaseObserver: (outcome, _) =>
+                {
+                    observed.Add(outcome.Phase);
+                    return Task.FromResult<string?>(
+                        outcome.Phase == MigrationPhase.TargetContractVerification
+                            ? "That run's verification record describes no executed case, so nothing was entered."
+                            : null);
+                })
+            .ExecuteAsync(
+                Request(mode: ExecutionMode.SandboxMigration, executionApproval: Requests.Approved("release@contoso.com")),
+                Operator);
+
+        PhaseOutcome outcome = Outcome(result, MigrationPhase.TargetContractVerification);
+        Assert.Equal(PhaseExecutionState.Failed, outcome.State);
+        Assert.Contains("no executed case", outcome.Detail!, StringComparison.Ordinal);
+
+        // Recorded at the moment the phase finished, not after the run reached a terminal state.
+        Assert.Contains(MigrationPhase.TargetContractVerification, observed);
+        Assert.True(
+            MigrationLifecycle.PositionOf(MigrationPhase.TargetContractVerification)
+                < MigrationLifecycle.PositionOf(MigrationPhase.TargetApplicationDeployment));
+    }
+
     [Fact]
     public async Task A_failed_phase_retains_its_diagnostic_artifacts_without_attesting()
     {

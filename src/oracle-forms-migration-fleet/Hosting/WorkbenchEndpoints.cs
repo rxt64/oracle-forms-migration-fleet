@@ -478,6 +478,16 @@ internal static class WorkbenchEndpoints
                 gateway = new AuthorizingDataMigrationGateway(gateway, preparation.MutationAuthorizer, prepared);
             }
 
+            // The same re-check before the approved target is read. The read reaches a customer database,
+            // so a grant that lapsed between phases has to stop the connection rather than the next run.
+            IEntryRuntimeVerificationGateway? entryVerification =
+                context.RequestServices.GetService<IEntryRuntimeVerificationGateway>();
+            if (entryVerification is not null)
+            {
+                entryVerification = new AuthorizingEntryRuntimeVerificationGateway(
+                    entryVerification, preparation.MutationAuthorizer, prepared);
+            }
+
             MigrationExecutor executor = new(
                 workspaceRoot,
                 MigrationExecutor.DefaultAdapters(
@@ -487,7 +497,9 @@ internal static class WorkbenchEndpoints
                     context.RequestServices.GetService<ProgramUnitRepairLoop>(),
                     context.RequestServices.GetService<IApplicationBuildGateway>(),
                     context.RequestServices.GetService<IApplicationTestGateway>(),
-                    context.RequestServices.GetService<ITargetApplicationVerificationGateway>()),
+                    context.RequestServices.GetService<ITargetApplicationVerificationGateway>(),
+                    entryVerification,
+                    context.RequestServices.GetService<ITargetApplicationDeploymentGateway>()),
                 preparation.MutationAuthorizer);
 
             // The run moves off the request thread to keep progress frames flowing while it works.

@@ -311,20 +311,3 @@ CREATE OR REPLACE PACKAGE BODY MRD_ORDER_ENTRY_API AS
 END MRD_ORDER_ENTRY_API;
 /
 -- END source/db/package.sql
-
-DECLARE
-    v_app_user VARCHAR2(128) := 'BANKING';
-    v_exists   PLS_INTEGER;
-BEGIN
-    SELECT COUNT(*) INTO v_exists FROM DBA_USERS WHERE USERNAME = v_app_user;
-
-    IF v_exists = 1 THEN
-        EXECUTE IMMEDIATE 'GRANT EXECUTE ON MERIDIAN.MRD_ORDER_LINE_T TO ' || v_app_user;
-        EXECUTE IMMEDIATE 'GRANT EXECUTE ON MERIDIAN.MRD_ORDER_LINE_TAB TO ' || v_app_user;
-        EXECUTE IMMEDIATE 'GRANT EXECUTE ON MERIDIAN.MRD_ORDER_ENTRY_API TO ' || v_app_user;
-        DBMS_OUTPUT.PUT_LINE('MERIDIAN ORDER LAB: granted EXECUTE on the order API to ' || v_app_user);
-    ELSE
-        DBMS_OUTPUT.PUT_LINE('MERIDIAN ORDER LAB: no ' || v_app_user || ' account present; no grant issued');
-    END IF;
-END;
-/

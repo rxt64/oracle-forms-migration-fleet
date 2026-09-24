@@ -130,12 +130,20 @@ public sealed record ResolvedObject(
 /// <paramref name="TargetReference"/> names a role bound to a real table or column of the resolved
 /// mapping, so a decision to carry the property forward can be read back against something that was
 /// actually emitted rather than against the word "preserve".
+///
+/// <paramref name="TargetTable"/>, <paramref name="TargetColumn"/> and <paramref name="TargetType"/> are
+/// the same binding as coordinates rather than prose, so a verifier can ask a running target about the
+/// object this property became instead of parsing the sentence above. They are the parsed Oracle names
+/// and the resolved target type — source-derived, never read back out of the generated DDL.
 /// </summary>
 public sealed record CarriedSourceProperty(
     string ModulePath,
     string ObjectPath,
     string PropertyName,
-    string TargetReference);
+    string TargetReference,
+    string? TargetTable = null,
+    string? TargetColumn = null,
+    string? TargetType = null);
 
 /// <summary>A manifest every declaration of which resolved against the parsed schema and the normalized IR.</summary>
 /// <param name="Carried">
@@ -391,8 +399,9 @@ public static partial class TargetMappingReader
 
                 string table =
                     $"{resolved.Role} bound to table '{resolved.Table.Name}', emitted as the PostgreSQL table of that role";
-                carried.Add(new(modulePath, block.Id, DispositionLedgerEntries.ObjectPresenceProperty, table));
-                carried.Add(new(modulePath, block.Id, DataSourceAttribute, table));
+                carried.Add(new(modulePath, block.Id, DispositionLedgerEntries.ObjectPresenceProperty, table,
+                    resolved.Table.Name));
+                carried.Add(new(modulePath, block.Id, DataSourceAttribute, table, resolved.Table.Name));
 
                 foreach (FormsSourceFact item in facts.Facts)
                 {
@@ -407,8 +416,10 @@ public static partial class TargetMappingReader
 
                     string target =
                         $"{field.Role} bound to '{resolved.Table.Name}.{field.SourceName}', emitted as {field.PostgreSqlType}";
-                    carried.Add(new(modulePath, item.Id, DispositionLedgerEntries.ObjectPresenceProperty, target));
-                    carried.Add(new(modulePath, item.Id, ColumnAttribute, target));
+                    carried.Add(new(modulePath, item.Id, DispositionLedgerEntries.ObjectPresenceProperty, target,
+                        resolved.Table.Name, field.SourceName, field.PostgreSqlType));
+                    carried.Add(new(modulePath, item.Id, ColumnAttribute, target,
+                        resolved.Table.Name, field.SourceName, field.PostgreSqlType));
                 }
             }
         }

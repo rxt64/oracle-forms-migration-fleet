@@ -26,6 +26,8 @@ public static class MigrationLifecycle
         MigrationPhase.DifferentialBehaviorTesting,
         MigrationPhase.SandboxDataMigration,
         MigrationPhase.DataReconciliation,
+        MigrationPhase.TargetContractVerification,
+        MigrationPhase.TargetApplicationDeployment,
         MigrationPhase.HumanAcceptance,
         MigrationPhase.ProductionCutover,
     ];

@@ -54,6 +54,16 @@ public sealed record MigrationExecutionResult(
     IReadOnlyList<ExecutionProgress> Progress);
 
 /// <summary>
+/// What the host does about a phase the moment it finishes, before the next one starts.
+///
+/// It returns the reason the outcome is not a success after all, or null. The executor treats a reason as
+/// a phase failure, because a host callback exists for durable bookkeeping the run's later phases depend
+/// on: a generation whose evidence would not record is not a generation a verification may speak about,
+/// and continuing as though it were is the false clean result this product exists to prevent.
+/// </summary>
+public delegate Task<string?> PhaseCompletionObserver(PhaseOutcome outcome, CancellationToken cancellationToken);
+
+/// <summary>
 /// Runs the phases <see cref="MigrationRunPlanner"/> authorized, and only those.
 ///
 /// The executor calls the planner itself rather than accepting a plan from the caller, so a caller cannot
@@ -69,6 +79,9 @@ public sealed class MigrationExecutor
     private readonly Dictionary<MigrationPhase, IPhaseAdapter> _adapters = [];
     private readonly IPhaseMutationAuthorizer? _mutationAuthorizer;
     private readonly IGenerationAuthorizationProvider? _authorizationProvider;
+    private readonly IEntryVerificationGenerationProvider? _verificationProvider;
+    private readonly ITargetDeploymentAuthorityProvider? _deploymentAuthorityProvider;
+    private readonly PhaseCompletionObserver? _phaseObserver;
 
     /// <summary>
     /// <paramref name="mutationAuthorizer"/> is consulted immediately before any phase that writes
@@ -81,16 +94,30 @@ public sealed class MigrationExecutor
     /// asks it at the moment it is about to emit and re-derives whether the answer covers what it would
     /// write. Omitting it leaves a generation phase with Forms source nothing to generate under, which is
     /// a refusal and not a weaker check.
+    /// <paramref name="verificationProvider"/> is the server's authority over verifying what this run
+    /// generated. Like the one above it is carried, never adjudicated: the read-only target verification
+    /// phase asks it immediately before it would open a connection, and a phase without one reads nothing.
+    ///
+    /// <paramref name="phaseObserver"/> lets the host record a phase's evidence durably at the moment the
+    /// phase produced it rather than after every phase has run. That ordering is what a later phase needs:
+    /// verification is a statement about a generation, so the generation has to be recorded while the run
+    /// is still in flight and still holds the claim it was produced under.
     /// </summary>
     public MigrationExecutor(
         string workspaceRoot,
         IEnumerable<IPhaseAdapter>? adapters = null,
         IPhaseMutationAuthorizer? mutationAuthorizer = null,
-        IGenerationAuthorizationProvider? authorizationProvider = null)
+        IGenerationAuthorizationProvider? authorizationProvider = null,
+        IEntryVerificationGenerationProvider? verificationProvider = null,
+        PhaseCompletionObserver? phaseObserver = null,
+        ITargetDeploymentAuthorityProvider? deploymentAuthorityProvider = null)
     {
         _workspace = new WorkspaceWriter(workspaceRoot);
         _mutationAuthorizer = mutationAuthorizer;
         _authorizationProvider = authorizationProvider;
+        _verificationProvider = verificationProvider;
+        _deploymentAuthorityProvider = deploymentAuthorityProvider;
+        _phaseObserver = phaseObserver;
 
         foreach (IPhaseAdapter adapter in adapters ?? DefaultAdapters())
         {
@@ -105,7 +132,9 @@ public sealed class MigrationExecutor
         ProgramUnitRepairLoop? programUnitRepair = null,
         IApplicationBuildGateway? applicationBuild = null,
         IApplicationTestGateway? applicationTests = null,
-        ITargetApplicationVerificationGateway? targetVerification = null) =>
+        ITargetApplicationVerificationGateway? targetVerification = null,
+        IEntryRuntimeVerificationGateway? entryVerification = null,
+        ITargetApplicationDeploymentGateway? deploymentGateway = null) =>
     [
         new SourceAnalysisAdapter(),
         new SourceNormalizationAdapter(),
@@ -115,6 +144,13 @@ public sealed class MigrationExecutor
         new GeneratedApplicationVerificationAdapter(applicationTests, targetVerification),
         new SandboxDataMigrationAdapter(dataGateway, programUnitRepair),
         new DataReconciliationAdapter(dataGateway),
+        new TargetContractVerificationAdapter(entryVerification),
+
+        // Registered unconditionally, and with a null gateway when the host configured none. The phase
+        // then refuses and names the unmet host prerequisite; leaving it unregistered would report the
+        // same run as having no deployment step at all, which reads as "not required" rather than "not
+        // possible here" — the exact silent-success failure this fleet exists to prevent.
+        new AzureSandboxPublishAdapter(deploymentGateway),
     ];
 
     /// <summary>
@@ -185,6 +221,13 @@ public sealed class MigrationExecutor
         [
             new(MigrationPhase.BuildAndStaticValidation, scope => scope.Produces(MigrationPhase.BuildAndStaticValidation)),
             new(MigrationPhase.DatabaseConversion, scope => scope.Produces(MigrationPhase.DatabaseConversion)),
+        ],
+
+        // Reads the target a migration landed in. Without that migration there is nothing migrated to
+        // read, and the only way to produce something would be to execute the generated DDL here.
+        [MigrationPhase.TargetContractVerification] =
+        [
+            new(MigrationPhase.SandboxDataMigration, scope => scope.Produces(MigrationPhase.SandboxDataMigration)),
         ],
     };
 
@@ -351,8 +394,11 @@ public sealed class MigrationExecutor
             }
 
             // Checked here rather than at plan time: the planner answers what the run may do, and this
-            // answers whether the side effect is still authorized at the moment it would happen.
-            if (phase.Mutation is MutationClass.SandboxDatabaseWrite or MutationClass.ProductionWrite &&
+            // answers whether the side effect is still authorized at the moment it would happen. A
+            // read of the approved target counts: it opens a customer database, so a grant revoked or
+            // expired since the run was queued has to stop the connection here.
+            if (phase.Mutation is MutationClass.SandboxDatabaseWrite or MutationClass.ProductionWrite
+                    or MutationClass.ExternalTargetRead &&
                 _mutationAuthorizer is not null)
             {
                 MutationAuthorizationResult decision = await _mutationAuthorizer.AuthorizeAsync(
@@ -361,15 +407,19 @@ public sealed class MigrationExecutor
 
                 if (!decision.IsAuthorized)
                 {
+                    string effect = phase.Mutation == MutationClass.ExternalTargetRead
+                        ? "opens a connection to the approved target outside this session workspace"
+                        : "writes outside this session workspace";
+
                     string detail =
-                        $"{phase.Phase} writes outside this session workspace and was not authorized at the moment it " +
-                        $"would have run: {decision.Reason} Nothing was written and nothing was attested.";
+                        $"{phase.Phase} {effect} and was not authorized at the moment it " +
+                        $"would have run: {decision.Reason} Nothing was read, nothing was written, and nothing was attested.";
 
                     ReportPhase(
                         "error",
                         $"{phase.Phase}: {detail}",
                         ProgressActions.PhaseBlocked,
-                        $"{phase.Phase} was refused by the server before any change was made.",
+                        $"{phase.Phase} was refused by the server before it reached anything outside this workspace.",
                         "Obtain a scoped authorization for this run before attempting this phase again.");
                     outcomes.Add(new PhaseOutcome(
                         phase.Phase, phase.Status, PhaseExecutionState.Failed, [], [detail], detail));
@@ -394,6 +444,8 @@ public sealed class MigrationExecutor
             {
                 CompletedPhases = [.. outcomes],
                 AuthorizationProvider = _authorizationProvider,
+                VerificationProvider = _verificationProvider,
+                DeploymentAuthorityProvider = _deploymentAuthorityProvider,
             };
 
             PhaseExecutionResult result;
@@ -432,7 +484,32 @@ public sealed class MigrationExecutor
             }
 
             artifacts.AddRange(result.Artifacts);
-            outcomes.Add(new PhaseOutcome(phase.Phase, phase.Status, PhaseExecutionState.Executed, result.Artifacts, result.Findings, null));
+            PhaseOutcome executed = new(
+                phase.Phase, phase.Status, PhaseExecutionState.Executed, result.Artifacts, result.Findings, null);
+
+            // The host's durable bookkeeping for what this phase just wrote, done while the run still
+            // holds the claim the work was produced under. A refusal here is the phase failing: the files
+            // are on disk and nothing records what they were produced under, and a later phase that spoke
+            // about them would be speaking about an artifact the server never admitted.
+            if (_phaseObserver is not null &&
+                await _phaseObserver(executed, cancellationToken).ConfigureAwait(false) is { Length: > 0 } unrecorded)
+            {
+                ReportPhase(
+                    "error",
+                    $"{phase.Phase}: {unrecorded}",
+                    ProgressActions.PhaseFinished,
+                    $"{phase.Phase} produced output the server would not record: {unrecorded}",
+                    "Nothing later in this run may speak about that output; resolve the refusal and run the phase again.");
+                outcomes.Add(executed with
+                {
+                    State = PhaseExecutionState.Failed,
+                    Findings = [.. result.Findings, unrecorded],
+                    Detail = unrecorded,
+                });
+                continue;
+            }
+
+            outcomes.Add(executed);
             // No count rides on this frame: it would be this phase's total, and the consumer keeps
             // the latest count per artifact kind. The run's terminal frame carries the real total.
             ReportPhase(
