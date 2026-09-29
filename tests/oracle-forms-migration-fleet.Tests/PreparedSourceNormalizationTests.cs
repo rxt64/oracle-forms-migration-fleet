@@ -791,6 +791,111 @@ public class PreparedSourceNormalizationTests
     }
 
     /// <summary>
+    /// The same deletion with a source root that reaches the prepared directory by another spelling. The
+    /// file system resolves the alias, so every consumer still walks the tree the claims were recorded
+    /// over, while the ordinal comparison that decides which claims this run answers for matches none of
+    /// them and the outstanding admissions fall away.
+    /// </summary>
+    [Theory]
+    [InlineData("database", "legacy/forms/.")]
+    [InlineData("database", "./legacy/forms")]
+    [InlineData("database", "legacy//forms")]
+    [InlineData("application", "legacy/forms/.")]
+    [InlineData("application", "./legacy/forms")]
+    [InlineData("application", "legacy//forms")]
+    [InlineData("sandbox", "legacy/forms/.")]
+    [InlineData("sandbox", "./legacy/forms")]
+    [InlineData("sandbox", "legacy//forms")]
+    [InlineData("reconciliation", "legacy/forms/.")]
+    [InlineData("reconciliation", "./legacy/forms")]
+    [InlineData("reconciliation", "legacy//forms")]
+    public async Task Every_consumer_refuses_a_selected_root_that_only_resolves_to_the_prepared_one(string consumer, string selected)
+    {
+        using TemporaryWorkspace workspace = Estate();
+        Prepare(workspace);
+        PrepareSchema(workspace);
+
+        Directory.Delete(workspace.Absolute($"{SourceRoot}/{PreparedSourceTrustStore.PreparedFolder}"), recursive: true);
+
+        PhaseExecutionResult result = await ConsumeAsync(consumer, workspace, Request() with { SourceRoot = selected });
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("is not spelled the way a path in this workspace is spelled", result.FailureReason!, StringComparison.Ordinal);
+        Assert.False(workspace.Exists(ConvertedSchemaPath));
+    }
+
+    /// <summary>
+    /// The spellings a directory answers to only on some file systems: a trailing dot or space, and a
+    /// difference of case alone. Resolving them here would decide which root the operator selected, so
+    /// each is refused by what it is written as rather than by what it happens to reach.
+    /// </summary>
+    [Theory]
+    [InlineData("legacy/forms.", "is not spelled the way a path in this workspace is spelled")]
+    [InlineData("legacy/forms ", "is not spelled the way a path in this workspace is spelled")]
+    [InlineData("LEGACY/forms", "differs only in case")]
+    [InlineData("LEGACY", "Select the source root")]
+    [InlineData("legacy/.", "is not spelled the way a path in this workspace is spelled")]
+    public void A_source_root_reaching_the_prepared_one_by_another_name_is_refused_rather_than_resolved(
+        string selected,
+        string expected)
+    {
+        using TemporaryWorkspace workspace = Estate();
+        Prepare(workspace);
+        PrepareSchema(workspace);
+
+        Directory.Delete(workspace.Absolute($"{SourceRoot}/{PreparedSourceTrustStore.PreparedFolder}"), recursive: true);
+
+        MigrationRunRequest request = Request();
+        PhasePlan plan = MigrationRunPlanner.Plan(request).Phases.Single(phase => phase.Phase == MigrationPhase.DatabaseConversion);
+
+        PhaseExecutionContext context = new(workspace.Root, selected, request.OutputRoot, plan, request, (_, _) => { })
+        {
+            PreparedSourceBinding = s_ownerBinding,
+        };
+
+        string? refusal = PreparedSchemaConsumption.Refusal(context, selected, "nothing was converted");
+
+        Assert.NotNull(refusal);
+        Assert.Contains(expected, refusal, StringComparison.Ordinal);
+        Assert.Contains("nothing was converted", refusal, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The alias arriving from the record's side instead of the operator's. A claim naming a root this
+    /// server would not have written reaches the same statements while comparing equal to no selection,
+    /// so it is refused as an entry rather than compared as one.
+    /// </summary>
+    [Theory]
+    [InlineData("LEGACY/forms", "differs only in case")]
+    [InlineData("legacy/forms/.", "is not spelled the way this server writes one")]
+    public async Task A_claim_recorded_against_a_root_this_server_would_not_have_written_is_refused(string claimRoot, string expected)
+    {
+        using TemporaryWorkspace workspace = Estate();
+        PrepareSchema(workspace, claimRoot: claimRoot);
+
+        PhaseExecutionResult result = await ConvertDatabaseAsync(workspace);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains(expected, result.FailureReason!, StringComparison.Ordinal);
+        Assert.False(workspace.Exists(ConvertedSchemaPath));
+    }
+
+    [Theory]
+    [InlineData(".")]
+    [InlineData("nested/")]
+    public async Task A_claim_with_an_aliased_output_path_is_refused(string alias)
+    {
+        using TemporaryWorkspace workspace = Estate();
+        PrepareSchema(workspace, ddlClaimPath: SchemaDdlPath.Replace("/extraction/", $"/extraction/{alias}/", StringComparison.Ordinal));
+
+        PhaseExecutionResult result = await ConvertDatabaseAsync(workspace);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("is not spelled the way this server writes one", result.FailureReason!, StringComparison.Ordinal);
+        Assert.False(workspace.Exists(ConvertedSchemaPath));
+    }
+
+    /// <summary>
     /// A claim recorded against a root the selected one does not contain. Those statements are outside the
     /// tree this run reads, so they are another selection's business and the selected root converts its
     /// own ordinary source.
@@ -974,7 +1079,9 @@ public class PreparedSourceNormalizationTests
         string environment = Environment,
         int profileVersion = 4,
         string? profileHash = null,
-        string? ownerBinding = null)
+        string? ownerBinding = null,
+        string? claimRoot = null,
+        string? ddlClaimPath = null)
     {
         string hash = profileHash ?? s_profileHash;
         byte[] artifact = Encoding.UTF8.GetBytes(
@@ -998,14 +1105,14 @@ public class PreparedSourceNormalizationTests
                 workspace.Root,
                 ownerBinding ?? s_ownerBinding,
                 new PreparedSchemaClaim(
-                    SourceRoot,
+                    claimRoot ?? SourceRoot,
                     environment,
                     profileVersion,
                     hash,
                     ["LEGACY"],
                     Sha256(artifact),
                     artifact.Length,
-                    ddlPath,
+                    ddlClaimPath ?? ddlPath,
                     Sha256(ddl),
                     programUnitPath,
                     Sha256(programUnits),

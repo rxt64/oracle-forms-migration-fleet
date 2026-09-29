@@ -172,6 +172,24 @@ The exact repaired SHA still requires fresh runner CI and Astra review; neither 
 
 ## Current Operational Evidence
 
+### Canonical Source Identity Repair, 2026-09-29
+
+Exact `210d3f0` CI passed, but Astra found that filesystem aliases such as `legacy/.`
+could bypass lexical claim comparisons after prepared files were removed. The repair
+rejects noncanonical selected roots and recorded root/output paths, and detects case-only
+overlap without silently treating mismatched spellings as an approved identity. Global
+workspace normalization is unchanged. Sol independently verified the scoped fix with
+76 passing tests; final ancestor/output-path coverage raised the focused result to 80/80.
+The specialist's preceding full solution run passed 2,105 host, 277 worker and 56 demo
+tests. New-commit CI and exact-candidate release review remain required.
+
+Infrastructure assessment recommends a parallel VNet-integrated workbench and private
+HTTPS source gateway, retaining the existing environment. The current local deployment
+plan contains a Draft proposal, not an apply authorization. Its subnet, TLS hostname and
+certificate, Entra configuration, durability and budget remain unresolved. A Standard-tier
+retail pricing query returned no matching meters, so no verified incremental cost is
+claimed. No public gateway was exposed, Azure resources changed, or migration run started.
+
 ### Claim-Root Review Closure, 2026-09-29
 
 CI for `cebc501` passed all four required jobs; deployment was skipped. Independent

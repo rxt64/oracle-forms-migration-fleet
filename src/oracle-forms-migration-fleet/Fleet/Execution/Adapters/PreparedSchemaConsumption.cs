@@ -67,6 +67,16 @@ public static class PreparedSchemaConsumption
 
         string preparedRoot = Folder(sourceRoot);
 
+        if (!Canonical(sourceRoot))
+        {
+            return
+                $"The selected source root `{sourceRoot}` is not spelled the way a path in this workspace is spelled. A '.' " +
+                "segment, a repeated separator, or a trailing dot or space resolves on disk to a directory this server may hold " +
+                "claims against while comparing equal to none of them, so every record standing over the prepared statements in " +
+                $"that tree would be filtered away as another selection's business and read as ordinary source. Nothing in " +
+                $"`{preparedRoot}` was read and {consequence}. Select the source root as it is spelled in the copy.";
+        }
+
         if (Misplaced(context, sourceRoot, preparedRoot, consequence) is { } elsewhere)
         {
             return elsewhere;
@@ -106,6 +116,11 @@ public static class PreparedSchemaConsumption
         if (schemaRead.Ledger is not { } schemaLedger)
         {
             return $"{schemaRead.Error} Nothing in `{preparedRoot}` was read, and {consequence}.";
+        }
+
+        if (Aliased(moduleLedger, schemaLedger, sourceRoot, preparedRoot, consequence) is { } spelling)
+        {
+            return spelling;
         }
 
         if (Misscoped(moduleLedger, schemaLedger, sourceRoot, preparedRoot, consequence) is { } nested)
@@ -254,9 +269,33 @@ public static class PreparedSchemaConsumption
     private static bool Reserved(string path) =>
         path.Split('/').Any(segment => segment.Equals(ReservedSegment, StringComparison.OrdinalIgnoreCase));
 
-    /// <summary>Whether a path is the selected root or sits beneath it, where an empty root is the whole copy.</summary>
+    /// <summary>
+    /// Whether a workspace-relative path is spelled so that comparing it to another says what the file
+    /// system would say.
+    ///
+    /// Every comparison here is lexical and ordinal while path resolution is neither: <c>legacy/.</c>,
+    /// <c>legacy//forms</c>, and <c>legacy/forms.</c> each reach a directory a claim could have been
+    /// recorded against, and none of them compares equal to the root that claim names. Rewriting the
+    /// alias would decide on the operator's behalf which root they selected, so a spelling this server
+    /// would not have written is refused instead of resolved.
+    /// </summary>
+    private static bool Canonical(string path) =>
+        path.Length == 0 || path.Split('/').All(segment => segment.Length > 0 && segment[^1] is not ('.' or ' '));
+
+    /// <summary>
+    /// Whether a path is the selected root or sits beneath it, where an empty root is the whole copy.
+    ///
+    /// Compared without case, because a file system that resolves two spellings differing only in case to
+    /// one directory puts the statements a claim covers inside the tree this run reads whether or not the
+    /// two roots compare equal ordinally. Whole segments still bound the comparison, so a sibling that
+    /// merely starts with the root stays outside it.
+    /// </summary>
     private static bool Within(string root, string path) =>
-        root.Length == 0 || WorkspacePath.IsWithin(root, path);
+        root.Length == 0
+            || string.Equals(root, path, StringComparison.OrdinalIgnoreCase)
+            || (path.Length > root.Length + 1
+                && path.StartsWith(root, StringComparison.OrdinalIgnoreCase)
+                && path[root.Length] == '/');
 
     /// <summary>Every recorded claim, as the source root it names and one file it covers.</summary>
     private static IEnumerable<(string Root, string Path)> Claimed(
@@ -276,6 +315,53 @@ public static class PreparedSchemaConsumption
                 yield return (claim.SourceRoot, path);
             }
         }
+    }
+
+    /// <summary>
+    /// Why a record this run compares the selected root against cannot be compared with it, or nothing.
+    ///
+    /// The filter that decides which claims belong to this run is an ordinal match on the root each claim
+    /// names, so a record whose root or file is spelled in a form the file system resolves but the
+    /// comparison does not drops out of it, and the statements it stands over are read as ordinary source.
+    /// A selected root differing from the recorded one only in case is the same failure arriving from the
+    /// other side. Neither is mapped onto the root it resembles, because doing so would let a spelling
+    /// decide which records a run is held to.
+    /// </summary>
+    private static string? Aliased(
+        PreparedSourceTrustLedger modules,
+        PreparedSchemaTrustLedger schemas,
+        string sourceRoot,
+        string preparedRoot,
+        string consequence)
+    {
+        foreach ((string root, string path) in Claimed(modules, schemas))
+        {
+            string claimRoot = WorkspacePath.Normalize(root);
+            string claimPath = WorkspacePath.Normalize(path);
+
+            if (!Canonical(claimRoot) || !Canonical(claimPath))
+            {
+                return
+                    $"This server holds a record of preparing `{claimPath}` against source root `{claimRoot}`, and that record " +
+                    "is not spelled the way this server writes one. A root or a file named in a form that resolves on disk " +
+                    "without comparing equal to the selected root leaves the claim standing over statements no comparison here " +
+                    $"can reach. Nothing in `{preparedRoot}` was read and {consequence}. Prepare the source again from the " +
+                    "workbench.";
+            }
+
+            if (!string.Equals(claimRoot, sourceRoot, StringComparison.Ordinal)
+                && string.Equals(claimRoot, sourceRoot, StringComparison.OrdinalIgnoreCase))
+            {
+                return
+                    $"The selected source root `{sourceRoot}` differs only in case from `{claimRoot}`, the root this server " +
+                    "recorded its claims against. Those are one directory to this file system and two roots to every comparison " +
+                    "here, so the records over those statements would be filtered away and the statements read as ordinary " +
+                    $"source. Nothing in `{preparedRoot}` was read and {consequence}. Select the source root as the claims " +
+                    "spell it.";
+            }
+        }
+
+        return null;
     }
 
     /// <summary>
