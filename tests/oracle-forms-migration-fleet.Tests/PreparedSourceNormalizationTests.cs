@@ -342,6 +342,381 @@ public class PreparedSourceNormalizationTests
         Assert.False(workspace.Exists(IrPath));
     }
 
+    /// <summary>
+    /// The combined case the GUI produces: the operator prepared the modules and the database from the
+    /// same source environment, so the copy carries two server-held ledgers and the prepared folder
+    /// carries both sets of files. Reading only the module ledger used to refuse the statements as an
+    /// upload and stop the phase.
+    /// </summary>
+    [Fact]
+    public async Task A_prepared_schema_beside_a_prepared_module_normalizes_from_both_ledgers()
+    {
+        using TemporaryWorkspace workspace = Estate();
+        Prepare(workspace);
+        PrepareSchema(workspace);
+
+        PhaseOutcome outcome = await NormalizeAsync(workspace, Request());
+
+        Assert.Equal(PhaseExecutionState.Executed, outcome.State);
+        Assert.True(workspace.Exists(IrPath));
+
+        Assert.True(workspace.Exists(SchemaDdlPath));
+        Assert.True(workspace.Exists(SchemaProgramUnitPath));
+
+        FormsIntermediateRead read = FormsIntermediateReader.Read(workspace.Read(IrPath), SourceRoot);
+        Assert.Null(read.Error);
+
+        FormsModule module = Assert.Single(read.Modules!);
+        Assert.Equal("ORDER_ENTRY", module.Name);
+        Assert.Equal(ModulePath, module.SourcePath);
+    }
+
+    [Fact]
+    public async Task A_schema_this_server_never_prepared_is_refused()
+    {
+        using TemporaryWorkspace workspace = Estate();
+        Prepare(workspace);
+
+        workspace.WriteBytes(SchemaDdlPath, Encoding.UTF8.GetBytes("CREATE TABLE PUBLIC.T (ID NUMBER);\n"));
+
+        PhaseOutcome outcome = await NormalizeAsync(workspace, Request());
+
+        Assert.Equal(PhaseExecutionState.Failed, outcome.State);
+        Assert.Contains("holds no record of preparing them", outcome.Detail!, StringComparison.Ordinal);
+        Assert.Contains(SchemaDdlPath, outcome.Detail!, StringComparison.Ordinal);
+        Assert.False(workspace.Exists(IrPath));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Edited_schema_statements_no_longer_hash_to_the_record_and_are_refused(bool programUnits)
+    {
+        using TemporaryWorkspace workspace = Estate();
+        Prepare(workspace);
+        PrepareSchema(workspace);
+
+        workspace.WriteBytes(
+            programUnits ? SchemaProgramUnitPath : SchemaDdlPath,
+            Encoding.UTF8.GetBytes("GRANT ALL ON LEGACY.BANK_ACCOUNT TO PUBLIC;\n"));
+
+        PhaseOutcome outcome = await NormalizeAsync(workspace, Request());
+
+        Assert.Equal(PhaseExecutionState.Failed, outcome.State);
+        Assert.Contains("does not hash to the digest this server recorded", outcome.Detail!, StringComparison.Ordinal);
+        Assert.False(workspace.Exists(IrPath));
+    }
+
+    [Fact]
+    public async Task A_schema_record_whose_statements_never_landed_is_refused()
+    {
+        using TemporaryWorkspace workspace = Estate();
+        Prepare(workspace);
+        PrepareSchema(workspace);
+
+        File.Delete(workspace.Absolute(SchemaDdlPath));
+
+        PhaseOutcome outcome = await NormalizeAsync(workspace, Request());
+
+        Assert.Equal(PhaseExecutionState.Failed, outcome.State);
+        Assert.Contains("incomplete admission", outcome.Detail!, StringComparison.Ordinal);
+        Assert.False(workspace.Exists(IrPath));
+    }
+
+    [Fact]
+    public async Task A_schema_prepared_under_another_owner_is_not_readable_by_this_run()
+    {
+        using TemporaryWorkspace workspace = Estate();
+        Prepare(workspace);
+        PrepareSchema(workspace, ownerBinding: PreparedSourceOwnerBinding.Derive("tenant-a:operator-b/project-b"));
+
+        PhaseOutcome outcome = await NormalizeAsync(workspace, Request());
+
+        Assert.Equal(PhaseExecutionState.Failed, outcome.State);
+        Assert.Contains("different project, tenant, or principal", outcome.Detail!, StringComparison.Ordinal);
+        Assert.False(workspace.Exists(IrPath));
+    }
+
+    [Theory]
+    [InlineData("legacy-payroll", 4)]
+    [InlineData(Environment, 9)]
+    public async Task A_schema_prepared_against_another_source_environment_stops_the_run(string environment, int profileVersion)
+    {
+        using TemporaryWorkspace workspace = Estate();
+        Prepare(workspace);
+        PrepareSchema(workspace, environment: environment, profileVersion: profileVersion);
+
+        PhaseOutcome outcome = await NormalizeAsync(workspace, Request());
+
+        Assert.Equal(PhaseExecutionState.Failed, outcome.State);
+        Assert.Contains("two different source environments", outcome.Detail!, StringComparison.Ordinal);
+        Assert.False(workspace.Exists(IrPath));
+    }
+
+    [Fact]
+    public async Task A_schema_whose_profile_hash_was_rewritten_stops_the_run()
+    {
+        using TemporaryWorkspace workspace = Estate();
+        Prepare(workspace);
+        PrepareSchema(workspace, profileHash: new string('c', 64));
+
+        PhaseOutcome outcome = await NormalizeAsync(workspace, Request());
+
+        Assert.Equal(PhaseExecutionState.Failed, outcome.State);
+        Assert.Contains("two different source environments", outcome.Detail!, StringComparison.Ordinal);
+        Assert.False(workspace.Exists(IrPath));
+    }
+
+    /// <summary>
+    /// A schema prepared on its own is admitted on its own. The run still fails, because the binary
+    /// modules beside it were never prepared — but it fails for that reason, not because the statements
+    /// read as an upload.
+    /// </summary>
+    [Fact]
+    public async Task A_schema_prepared_without_any_module_is_still_admitted()
+    {
+        using TemporaryWorkspace workspace = Estate();
+        PrepareSchema(workspace);
+
+        PhaseOutcome outcome = await NormalizeAsync(workspace, Request());
+
+        Assert.Equal(PhaseExecutionState.Failed, outcome.State);
+        Assert.DoesNotContain("holds no record of preparing them", outcome.Detail!, StringComparison.Ordinal);
+        Assert.Contains("binary Oracle Forms module(s)", outcome.Detail!, StringComparison.Ordinal);
+        Assert.False(workspace.Exists(IrPath));
+    }
+
+    [Fact]
+    public async Task Database_conversion_refuses_statements_this_server_never_prepared()
+    {
+        using TemporaryWorkspace workspace = Estate();
+        Prepare(workspace);
+
+        workspace.WriteBytes(SchemaDdlPath, Encoding.UTF8.GetBytes("CREATE TABLE PUBLIC.BACKDOOR (ID NUMBER);\n"));
+
+        PhaseExecutionResult result = await ConvertDatabaseAsync(workspace);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("holds no record of preparing them", result.FailureReason!, StringComparison.Ordinal);
+        Assert.Contains(SchemaDdlPath, result.FailureReason!, StringComparison.Ordinal);
+        Assert.False(workspace.Exists(ConvertedSchemaPath));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Database_conversion_refuses_edited_prepared_statements(bool programUnits)
+    {
+        using TemporaryWorkspace workspace = Estate();
+        Prepare(workspace);
+        PrepareSchema(workspace);
+
+        workspace.WriteBytes(
+            programUnits ? SchemaProgramUnitPath : SchemaDdlPath,
+            Encoding.UTF8.GetBytes("GRANT ALL ON LEGACY.BANK_ACCOUNT TO PUBLIC;\n"));
+
+        PhaseExecutionResult result = await ConvertDatabaseAsync(workspace);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("does not hash to the digest this server recorded", result.FailureReason!, StringComparison.Ordinal);
+        Assert.False(workspace.Exists(ConvertedSchemaPath));
+    }
+
+    [Fact]
+    public async Task Database_conversion_refuses_a_record_whose_statements_never_landed()
+    {
+        using TemporaryWorkspace workspace = Estate();
+        Prepare(workspace);
+        PrepareSchema(workspace);
+
+        File.Delete(workspace.Absolute(SchemaDdlPath));
+
+        PhaseExecutionResult result = await ConvertDatabaseAsync(workspace);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("incomplete admission", result.FailureReason!, StringComparison.Ordinal);
+        Assert.False(workspace.Exists(ConvertedSchemaPath));
+    }
+
+    [Fact]
+    public async Task Database_conversion_refuses_statements_prepared_under_another_owner()
+    {
+        using TemporaryWorkspace workspace = Estate();
+        Prepare(workspace);
+        PrepareSchema(workspace);
+
+        PhaseExecutionResult result = await ConvertDatabaseAsync(
+            workspace,
+            binding: PreparedSourceOwnerBinding.Derive("tenant-a:operator-b/project-b"));
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("different project, tenant, or principal", result.FailureReason!, StringComparison.Ordinal);
+        Assert.False(workspace.Exists(ConvertedSchemaPath));
+    }
+
+    [Fact]
+    public async Task Database_conversion_refuses_when_the_schema_ledger_cannot_be_believed()
+    {
+        using TemporaryWorkspace workspace = Estate();
+        Prepare(workspace);
+        PrepareSchema(workspace);
+
+        File.WriteAllText(PreparedSchemaTrustStore.LedgerPath(workspace.Root)!, "{ not a document this server wrote");
+
+        PhaseExecutionResult result = await ConvertDatabaseAsync(workspace);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("not a document this server wrote", result.FailureReason!, StringComparison.Ordinal);
+        Assert.False(workspace.Exists(ConvertedSchemaPath));
+    }
+
+    [Theory]
+    [InlineData("legacy-payroll", 4, null)]
+    [InlineData(Environment, 9, null)]
+    [InlineData(Environment, 4, "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")]
+    public async Task Database_conversion_refuses_statements_from_another_source_environment(
+        string environment,
+        int profileVersion,
+        string? profileHash)
+    {
+        using TemporaryWorkspace workspace = Estate();
+        Prepare(workspace);
+        PrepareSchema(workspace, environment: environment, profileVersion: profileVersion, profileHash: profileHash);
+
+        PhaseExecutionResult result = await ConvertDatabaseAsync(workspace);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("two different source environments", result.FailureReason!, StringComparison.Ordinal);
+        Assert.False(workspace.Exists(ConvertedSchemaPath));
+    }
+
+    /// <summary>
+    /// The combined input the GUI produces, converted by the phase that consumes it. Nothing normalized
+    /// first: the admitted statements are readable on the strength of the server's own record alone.
+    /// </summary>
+    [Fact]
+    public async Task Database_conversion_converts_an_admitted_schema()
+    {
+        using TemporaryWorkspace workspace = PreparedOnlyEstate();
+        Prepare(workspace);
+        PrepareSchema(workspace);
+
+        PhaseExecutionResult result = await ConvertDatabaseAsync(workspace);
+
+        Assert.True(result.Succeeded, result.FailureReason);
+        Assert.True(workspace.Exists(ConvertedSchemaPath));
+        Assert.Contains("bank_account", workspace.Read(ConvertedSchemaPath), StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// SQL an operator uploaded with their estate is ordinary source. It sits outside the folder only this
+    /// server writes into, so it is not held to a preparation nobody made, and a copy that carries no
+    /// prepared statements at all converts exactly as it did before the gate existed.
+    /// </summary>
+    [Fact]
+    public async Task Database_conversion_still_converts_uploaded_sql_that_was_never_prepared()
+    {
+        using TemporaryWorkspace workspace = Estate();
+
+        PhaseExecutionResult result = await ConvertDatabaseAsync(workspace);
+
+        Assert.True(result.Succeeded, result.FailureReason);
+        Assert.True(workspace.Exists(ConvertedSchemaPath));
+    }
+
+    [Fact]
+    public async Task Application_conversion_refuses_statements_this_server_never_prepared()
+    {
+        using TemporaryWorkspace workspace = new();
+        workspace.WriteBytes(SchemaDdlPath, Encoding.UTF8.GetBytes("CREATE TABLE PUBLIC.BACKDOOR (ID NUMBER);\n"));
+
+        PhaseExecutionResult result = await ConvertApplicationAsync(workspace);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("holds no record of preparing them", result.FailureReason!, StringComparison.Ordinal);
+        Assert.False(Directory.Exists(workspace.Absolute("out/orders/application")));
+    }
+
+    [Fact]
+    public async Task Application_conversion_refuses_edited_prepared_statements()
+    {
+        using TemporaryWorkspace workspace = new();
+        PrepareSchema(workspace);
+
+        workspace.WriteBytes(SchemaDdlPath, Encoding.UTF8.GetBytes("CREATE TABLE LEGACY.BANK_ACCOUNT (ACCOUNT_ID NUMBER(12));\n"));
+
+        PhaseExecutionResult result = await ConvertApplicationAsync(workspace);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("does not hash to the digest this server recorded", result.FailureReason!, StringComparison.Ordinal);
+        Assert.False(Directory.Exists(workspace.Absolute("out/orders/application")));
+    }
+
+    [Fact]
+    public async Task Application_conversion_generates_from_an_admitted_schema()
+    {
+        using TemporaryWorkspace workspace = new();
+        PrepareSchema(workspace);
+
+        PhaseExecutionResult result = await ConvertApplicationAsync(workspace);
+
+        Assert.True(result.Succeeded, result.FailureReason);
+        Assert.True(Directory.Exists(workspace.Absolute("out/orders/application")));
+    }
+
+    /// <summary>
+    /// The highest-stakes consumer: these statements are executed against the target and the phase that
+    /// runs them signs an attestation. Edited prepared INSERTs must not reach the gateway at all.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Data_phases_refuse_edited_prepared_statements_before_reaching_the_target(bool reconcile)
+    {
+        using TemporaryWorkspace workspace = Estate();
+        PrepareSchema(workspace);
+
+        workspace.WriteBytes(
+            SchemaDdlPath,
+            Encoding.UTF8.GetBytes("INSERT INTO BANK_ACCOUNT (ACCOUNT_ID) VALUES (99);\n"));
+
+        UnreachableDataMigrationGateway gateway = new();
+
+        PhaseExecutionResult result = await RunAsync(
+            reconcile ? new DataReconciliationAdapter(gateway) : new SandboxDataMigrationAdapter(gateway),
+            workspace,
+            Request() with { RequestedMode = ExecutionMode.SandboxMigration, ExecutionApproval = Requests.Approved("release-manager@contoso.com") },
+            binding: null);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("does not hash to the digest this server recorded", result.FailureReason!, StringComparison.Ordinal);
+        Assert.False(gateway.Called);
+    }
+
+    /// <summary>A gateway that fails the test if the phase reaches it.</summary>
+    private sealed class UnreachableDataMigrationGateway : IDataMigrationGateway
+    {
+        public bool Called { get; private set; }
+
+        public Task<SchemaDeploymentOutcome> PrepareAsync(IReadOnlyList<string> statements, CancellationToken cancellationToken) =>
+            Reached<SchemaDeploymentOutcome>();
+
+        public Task<IReadOnlyList<TableRowCount>> CountAsync(IReadOnlyList<string> tables, CancellationToken cancellationToken) =>
+            Reached<IReadOnlyList<TableRowCount>>();
+
+        public Task<IReadOnlyList<IReadOnlyList<string?>>> FetchAsync(string table, IReadOnlyList<string> columns, int maxRows, CancellationToken cancellationToken) =>
+            Reached<IReadOnlyList<IReadOnlyList<string?>>>();
+
+        public Task<DataMigrationOutcome> ApplyAsync(IReadOnlyList<DataMigrationStatement> statements, IReadOnlyList<string> tables, CancellationToken cancellationToken) =>
+            Reached<DataMigrationOutcome>();
+
+        private Task<T> Reached<T>()
+        {
+            Called = true;
+            return Task.FromException<T>(new InvalidOperationException("The phase reached the target with statements it had not vouched for."));
+        }
+    }
+
     // ---------- fixtures ----------
 
     private static string ArtifactPath =>
@@ -350,10 +725,26 @@ public class PreparedSourceNormalizationTests
     private static string ProvenancePath =>
         $"{SourceRoot}/{PreparedSourceTrustStore.PreparedFolder}/{Alias}{PreparedSourceTrustStore.ProvenanceSuffix}";
 
+    private static string SchemaDdlPath =>
+        $"{SourceRoot}/{PreparedSchemaTrustStore.PreparedFolder}/{Environment}{PreparedSchemaTrustStore.SchemaDdlSuffix}";
+
+    private static string SchemaProgramUnitPath =>
+        $"{SourceRoot}/{PreparedSchemaTrustStore.PreparedFolder}/{Environment}{PreparedSchemaTrustStore.ProgramUnitSuffix}";
+
+    private const string ConvertedSchemaPath = "out/orders/database/postgresql/schema/schema.sql";
+
     private static TemporaryWorkspace Estate()
     {
         TemporaryWorkspace workspace = new();
         workspace.WriteFile("legacy/forms/db/001_schema.sql", OracleSamples.Schema);
+        workspace.WriteBytes(ModulePath, s_moduleBytes);
+        return workspace;
+    }
+
+    /// <summary>An estate whose only SQL is the prepared statements, so a conversion of it converts those.</summary>
+    private static TemporaryWorkspace PreparedOnlyEstate()
+    {
+        TemporaryWorkspace workspace = new();
         workspace.WriteBytes(ModulePath, s_moduleBytes);
         return workspace;
     }
@@ -405,6 +796,64 @@ public class PreparedSourceNormalizationTests
             error);
     }
 
+    /// <summary>
+    /// Writes an admitted schema extraction the way the preparation service does: the statements and
+    /// their provenance into the same prepared folder the module artifacts use, and the claim over them
+    /// into the server-held schema ledger outside the copy.
+    /// </summary>
+    private static void PrepareSchema(
+        TemporaryWorkspace workspace,
+        string environment = Environment,
+        int profileVersion = 4,
+        string? profileHash = null,
+        string? ownerBinding = null)
+    {
+        string hash = profileHash ?? s_profileHash;
+        byte[] artifact = Encoding.UTF8.GetBytes(
+            $$"""{"record":"fleet.source-schema-extract/1","sourceEnvironmentId":"{{environment}}"}""");
+        byte[] ddl = Encoding.UTF8.GetBytes("CREATE TABLE LEGACY.BANK_ACCOUNT (ACCOUNT_ID NUMBER(12) NOT NULL);\n");
+        byte[] programUnits = Encoding.UTF8.GetBytes("CREATE OR REPLACE PROCEDURE LEGACY.POST_TXN IS BEGIN NULL; END;\n");
+        byte[] provenance = Encoding.UTF8.GetBytes(
+            $$"""{"record":"fleet.source-schema-preparation/1","sourceEnvironmentId":"{{environment}}","profileHash":"{{hash}}"}""");
+
+        string folder = $"{SourceRoot}/{PreparedSchemaTrustStore.PreparedFolder}";
+        string ddlPath = $"{folder}/{environment}{PreparedSchemaTrustStore.SchemaDdlSuffix}";
+        string programUnitPath = $"{folder}/{environment}{PreparedSchemaTrustStore.ProgramUnitSuffix}";
+        string provenancePath = $"{folder}/{environment}{PreparedSchemaTrustStore.ProvenanceSuffix}";
+
+        workspace.WriteBytes(ddlPath, ddl);
+        workspace.WriteBytes(programUnitPath, programUnits);
+        workspace.WriteBytes(provenancePath, provenance);
+
+        Assert.True(
+            PreparedSchemaTrustStore.TryAppend(
+                workspace.Root,
+                ownerBinding ?? s_ownerBinding,
+                new PreparedSchemaClaim(
+                    SourceRoot,
+                    environment,
+                    profileVersion,
+                    hash,
+                    ["LEGACY"],
+                    Sha256(artifact),
+                    artifact.Length,
+                    ddlPath,
+                    Sha256(ddl),
+                    programUnitPath,
+                    Sha256(programUnits),
+                    provenancePath,
+                    Sha256(provenance),
+                    1,
+                    1,
+                    1,
+                    0,
+                    1,
+                    "Stub source gateway for offline tests.",
+                    s_prepared),
+                out string error),
+            error);
+    }
+
     private static byte[] Extraction(
         string alias = Alias,
         string moduleName = "ORDER_ENTRY",
@@ -413,6 +862,7 @@ public class PreparedSourceNormalizationTests
         string programUnits = "[]",
         string lovs = "[]") =>
         Encoding.UTF8.GetBytes($$"""
+
             {
               "generator": "{{SourceGatewayProtocol.ExtractedIrGenerator}}",
               "schemaVersion": "{{SourceGatewayProtocol.ExtractedIrSchemaVersion}}",
@@ -479,4 +929,46 @@ public class PreparedSourceNormalizationTests
             workspace.Root,
             [new SourceNormalizationAdapter()],
             preparedSourceBinding: s_ownerBinding).ExecuteAsync(request, Operator);
+
+    /// <summary>
+    /// Runs one consuming adapter on its own, with no normalization outcome in the context, so what it
+    /// reports is its own decision about the prepared statements and nothing it inherited.
+    /// </summary>
+    private static Task<PhaseExecutionResult> RunAsync(
+        IPhaseAdapter adapter,
+        TemporaryWorkspace workspace,
+        MigrationRunRequest request,
+        string? binding)
+    {
+        PhasePlan plan = MigrationRunPlanner.Plan(request).Phases.Single(phase => phase.Phase == adapter.Phase);
+
+        return adapter.ExecuteAsync(
+            new PhaseExecutionContext(workspace.Root, request.SourceRoot, request.OutputRoot, plan, request, (_, _) => { })
+            {
+                PreparedSourceBinding = binding ?? s_ownerBinding,
+            },
+            CancellationToken.None);
+    }
+
+    private static Task<PhaseExecutionResult> ConvertDatabaseAsync(TemporaryWorkspace workspace, string? binding = null) =>
+        RunAsync(new DatabaseConversionAdapter(), workspace, Request(), binding);
+
+    /// <summary>
+    /// The application conversion is driven from a request declaring no Forms evidence over an estate
+    /// holding no Forms module, so the phase's own normalization prerequisite does not apply and the only
+    /// thing that can refuse the run is the prepared-statement check under test.
+    /// </summary>
+    private static Task<PhaseExecutionResult> ConvertApplicationAsync(TemporaryWorkspace workspace, string? binding = null) =>
+        RunAsync(
+            new ApplicationCodeConversionAdapter(),
+            workspace,
+            Request() with
+            {
+                Evidence =
+                [
+                    Requests.Evidence("EV-SCHEMA", EvidenceKind.DatabaseSchemaExport),
+                    Requests.Evidence("EV-TEST", EvidenceKind.TestBaseline),
+                ],
+            },
+            binding);
 }

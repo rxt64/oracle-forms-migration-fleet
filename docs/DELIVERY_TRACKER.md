@@ -172,6 +172,34 @@ The exact repaired SHA still requires fresh runner CI and Astra review; neither 
 
 ## Current Operational Evidence
 
+### Release Review Repairs, 2026-09-29
+
+Exact candidate `c525315bee0420fdfc24b934aecfb1f5a65471a3` passed all four required
+jobs in [CI run 36606073632](https://github.com/rxt64/oracle-forms-migration-fleet/actions/runs/36606073632);
+deployment was skipped. Independent Astra release review nevertheless returned HOLD:
+normalization rejected legitimate prepared schema files because it read only the Forms
+ledger, and native Forms children inherited gateway database credentials. No credential
+leak was observed; the latter was a static isolation finding.
+
+Application specialists repaired combined ledger admission and rebuilt the Forms child
+environment from a minimal allowlist plus source-pinned settings. Sol QA then identified
+that SQL consumers could still read rejected prepared statements independently of
+normalization. A shared trust check now runs before database/application conversion,
+sandbox data migration, and reconciliation consume reserved prepared SQL. Ordinary
+uploaded SQL remains readable; unrelated Forms failures still do not block it.
+
+Independent Sol QA closed both findings at code/unit scope: 2,070 host tests and 277
+worker tests passed. A final additional reconciliation case passed alongside the sandbox
+case (2/2), proving neither reaches its gateway for tampered prepared SQL. The runtime
+allowlist also explicitly rejects Oracle/ODBC connection settings. These repairs require
+fresh exact-SHA CI and release rereview; earlier CI is not evidence for later code.
+
+Native DLL loading under the restricted environment remains unverified. Source gateway
+private connectivity, TLS, Entra identity, registry grants and secure read-only Oracle
+configuration still need a separately scoped approval and validation. The historical
+lab approval and generated-artifact relay proposal do not approve this gateway. No
+merge, release, source extraction, database write, or GUI migration was performed.
+
 ### Candidate CI and Worker Artifact Retention, 2026-09-29
 
 Draft [PR #36](https://github.com/rxt64/oracle-forms-migration-fleet/pull/36)

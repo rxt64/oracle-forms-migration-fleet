@@ -443,6 +443,81 @@ public sealed class GatewayExtractionTests
         Assert.Contains("could not start", outcome.Failure!, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void A_forms_child_inherits_operating_system_essentials_and_no_credential_of_this_host()
+    {
+        using GatewayWorkspace workspace = new();
+        GatewaySourceEntry entry = workspace.Entry();
+
+        ProcessStartInfo start = new("dotnet");
+
+        start.Environment["PATH"] = "/usr/bin";
+        start.Environment["SystemRoot"] = @"C:\Windows";
+        start.Environment["windir"] = @"C:\Windows";
+        start.Environment["ProgramFiles(x86)"] = @"C:\Program Files (x86)";
+        start.Environment["DOTNET_ROOT"] = @"C:\dotnet";
+        start.Environment["NLS_LANG"] = "AMERICAN_AMERICA.WE8MSWIN1252";
+
+        start.Environment[GatewayWorkspace.OracleConnectionVariable] = GatewayWorkspace.OracleConnectionValue;
+        start.Environment["OFM_GATEWAY_ORACLE_OTHER_SOURCE"] = "Dsn=OTHER;Pwd=also-not-real";
+        start.Environment["AZURE_CLIENT_SECRET"] = "a-secret-that-must-not-travel";
+        start.Environment[GatewayOptions.RegistryVariable] = workspace.RegistryPath;
+        string[] databaseSettings = ["ORACLE_HOME", "TNS_ADMIN", "ODBCINI", "ODBCSYSINI"];
+        foreach (string setting in databaseSettings)
+        {
+            start.Environment[setting] = workspace.Elsewhere;
+        }
+
+        ChildProcessExtractionRunner.BuildEnvironment(start, entry, TimeSpan.FromMinutes(2));
+
+        Assert.Equal("/usr/bin", start.Environment["PATH"]);
+        Assert.Equal(@"C:\Windows", start.Environment["SystemRoot"]);
+        Assert.Equal(@"C:\Windows", start.Environment["windir"]);
+        Assert.Equal(@"C:\Program Files (x86)", start.Environment["ProgramFiles(x86)"]);
+        Assert.Equal(@"C:\dotnet", start.Environment["DOTNET_ROOT"]);
+        Assert.Equal("AMERICAN_AMERICA.WE8MSWIN1252", start.Environment["NLS_LANG"]);
+
+        Assert.False(start.Environment.ContainsKey(GatewayWorkspace.OracleConnectionVariable));
+        Assert.False(start.Environment.ContainsKey("OFM_GATEWAY_ORACLE_OTHER_SOURCE"));
+        Assert.False(start.Environment.ContainsKey("AZURE_CLIENT_SECRET"));
+        Assert.False(start.Environment.ContainsKey(GatewayOptions.RegistryVariable));
+        foreach (string setting in databaseSettings)
+        {
+            Assert.False(start.Environment.ContainsKey(setting));
+        }
+        Assert.DoesNotContain(
+            start.Environment.Values,
+            value => value is not null && value.Contains("Pwd=", StringComparison.OrdinalIgnoreCase));
+
+        Assert.Equal(workspace.InputRoot, start.Environment[WorkerConfiguration.InputRootVariable]);
+        Assert.Equal(workspace.OutputRoot, start.Environment[WorkerConfiguration.OutputRootVariable]);
+        Assert.Equal(workspace.FormsHome, start.Environment[WorkerConfiguration.FormsHomeVariable]);
+        Assert.Equal(GatewayWorkspace.LibrarySha256, start.Environment[WorkerConfiguration.LibraryHashVariable]);
+        Assert.Equal("6.0.8.7.3", start.Environment[WorkerConfiguration.LibraryVersionVariable]);
+        Assert.Equal("120", start.Environment[WorkerConfiguration.TimeoutVariable]);
+    }
+
+    [Fact]
+    public void A_forms_child_environment_is_rebuilt_from_scratch_for_every_source_entry()
+    {
+        using GatewayWorkspace workspace = new();
+        ProcessStartInfo start = new("dotnet");
+
+        start.Environment[WorkerConfiguration.InputRootVariable] = workspace.Elsewhere;
+        start.Environment[WorkerConfiguration.FormsHomeVariable] = workspace.Elsewhere;
+        start.Environment[WorkerConfiguration.LibraryHashVariable] = new string('f', 64);
+        start.Environment[OracleSourceConfiguration.ConnectionStringVariable] = "Dsn=STALE;Pwd=also-not-real";
+        start.Environment[OracleSourceConfiguration.AllowlistVariable] = "SOMEONE_ELSE";
+
+        ChildProcessExtractionRunner.BuildEnvironment(start, workspace.Entry(), TimeSpan.FromMinutes(2));
+
+        Assert.Equal(workspace.InputRoot, start.Environment[WorkerConfiguration.InputRootVariable]);
+        Assert.Equal(workspace.FormsHome, start.Environment[WorkerConfiguration.FormsHomeVariable]);
+        Assert.Equal(GatewayWorkspace.LibrarySha256, start.Environment[WorkerConfiguration.LibraryHashVariable]);
+        Assert.False(start.Environment.ContainsKey(OracleSourceConfiguration.ConnectionStringVariable));
+        Assert.False(start.Environment.ContainsKey(OracleSourceConfiguration.AllowlistVariable));
+    }
+
     private static GatewayFormsModuleRequest Request(
         string sourceEnvironmentId = GatewayWorkspace.SourceId,
         string release = GatewayWorkspace.Release,

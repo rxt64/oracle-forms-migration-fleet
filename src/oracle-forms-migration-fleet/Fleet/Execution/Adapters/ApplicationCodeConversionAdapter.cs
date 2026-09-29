@@ -53,6 +53,11 @@ public sealed class ApplicationCodeConversionAdapter(IArtifactReviewer? reviewer
             return PhaseExecutionResult.Failure($"The source root '{sourceRoot}' does not exist in the workspace. Nothing was generated.");
         }
 
+        if (PreparedSchemaConsumption.Refusal(context, sourceRoot, "nothing was generated") is { } untrusted)
+        {
+            return PhaseExecutionResult.Failure(untrusted);
+        }
+
         bool formsApplies;
         try
         {

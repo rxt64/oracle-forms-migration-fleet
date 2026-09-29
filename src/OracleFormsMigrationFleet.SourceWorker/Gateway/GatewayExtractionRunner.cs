@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Text.Json;
 
 namespace OracleFormsMigrationFleet.SourceWorker.Gateway;
@@ -32,6 +33,15 @@ public interface IGatewayExtractionRunner
 /// from configuration, so there is nothing to inject into: the only thing the caller influences is the
 /// content of the JSON request written to the child's standard input, and the worker validates that
 /// against its own configuration before it opens anything.
+///
+/// The child's environment is BUILT, not inherited, for the same reason it is on the schema runner beside
+/// this one. <see cref="ProcessStartInfo.Environment"/> starts as a copy of the gateway's own, which on a
+/// real host carries every registered source's <c>OFM_GATEWAY_ORACLE_*</c> connect string and whatever
+/// else the platform put there. Removing the six worker variables left the rest in place, so a Forms
+/// extraction — which never opens a database and needs no credential at all — ran with the credentials of
+/// every source in the registry in reach of a native library that can execute module code. The environment
+/// is cleared and repopulated from a fixed operating-system and runtime list plus the worker settings this
+/// one registry entry authorizes.
 /// </summary>
 public sealed class ChildProcessExtractionRunner(
     GatewayOptions options,
@@ -55,20 +65,7 @@ public sealed class ChildProcessExtractionRunner(
         start.UseShellExecute = false;
         start.CreateNoWindow = true;
 
-        // The child gets exactly the worker settings this registry entry authorizes. Inherited values are
-        // cleared first so a variable left in the gateway's own environment cannot widen the child's reach.
-        foreach (string variable in s_workerVariables)
-        {
-            start.Environment.Remove(variable);
-        }
-
-        start.Environment[WorkerConfiguration.InputRootVariable] = entry.InputRoot;
-        start.Environment[WorkerConfiguration.OutputRootVariable] = entry.OutputRoot;
-        start.Environment[WorkerConfiguration.FormsHomeVariable] = entry.FormsHome;
-        start.Environment[WorkerConfiguration.LibraryHashVariable] = entry.ApprovedLibrarySha256;
-        start.Environment[WorkerConfiguration.LibraryVersionVariable] = entry.ApprovedLibraryFileVersion;
-        start.Environment[WorkerConfiguration.TimeoutVariable] =
-            ((int)options.ExtractionTimeout.TotalSeconds).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        BuildEnvironment(start, entry, options.ExtractionTimeout);
 
         byte[] payload = JsonSerializer.SerializeToUtf8Bytes(request, WorkerProtocol.Json);
 
@@ -138,15 +135,58 @@ public sealed class ChildProcessExtractionRunner(
     /// <summary>Standard error is drained so the child cannot block on a full pipe; the bytes are not reported.</summary>
     private const int DiagnosticByteCap = 64 * 1024;
 
-    private static readonly string[] s_workerVariables =
+    /// <summary>
+    /// The only inherited variables. They are what a .NET host needs to start and what the Windows loader
+    /// and the native Forms runtime read once it has: <c>ifd2f60.dll</c> is loaded with
+    /// <c>LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32</c>, so the system root is what
+    /// resolves its system dependencies, and the Forms home comes from the registry entry rather than from
+    /// here. No connection variable is on this list, and neither is anything that carries a credential:
+    /// module extraction reads a file and passes the load-from-database flag as zero, so it has no use for
+    /// one. Everything absent is dropped.
+    /// </summary>
+    public static readonly string[] InheritedVariables =
     [
-        WorkerConfiguration.InputRootVariable,
-        WorkerConfiguration.OutputRootVariable,
-        WorkerConfiguration.FormsHomeVariable,
-        WorkerConfiguration.LibraryHashVariable,
-        WorkerConfiguration.LibraryVersionVariable,
-        WorkerConfiguration.TimeoutVariable,
+        "PATH", "PATHEXT", "SystemRoot", "SystemDrive", "windir", "ComSpec", "TEMP", "TMP",
+        "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "OS",
+        "ProgramData", "ProgramFiles", "ProgramFiles(x86)", "CommonProgramFiles", "CommonProgramFiles(x86)",
+        "HOME", "LANG", "LC_ALL", "LD_LIBRARY_PATH",
+        "DOTNET_ROOT", "DOTNET_ROOT(x86)", "DOTNET_HOST_PATH", "DOTNET_BUNDLE_EXTRACT_BASE_DIR",
+        "NLS_LANG",
     ];
+
+    /// <summary>
+    /// Replaces the child's inherited environment with the operating-system and runtime essentials plus the
+    /// worker settings <paramref name="entry"/> authorizes. Exposed so a test can assert what a child would
+    /// receive without spawning one.
+    /// </summary>
+    public static void BuildEnvironment(ProcessStartInfo start, GatewaySourceEntry entry, TimeSpan timeout)
+    {
+        ArgumentNullException.ThrowIfNull(start);
+        ArgumentNullException.ThrowIfNull(entry);
+
+        Dictionary<string, string?> inherited = new(StringComparer.OrdinalIgnoreCase);
+        foreach (string name in InheritedVariables)
+        {
+            if (start.Environment.TryGetValue(name, out string? value) && value is { Length: > 0 })
+            {
+                inherited[name] = value;
+            }
+        }
+
+        start.Environment.Clear();
+        foreach ((string name, string? value) in inherited)
+        {
+            start.Environment[name] = value;
+        }
+
+        start.Environment[WorkerConfiguration.InputRootVariable] = entry.InputRoot;
+        start.Environment[WorkerConfiguration.OutputRootVariable] = entry.OutputRoot;
+        start.Environment[WorkerConfiguration.FormsHomeVariable] = entry.FormsHome;
+        start.Environment[WorkerConfiguration.LibraryHashVariable] = entry.ApprovedLibrarySha256;
+        start.Environment[WorkerConfiguration.LibraryVersionVariable] = entry.ApprovedLibraryFileVersion;
+        start.Environment[WorkerConfiguration.TimeoutVariable] =
+            ((int)timeout.TotalSeconds).ToString(CultureInfo.InvariantCulture);
+    }
 
     /// <summary>
     /// The child is this executable. A framework-dependent build is launched through the same host that is
@@ -216,7 +256,8 @@ public sealed class ChildProcessExtractionRunner(
 
     /// <summary>Non-secret description of how extraction is invoked, safe to log at startup.</summary>
     public const string Description =
-        "Extraction runs as a child process of this executable under a kill-tree time budget with a bounded result document.";
+        "Extraction runs as a child process of this executable with a rebuilt environment, under a kill-tree " +
+        "time budget with a bounded result document.";
 }
 
 /// <summary>

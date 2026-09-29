@@ -44,6 +44,11 @@ public sealed class DataReconciliationAdapter(IDataMigrationGateway? gateway = n
             return PhaseExecutionResult.Failure($"The source root '{sourceRoot}' does not exist in the workspace.");
         }
 
+        if (PreparedSchemaConsumption.Refusal(context, sourceRoot, "nothing was reconciled and nothing was attested") is { } untrusted)
+        {
+            return PhaseExecutionResult.Failure(untrusted);
+        }
+
         Dictionary<string, long> expected = new(StringComparer.Ordinal);
         Dictionary<string, List<(IReadOnlyList<string> Columns, IReadOnlyList<string> Values)>> rowsByTable = new(StringComparer.Ordinal);
         List<OracleSchema> schemas = [];

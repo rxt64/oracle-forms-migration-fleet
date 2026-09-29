@@ -64,6 +64,11 @@ public sealed class DatabaseConversionAdapter(
                 $"The source root '{sourceRoot}' does not exist in the workspace. Nothing was converted.");
         }
 
+        if (PreparedSchemaConsumption.Refusal(context, sourceRoot, "nothing was converted and nothing was written") is { } untrusted)
+        {
+            return PhaseExecutionResult.Failure(untrusted);
+        }
+
         List<string> sources = [];
         List<OracleSchema> schemas = [];
         List<(string Path, OracleSchema Schema)> parsedScripts = [];

@@ -335,11 +335,11 @@ public sealed class SourceNormalizationAdapter : IPhaseAdapter
     ///
     /// The checks, in the order a forgery meets them:
     /// <list type="number">
-    /// <item><description>The server's own ledger is read from outside the session copy, so nothing in the
-    /// copy can supply, edit, or reconstruct it. A ledger that exists and cannot be believed is a refusal,
-    /// never an empty one.</description></item>
-    /// <item><description>Every file in the prepared folder has to be named by a claim. An uploaded
-    /// artifact has no claim, so it is refused by its presence alone.</description></item>
+    /// <item><description>The server's own ledgers — one for modules, one for schema statements — are read
+    /// from outside the session copy, so nothing in the copy can supply, edit, or reconstruct either. A
+    /// ledger that exists and cannot be believed is a refusal, never an empty one.</description></item>
+    /// <item><description>Every file in the prepared folder has to be named by a claim in one of them. An
+    /// uploaded artifact has no claim, so it is refused by its presence alone.</description></item>
     /// <item><description>Both files of every claim have to be present and hash to the digests recorded for
     /// them, so a tampered artifact and a commit that stopped half-way are both refused rather than read.</description></item>
     /// <item><description>The artifact is read as the untrusted document it is, and has to be the native
@@ -362,6 +362,13 @@ public sealed class SourceNormalizationAdapter : IPhaseAdapter
             return ([], read.Error);
         }
 
+        PreparedSchemaTrustRead schemaRead = PreparedSchemaTrustStore.Read(context.WorkspaceRoot, context.PreparedSourceBinding);
+
+        if (schemaRead.Ledger is not { } schemaLedger)
+        {
+            return ([], schemaRead.Error);
+        }
+
         List<PreparedSourceClaim> claims =
         [
             .. ledger.Claims
@@ -369,7 +376,14 @@ public sealed class SourceNormalizationAdapter : IPhaseAdapter
                 .OrderBy(claim => claim.ArtifactPath, StringComparer.Ordinal),
         ];
 
-        if (prepared.Count == 0 && claims.Count == 0)
+        List<PreparedSchemaClaim> schemaClaims =
+        [
+            .. schemaLedger.Claims
+                .Where(claim => string.Equals(WorkspacePath.Normalize(claim.SourceRoot), sourceRoot, StringComparison.Ordinal))
+                .OrderBy(claim => claim.SchemaDdlPath, StringComparer.Ordinal),
+        ];
+
+        if (prepared.Count == 0 && claims.Count == 0 && schemaClaims.Count == 0)
         {
             return ([], null);
         }
@@ -381,11 +395,24 @@ public sealed class SourceNormalizationAdapter : IPhaseAdapter
             admitted.Add(WorkspacePath.Normalize(claim.ProvenancePath));
         }
 
+        foreach (PreparedSchemaClaim claim in schemaClaims)
+        {
+            foreach ((string path, _) in SchemaFiles(claim))
+            {
+                admitted.Add(path);
+            }
+        }
+
         List<string> unclaimed = [.. prepared.Select(file => file.RelativePath).Where(path => !admitted.Contains(path))];
 
         if (unclaimed.Count > 0)
         {
             return ([], Unclaimed(unclaimed));
+        }
+
+        if (AdmitSchema(context, claims, schemaClaims) is { } schemaRejection)
+        {
+            return ([], schemaRejection);
         }
 
         List<NativeModule> modules = [];
@@ -474,21 +501,29 @@ public sealed class SourceNormalizationAdapter : IPhaseAdapter
             "Remove them and prepare the modules from the workbench, which is what records the server-side claim that makes them readable.";
     }
 
+    private enum PreparedFileState
+    {
+        Intact,
+        Missing,
+        Altered,
+        Undigestible,
+    }
+
     /// <summary>
-    /// Why the bytes on disk are not the bytes the claim was recorded over, or nothing.
+    /// Whether the bytes on disk are the bytes a claim was recorded over.
     ///
     /// A missing file is the shape a commit that stopped between recording the claim and renaming the
     /// artifact leaves behind, and a short or altered one is the shape editing it leaves behind. Both are
     /// refusals with the same consequence, because the claim is what makes the file readable at all.
+    ///
+    /// <paramref name="expectedBytes"/> is null where the claim recorded only a digest. The digest is the
+    /// invariant; the length is a second reading of the same fact where one was written down.
     /// </summary>
-    private static string? Intact(PhaseExecutionContext context, string path, string expectedSha256, int expectedBytes)
+    private static PreparedFileState Observe(PhaseExecutionContext context, string path, string expectedSha256, int? expectedBytes)
     {
         if (!context.Workspace.FileExists(path))
         {
-            return
-                $"This server recorded preparing `{path}` into this source copy and the file is not there. A prepared artifact and the " +
-                "record of it are committed together, so a record without its bytes is an incomplete admission rather than a smaller " +
-                "estate. Nothing was normalized. Prepare the module again from the workbench.";
+            return PreparedFileState.Missing;
         }
 
         try
@@ -496,16 +531,113 @@ public sealed class SourceNormalizationAdapter : IPhaseAdapter
             string observed = context.Workspace.Sha256(path, MaxPreparedArtifactBytes);
             long length = new FileInfo(context.Workspace.Resolve(path)).Length;
 
-            return string.Equals(observed, expectedSha256, StringComparison.Ordinal) && length == expectedBytes
-                ? null
-                : $"`{path}` does not hash to the digest this server recorded when it admitted those bytes. The file in this source copy " +
-                  "is not the artifact the source gateway returned, so nothing was normalized and no module was read from it.";
+            return string.Equals(observed, expectedSha256, StringComparison.Ordinal)
+                && (expectedBytes is not { } bytes || length == bytes)
+                    ? PreparedFileState.Intact
+                    : PreparedFileState.Altered;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or WorkspaceLimitExceededException or WorkspacePathException)
         {
-            return $"`{path}` could not be digested against the record this server holds for it, so nothing was normalized.";
+            return PreparedFileState.Undigestible;
         }
     }
+
+    /// <summary>Why the module artifact on disk is not the one the claim was recorded over, or nothing.</summary>
+    private static string? Intact(PhaseExecutionContext context, string path, string expectedSha256, int expectedBytes) =>
+        Observe(context, path, expectedSha256, expectedBytes) switch
+        {
+            PreparedFileState.Missing =>
+                $"This server recorded preparing `{path}` into this source copy and the file is not there. A prepared artifact and the " +
+                "record of it are committed together, so a record without its bytes is an incomplete admission rather than a smaller " +
+                "estate. Nothing was normalized. Prepare the module again from the workbench.",
+            PreparedFileState.Altered =>
+                $"`{path}` does not hash to the digest this server recorded when it admitted those bytes. The file in this source copy " +
+                "is not the artifact the source gateway returned, so nothing was normalized and no module was read from it.",
+            PreparedFileState.Undigestible =>
+                $"`{path}` could not be digested against the record this server holds for it, so nothing was normalized.",
+            _ => null,
+        };
+
+    /// <summary>The files one admitted schema claim covers, each with the digest recorded for it.</summary>
+    private static IEnumerable<(string Path, string Sha256)> SchemaFiles(PreparedSchemaClaim claim)
+    {
+        yield return (WorkspacePath.Normalize(claim.SchemaDdlPath), claim.SchemaDdlSha256);
+        yield return (WorkspacePath.Normalize(claim.ProvenancePath), claim.ProvenanceSha256);
+
+        if (claim.ProgramUnitPath is { Length: > 0 } units && claim.ProgramUnitSha256 is { Length: > 0 } digest)
+        {
+            yield return (WorkspacePath.Normalize(units), digest);
+        }
+    }
+
+    /// <summary>
+    /// Decides whether the prepared schema statements in this copy are the ones this server admitted.
+    ///
+    /// A module claim is pinned to the bytes of a file in the estate. A schema extraction has no such
+    /// file, because its original source is the database the source environment profile names, so the
+    /// profile IS that pin: the same immutable source environment, version and canonical hash the module
+    /// claims are held to. A copy carrying statements prepared against a different profile describes two
+    /// source environments, and one estate cannot have come from both.
+    ///
+    /// Nothing is read out of these files here. The schema half is admitted so that a combined
+    /// preparation stops presenting itself as an upload; converting it remains the schema phase's work.
+    /// </summary>
+    private static string? AdmitSchema(
+        PhaseExecutionContext context,
+        IReadOnlyList<PreparedSourceClaim> modules,
+        IReadOnlyList<PreparedSchemaClaim> schemas)
+    {
+        if (schemas.Count == 0)
+        {
+            return null;
+        }
+
+        (string Subject, string Environment, int Version, string Hash) pinned = modules.Count > 0
+            ? ($"`{modules[0].ModuleAlias}`", modules[0].SourceEnvironmentId, modules[0].ProfileVersion, modules[0].ProfileHash)
+            : ($"`{schemas[0].SchemaDdlPath}`", schemas[0].SourceEnvironmentId, schemas[0].ProfileVersion, schemas[0].ProfileHash);
+
+        foreach (PreparedSchemaClaim claim in schemas)
+        {
+            foreach ((string path, string expected) in SchemaFiles(claim))
+            {
+                if (SchemaIntact(context, path, expected) is { } rejection)
+                {
+                    return rejection;
+                }
+            }
+
+            if (!string.Equals(claim.SourceEnvironmentId, pinned.Environment, StringComparison.Ordinal)
+                || claim.ProfileVersion != pinned.Version
+                || !string.Equals(claim.ProfileHash, pinned.Hash, StringComparison.Ordinal))
+            {
+                return
+                    $"`{claim.SchemaDdlPath}` was prepared against source environment '{claim.SourceEnvironmentId}' version " +
+                    $"{claim.ProfileVersion.ToString(CultureInfo.InvariantCulture)} and {pinned.Subject} against " +
+                    $"'{pinned.Environment}' version {pinned.Version.ToString(CultureInfo.InvariantCulture)}. A source environment " +
+                    "profile is an immutable version because the release and schema allowlist behind it are what an operator approved, " +
+                    "so this copy holds extractions of two different source environments and nothing was normalized. Take a fresh copy " +
+                    "of the source and prepare every module and its schema against the current profile version.";
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Why the schema statements on disk are not the ones the claim was recorded over, or nothing.</summary>
+    private static string? SchemaIntact(PhaseExecutionContext context, string path, string expectedSha256) =>
+        Observe(context, path, expectedSha256, expectedBytes: null) switch
+        {
+            PreparedFileState.Missing =>
+                $"This server recorded preparing `{path}` into this source copy and the file is not there. Prepared schema statements " +
+                "and the record of them are committed together, so a record without its bytes is an incomplete admission rather than a " +
+                "smaller estate. Nothing was normalized. Prepare the source schema again from the workbench.",
+            PreparedFileState.Altered =>
+                $"`{path}` does not hash to the digest this server recorded when it admitted those bytes. The schema statements in this " +
+                "source copy are not the ones the source gateway returned, so nothing was normalized.",
+            PreparedFileState.Undigestible =>
+                $"`{path}` could not be digested against the record this server holds for it, so nothing was normalized.",
+            _ => null,
+        };
 
     /// <summary>
     /// Digests every form-module file in the estate, grouped by digest.
