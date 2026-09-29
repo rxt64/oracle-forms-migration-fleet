@@ -19,8 +19,13 @@ namespace OracleFormsMigrationFleet.Fleet.Execution.Adapters;
 ///
 /// The namespace is what is trusted, not the extension. SQL an operator uploaded with their estate is
 /// ordinary source and stays readable without any claim; SQL that presents itself as prepared output, by
-/// sitting in the folder only this server writes into, has to be prepared output. Nothing outside that
-/// folder is examined here, and a copy that has no prepared statements at all is not held to any of it.
+/// sitting in the folder only this server writes into, has to be prepared output.
+///
+/// A claim is recorded against the source root it was prepared for, so the reserved folder this checks is
+/// the one belonging to the root the run selected. Consumers walk the whole selected tree, which means a
+/// reserved folder sitting anywhere else under it carries statements no claim in this run could cover,
+/// and those are refused outright rather than mapped to some other root's record. A copy that holds no
+/// reserved folder at all, and no outstanding claim over one, is not held to any of this.
 /// </summary>
 public static class PreparedSchemaConsumption
 {
@@ -30,6 +35,15 @@ public static class PreparedSchemaConsumption
     /// files, so a folder larger than this holds files no claim could cover.
     /// </summary>
     private const int MaxPreparedFiles = 8_192;
+
+    /// <summary>The ceiling every source-reading adapter enumerates the selected tree with.</summary>
+    private const int MaxSourceFiles = 20_000;
+
+    /// <summary>How many misplaced reserved files a refusal names before it stops listing them.</summary>
+    private const int MaxNamedStrays = 16;
+
+    /// <summary>The leading segment of <see cref="PreparedSchemaTrustStore.PreparedFolder"/>, matched whole.</summary>
+    private const string ReservedSegment = ".fleet-source";
 
     /// <summary>The protocol's own ceiling on an artifact, so every file this server could have admitted is digestible here.</summary>
     private const long MaxPreparedFileBytes = SourceGatewayProtocol.MaxArtifactBytes;
@@ -53,6 +67,11 @@ public static class PreparedSchemaConsumption
 
         string preparedRoot = Folder(sourceRoot);
 
+        if (Misplaced(context, sourceRoot, preparedRoot, consequence) is { } elsewhere)
+        {
+            return elsewhere;
+        }
+
         IReadOnlyList<WorkspaceFile> reserved;
         try
         {
@@ -71,7 +90,8 @@ public static class PreparedSchemaConsumption
                 $"server admitted could not be established and {consequence}.";
         }
 
-        if (!reserved.Any(file => OracleSourceFile.IsSqlText(file.RelativePath)))
+        bool statements = reserved.Any(file => OracleSourceFile.IsSqlText(file.RelativePath));
+        if (!statements && PreparedSchemaTrustStore.LedgerPath(context.WorkspaceRoot) is null)
         {
             return null;
         }
@@ -101,6 +121,11 @@ public static class PreparedSchemaConsumption
                 .Where(claim => string.Equals(WorkspacePath.Normalize(claim.SourceRoot), sourceRoot, StringComparison.Ordinal))
                 .OrderBy(claim => claim.SchemaDdlPath, StringComparer.Ordinal),
         ];
+
+        if (!statements && schemas.Count == 0)
+        {
+            return null;
+        }
 
         HashSet<string> admitted = new(StringComparer.Ordinal);
         foreach (PreparedSourceClaim claim in modules)
@@ -154,6 +179,75 @@ public static class PreparedSchemaConsumption
             yield return (WorkspacePath.Normalize(units), digest);
         }
     }
+
+    /// <summary>
+    /// Why the selected tree holds a reserved prepared-source folder somewhere other than its own, or
+    /// nothing.
+    ///
+    /// Selecting a root above the one a source was prepared against leaves the claims filed under the
+    /// deeper root while every consumer still walks down into it, so the statements are read as ordinary
+    /// source and the record that would have judged them is never consulted. Mapping the deeper folder
+    /// back to its own claims would make one run trust records it was not given, so the layout is refused
+    /// instead and the operator selects the root the source was prepared against.
+    /// </summary>
+    private static string? Misplaced(PhaseExecutionContext context, string sourceRoot, string preparedRoot, string consequence)
+    {
+        IReadOnlyList<WorkspaceFile> tree;
+        try
+        {
+            tree = context.Workspace.EnumerateFiles(sourceRoot, MaxSourceFiles);
+        }
+        catch (WorkspaceLimitExceededException limit)
+        {
+            return
+                "Whether this source copy holds prepared-source folders other than " +
+                $"`{preparedRoot}` could not be established from a tree that was never fully listed, so {consequence}: {limit.Message}";
+        }
+        catch (WorkspacePathException)
+        {
+            return
+                "Whether this source copy holds prepared-source folders other than " +
+                $"`{preparedRoot}` could not be established, because the selected source root could not be resolved safely, so " +
+                $"{consequence}.";
+        }
+
+        List<string> stray = [];
+        foreach (WorkspaceFile file in tree)
+        {
+            string path = WorkspacePath.Normalize(file.RelativePath).TrimStart('/');
+
+            if (!Reserved(path))
+            {
+                continue;
+            }
+
+            if (WorkspacePath.IsWithin(preparedRoot, path)
+                && path.Length > preparedRoot.Length
+                && !Reserved(path[(preparedRoot.Length + 1)..]))
+            {
+                continue;
+            }
+
+            stray.Add(path);
+            if (stray.Count == MaxNamedStrays)
+            {
+                break;
+            }
+        }
+
+        return stray.Count == 0
+            ? null
+            : $"{stray.Count.ToString(CultureInfo.InvariantCulture)} file(s) in this source copy sit in a reserved " +
+                $"prepared-source folder this run does not admit: {string.Join(", ", stray.Select(path => $"`{path}`"))}. " +
+                $"`{preparedRoot}` is the only such folder the claims for the selected source root were recorded against, and " +
+                "every phase reading this tree would take the rest as ordinary source with no record standing behind it. " +
+                $"Nothing was read and {consequence}. Select the source root the statements were prepared against, or remove " +
+                "the folders that are not it.";
+    }
+
+    /// <summary>Whether a workspace-relative path carries the reserved folder name as a whole segment.</summary>
+    private static bool Reserved(string path) =>
+        path.Split('/').Any(segment => segment.Equals(ReservedSegment, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>Why the statements on disk are not the ones the claim was recorded over, or nothing.</summary>
     private static string? Intact(PhaseExecutionContext context, string path, string expectedSha256, string consequence)

@@ -19,6 +19,7 @@ public class PreparedSourceNormalizationTests
 {
     private const string Operator = "migration-operator@contoso.com";
     private const string SourceRoot = "legacy/forms";
+    private const string OuterRoot = "legacy";
     private const string Environment = "legacy-order-entry";
     private const string ModulePath = "legacy/forms/ui/ORDER_ENTRY.fmb";
     private const string Alias = "ORDER_ENTRY.fmb";
@@ -538,12 +539,19 @@ public class PreparedSourceNormalizationTests
         Assert.False(workspace.Exists(ConvertedSchemaPath));
     }
 
-    [Fact]
-    public async Task Database_conversion_refuses_statements_prepared_under_another_owner()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Database_conversion_refuses_statements_prepared_under_another_owner(bool removeStatements)
     {
         using TemporaryWorkspace workspace = Estate();
         Prepare(workspace);
         PrepareSchema(workspace);
+        if (removeStatements)
+        {
+            File.Delete(workspace.Absolute(SchemaDdlPath));
+            File.Delete(workspace.Absolute(SchemaProgramUnitPath));
+        }
 
         PhaseExecutionResult result = await ConvertDatabaseAsync(
             workspace,
@@ -554,12 +562,19 @@ public class PreparedSourceNormalizationTests
         Assert.False(workspace.Exists(ConvertedSchemaPath));
     }
 
-    [Fact]
-    public async Task Database_conversion_refuses_when_the_schema_ledger_cannot_be_believed()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Database_conversion_refuses_when_the_schema_ledger_cannot_be_believed(bool removeStatements)
     {
         using TemporaryWorkspace workspace = Estate();
         Prepare(workspace);
         PrepareSchema(workspace);
+        if (removeStatements)
+        {
+            File.Delete(workspace.Absolute(SchemaDdlPath));
+            File.Delete(workspace.Absolute(SchemaProgramUnitPath));
+        }
 
         File.WriteAllText(PreparedSchemaTrustStore.LedgerPath(workspace.Root)!, "{ not a document this server wrote");
 
@@ -691,6 +706,106 @@ public class PreparedSourceNormalizationTests
         Assert.False(result.Succeeded);
         Assert.Contains("does not hash to the digest this server recorded", result.FailureReason!, StringComparison.Ordinal);
         Assert.False(gateway.Called);
+    }
+
+    /// <summary>
+    /// Selecting a root above the one the source was prepared against. The reserved folder for the
+    /// selected root is empty, so nothing here was ever claimed for it, while every consumer walks the
+    /// whole tree and reads the nested statements as ordinary source.
+    /// </summary>
+    [Theory]
+    [InlineData("database")]
+    [InlineData("application")]
+    [InlineData("sandbox")]
+    [InlineData("reconciliation")]
+    public async Task Every_consumer_refuses_prepared_statements_nested_below_the_selected_root(string consumer)
+    {
+        using TemporaryWorkspace workspace = new();
+        workspace.WriteFile("legacy/db/001_schema.sql", OracleSamples.Schema);
+        workspace.WriteFile(
+            $"{SourceRoot}/{PreparedSchemaTrustStore.PreparedFolder}/{Environment}{PreparedSchemaTrustStore.SchemaDdlSuffix}",
+            "CREATE TABLE LEGACY.BACKDOOR (ACCOUNT_ID NUMBER(12));\n");
+
+        PhaseExecutionResult result = await ConsumeAsync(consumer, workspace, Request() with { SourceRoot = OuterRoot });
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("reserved prepared-source folder this run does not admit", result.FailureReason!, StringComparison.Ordinal);
+        Assert.Contains($"{SourceRoot}/{PreparedSchemaTrustStore.PreparedFolder}", result.FailureReason!, StringComparison.Ordinal);
+        Assert.False(workspace.Exists(ConvertedSchemaPath));
+    }
+
+    /// <summary>
+    /// Deleting every prepared statement, program units included, while the records over them stand. The
+    /// copy then holds no prepared SQL at all, and concluding from that alone that there is nothing to
+    /// check would convert the ordinary source beside it with outstanding admissions unaccounted for.
+    /// </summary>
+    [Theory]
+    [InlineData("database")]
+    [InlineData("application")]
+    [InlineData("sandbox")]
+    [InlineData("reconciliation")]
+    public async Task Every_consumer_refuses_when_every_prepared_statement_was_deleted(string consumer)
+    {
+        using TemporaryWorkspace workspace = Estate();
+        Prepare(workspace);
+        PrepareSchema(workspace);
+
+        File.Delete(workspace.Absolute(SchemaDdlPath));
+        File.Delete(workspace.Absolute(SchemaProgramUnitPath));
+
+        PhaseExecutionResult result = await ConsumeAsync(consumer, workspace, Request());
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("incomplete admission", result.FailureReason!, StringComparison.Ordinal);
+        Assert.False(workspace.Exists(ConvertedSchemaPath));
+    }
+
+    /// <summary>
+    /// The reserved name is a whole path segment, so a sibling that merely starts with it is an operator's
+    /// own folder and the SQL in it is ordinary source that converts.
+    /// </summary>
+    [Fact]
+    public async Task A_folder_whose_name_only_resembles_the_reserved_one_stays_ordinary_source()
+    {
+        using TemporaryWorkspace workspace = new();
+        workspace.WriteFile($"{OuterRoot}/.fleet-source-archive/extraction/001_schema.sql", OracleSamples.Schema);
+        workspace.WriteFile($"{SourceRoot}/.fleet-sourced/extraction/notes.sql", "CREATE TABLE LEGACY.NOTES (NOTE_ID NUMBER(12));\n");
+
+        PhaseExecutionResult result = await RunAsync(
+            new DatabaseConversionAdapter(),
+            workspace,
+            Request() with { SourceRoot = OuterRoot },
+            binding: null);
+
+        Assert.True(result.Succeeded, result.FailureReason);
+        Assert.True(workspace.Exists(ConvertedSchemaPath));
+    }
+
+    /// <summary>
+    /// A source root that names nothing. The tree the consumers would walk cannot be listed at all, so
+    /// which reserved folders it holds is unknown, and unknown is refused rather than read as none.
+    /// </summary>
+    [Fact]
+    public void An_empty_source_root_is_refused_rather_than_read_as_holding_no_prepared_folder()
+    {
+        using TemporaryWorkspace workspace = new();
+        workspace.WriteFile(
+            $"{SourceRoot}/{PreparedSchemaTrustStore.PreparedFolder}/{Environment}{PreparedSchemaTrustStore.SchemaDdlSuffix}",
+            "CREATE TABLE LEGACY.BACKDOOR (ACCOUNT_ID NUMBER(12));\n");
+
+        MigrationRunRequest request = Request();
+        PhasePlan plan = MigrationRunPlanner.Plan(request).Phases.Single(phase => phase.Phase == MigrationPhase.DatabaseConversion);
+
+        PhaseExecutionContext context = new(workspace.Root, string.Empty, request.OutputRoot, plan, request, (_, _) => { })
+        {
+            PreparedSourceBinding = s_ownerBinding,
+        };
+
+        string? refusal = PreparedSchemaConsumption.Refusal(context, string.Empty, "nothing was converted");
+
+        Assert.NotNull(refusal);
+        Assert.Contains(PreparedSchemaTrustStore.PreparedFolder, refusal, StringComparison.Ordinal);
+        Assert.Contains("nothing was converted", refusal, StringComparison.Ordinal);
     }
 
     /// <summary>A gateway that fails the test if the phase reaches it.</summary>
@@ -952,6 +1067,45 @@ public class PreparedSourceNormalizationTests
 
     private static Task<PhaseExecutionResult> ConvertDatabaseAsync(TemporaryWorkspace workspace, string? binding = null) =>
         RunAsync(new DatabaseConversionAdapter(), workspace, Request(), binding);
+
+    /// <summary>
+    /// One named consumer of the prepared folder, so a check can be stated once for every phase that
+    /// reads those bytes rather than for whichever one was written down first.
+    /// </summary>
+    private static Task<PhaseExecutionResult> ConsumeAsync(string consumer, TemporaryWorkspace workspace, MigrationRunRequest request) =>
+        consumer switch
+        {
+            "database" => RunAsync(new DatabaseConversionAdapter(), workspace, request, binding: null),
+            "application" => RunAsync(
+                new ApplicationCodeConversionAdapter(),
+                workspace,
+                request with
+                {
+                    Evidence =
+                    [
+                        Requests.Evidence("EV-SCHEMA", EvidenceKind.DatabaseSchemaExport),
+                        Requests.Evidence("EV-TEST", EvidenceKind.TestBaseline),
+                    ],
+                },
+                binding: null),
+            "sandbox" => RunAsync(
+                new SandboxDataMigrationAdapter(new UnreachableDataMigrationGateway()),
+                workspace,
+                Mutating(request),
+                binding: null),
+            _ => RunAsync(
+                new DataReconciliationAdapter(new UnreachableDataMigrationGateway()),
+                workspace,
+                Mutating(request),
+                binding: null),
+        };
+
+    private static MigrationRunRequest Mutating(MigrationRunRequest request) =>
+        request with
+        {
+            RequestedMode = ExecutionMode.SandboxMigration,
+            ExecutionApproval = Requests.Approved("release-manager@contoso.com"),
+        };
 
     /// <summary>
     /// The application conversion is driven from a request declaring no Forms evidence over an estate

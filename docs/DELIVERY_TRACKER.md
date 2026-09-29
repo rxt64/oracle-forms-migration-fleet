@@ -172,6 +172,30 @@ The exact repaired SHA still requires fresh runner CI and Astra review; neither 
 
 ## Current Operational Evidence
 
+### Latest Guard Repair Checkpoint
+
+Candidate `e569816613a2156a903590e3a39dbf2241c14a42` passed
+[CI run 36615157691](https://github.com/rxt64/oracle-forms-migration-fleet/actions/runs/36615157691).
+Astra rereview closed the original combined-preparation and child-credential findings,
+but kept release HOLD for two consumer-guard bypasses: selecting a parent of a prepared
+source root, and removing every prepared SQL file before consumption.
+
+The follow-up refuses nested reserved layouts and checks outstanding schema claims even
+when all statements are missing. All four consumers have direct nested-root and deleted-SQL
+regressions. Initial focused reproduction: 9 failures; after repair: 52 passing tests.
+A parent follow-up also prevents unreadable or wrong-owner ledgers from being ignored after
+statement deletion. Final local validation: 54 focused tests and all 2,083 host tests pass
+in Release configuration. The unchanged worker/demo suites last passed 277/56 tests during
+the preceding specialist solution run. No new diagnostics were reported.
+
+Independent Sol QA for this last follow-up could not start: the agent service returned
+`403: token expired or invalid`. These last changes are locally tested, not independently
+approved. Restore Copilot authentication, rerun Sol QA, obtain exact-candidate CI and Astra
+rereview, and retain release HOLD until those gates close. An unrelated PowerShell process
+held the Debug test assembly open; Release outputs were used without terminating it.
+No earlier CI result, reviewer PASS, or lab approval authorizes this newer candidate or
+gateway installation. The real migration remains NotExecuted.
+
 ### Release Review Repairs, 2026-09-29
 
 Exact candidate `c525315bee0420fdfc24b934aecfb1f5a65471a3` passed all four required
