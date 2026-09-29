@@ -96,6 +96,7 @@ try {
         'platformDatabaseHost',
         'platformDatabaseName',
         'platformDatabaseUser',
+        'targetBackendStack',
         'sandboxDatabaseHost',
         'sandboxDatabaseName',
         'sandboxDatabaseUser'
@@ -108,6 +109,21 @@ try {
     if ($deploymentParameters.parameters.platformDatabaseName.value -eq $deploymentParameters.parameters.sandboxDatabaseName.value -and
         $deploymentParameters.parameters.platformDatabaseHost.value -eq $deploymentParameters.parameters.sandboxDatabaseHost.value) {
         throw 'The platform authorization store and sandbox migration target must use different PostgreSQL databases.'
+    }
+    if ($deploymentParameters.parameters.targetBackendStack.value -cne 'AspNetCore') {
+        throw "The approved generated-application back end is AspNetCore; refusing '$($deploymentParameters.parameters.targetBackendStack.value)'."
+    }
+    if ($deploymentParameters.parameters.sandboxDatabaseName.value -cne 'ofm_dotnet_pilot') {
+        throw "The approved sandbox database is 'ofm_dotnet_pilot'; refusing '$($deploymentParameters.parameters.sandboxDatabaseName.value)'."
+    }
+    $sandboxSchema = if ($null -eq $deploymentParameters.parameters.sandboxDatabaseSchema) {
+        'public'
+    }
+    else {
+        [string] $deploymentParameters.parameters.sandboxDatabaseSchema.value
+    }
+    if ($sandboxSchema -cne 'public') {
+        throw "The approved sandbox schema is 'public'; refusing '$sandboxSchema'."
     }
 
     Write-Output 'Deploying Container Apps foundation...'

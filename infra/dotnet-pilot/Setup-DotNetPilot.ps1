@@ -26,6 +26,9 @@ param(
     [ValidatePattern('^[A-Za-z0-9._@\-]{1,128}$')]
     [string] $PostgresEntraAdministratorName = '',
 
+    [ValidatePattern('^[A-Za-z0-9._@\-]{1,128}$')]
+    [string] $MigrationPrincipalName = 'id-ofmfleet-web-dev-ykbpnrpd',
+
     [switch] $ApplyFoundation
 )
 
@@ -191,6 +194,9 @@ try {
 
     $identityLiteral = Quote-PostgresLiteral $targetIdentityName
     $identityIdentifier = Quote-PostgresIdentifier $targetIdentityName
+    $migrationIdentityLiteral = Quote-PostgresLiteral $MigrationPrincipalName
+    $migrationIdentityIdentifier = Quote-PostgresIdentifier $MigrationPrincipalName
+    $administratorIdentifier = Quote-PostgresIdentifier $PostgresEntraAdministratorName
     $databaseLiteral = Quote-PostgresLiteral $targetDatabaseName
     $databaseIdentifier = Quote-PostgresIdentifier $targetDatabaseName
 
@@ -199,20 +205,33 @@ try {
         [void](Invoke-PostgresScalar -Database 'postgres' -Sql "select * from pgaadauth_create_principal($identityLiteral, false, false);")
     }
 
+    $migrationPrincipalExists = Invoke-PostgresScalar -Database 'postgres' -Sql "select 1 from pg_roles where rolname = $migrationIdentityLiteral;"
+    if ($migrationPrincipalExists -ne '1') {
+        [void](Invoke-PostgresScalar -Database 'postgres' -Sql "select * from pgaadauth_create_principal($migrationIdentityLiteral, false, false);")
+    }
+
+    [void](Invoke-PostgresScalar -Database 'postgres' -Sql 'revoke connect on database "ofm_platform" from public;')
+    [void](Invoke-PostgresScalar -Database 'postgres' -Sql ('grant connect on database "ofm_platform" to {0};' -f $administratorIdentifier))
+    [void](Invoke-PostgresScalar -Database 'postgres' -Sql ('grant connect on database "ofm_platform" to {0};' -f $migrationIdentityIdentifier))
+
     $databaseOwner = Invoke-PostgresScalar -Database 'postgres' -Sql "select pg_catalog.pg_get_userbyid(datdba) from pg_database where datname = $databaseLiteral;"
     if ([string]::IsNullOrWhiteSpace($databaseOwner)) {
-        [void](Invoke-PostgresScalar -Database 'postgres' -Sql "create database $databaseIdentifier owner $identityIdentifier;")
+        [void](Invoke-PostgresScalar -Database 'postgres' -Sql "create database $databaseIdentifier owner $administratorIdentifier;")
     }
-    elseif (-not [string]::Equals($databaseOwner, $targetIdentityName, [StringComparison]::Ordinal)) {
+    elseif (-not [string]::Equals($databaseOwner, $PostgresEntraAdministratorName, [StringComparison]::Ordinal)) {
         throw "Database '$targetDatabaseName' already exists with owner '$databaseOwner'; refusing to take ownership."
     }
 
     [void](Invoke-PostgresScalar -Database $targetDatabaseName -Sql "revoke connect on database $databaseIdentifier from public;")
-    [void](Invoke-PostgresScalar -Database $targetDatabaseName -Sql "grant connect, create, temporary on database $databaseIdentifier to $identityIdentifier;")
+    [void](Invoke-PostgresScalar -Database $targetDatabaseName -Sql "grant connect, temporary on database $databaseIdentifier to $identityIdentifier;")
+    [void](Invoke-PostgresScalar -Database $targetDatabaseName -Sql "grant connect, temporary on database $databaseIdentifier to $migrationIdentityIdentifier;")
     [void](Invoke-PostgresScalar -Database $targetDatabaseName -Sql 'revoke create on schema public from public;')
     [void](Invoke-PostgresScalar -Database $targetDatabaseName -Sql "grant usage, create on schema public to $identityIdentifier;")
+    [void](Invoke-PostgresScalar -Database $targetDatabaseName -Sql "grant usage, create on schema public to $migrationIdentityIdentifier;")
 
     Write-Output "Foundation prepared for database '$targetDatabaseName' and identity '$targetIdentityName'."
+    Write-Output "Migration access prepared separately for '$MigrationPrincipalName'."
+    Write-Output 'Run database-probe.bicep to prove runtime and migration managed-identity authentication.'
     Write-Output 'No generated application image was built or deployed.'
 }
 finally {

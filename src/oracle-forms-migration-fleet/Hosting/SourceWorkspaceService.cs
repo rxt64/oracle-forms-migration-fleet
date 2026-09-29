@@ -56,6 +56,17 @@ public sealed record TrustedSourceFile(string RelativePath, byte[] Content);
 public sealed record TrustedSourceRead(string SnapshotHash, IReadOnlyList<TrustedSourceFile> Files);
 
 /// <summary>
+/// What an atomic prepared-artifact commit produced.
+///
+/// <paramref name="WorkspacePaths"/> is populated only when <paramref name="Committed"/> is true, and is
+/// in the order the caller supplied its payloads.
+/// </summary>
+public sealed record PreparedCommitResult(bool Committed, IReadOnlyList<string> WorkspacePaths, string Error)
+{
+    public static PreparedCommitResult Refused(string error) => new(false, [], error);
+}
+
+/// <summary>
 /// Acquires a read-only copy of customer source into a per-session sandbox.
 ///
 /// Every workspace is owned by one authenticated principal, lives under a server-generated
@@ -83,6 +94,13 @@ public sealed class SourceWorkspaceService : IDisposable
 
     private readonly ConcurrentDictionary<string, WorkspaceRecord> _workspaces = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, int> _retained = new(StringComparer.Ordinal);
+
+    // One writer at a time per session copy, shared by the module and schema commits. The ledger append
+    // is a read-modify-write over a whole document, so two modules prepared at the same moment would
+    // otherwise each write a ledger built from the state before the other one started, and the second
+    // rename would silently drop the first module's claim while leaving its bytes on disk looking
+    // admitted. Bounded by the number of live workspaces, and released when the workspace is.
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _commitLocks = new(StringComparer.Ordinal);
     private readonly string _root;
     private readonly Timer _sweeper;
 
@@ -257,6 +275,25 @@ public sealed class SourceWorkspaceService : IDisposable
     public SourceWorkspaceSummary? DescribeSummary(string owner, string workspaceId, string sourceRoot) =>
         Scope(owner, workspaceId, sourceRoot)?.Summary;
 
+    /// <summary>
+    /// The identity of the bytes the OPERATOR supplied in a source folder they own, or null when the
+    /// folder is not theirs.
+    ///
+    /// It excludes the prepared-source folder, and that exclusion is the whole point of it existing
+    /// beside <see cref="Describe(string, string, string)"/>. A preparation writes admitted artifacts
+    /// into that folder itself, so binding to the full snapshot would make the fleet's own first commit
+    /// look like the estate changing underneath it — every module after the first in one request, and
+    /// every concurrent preparation, would deny itself. The question a preparation has to ask again
+    /// after a slow gateway call is "is this still the estate I pinned a module out of", and the
+    /// answer must not depend on what this server already admitted into it.
+    ///
+    /// It is server-only and one-way, like every other digest here.
+    /// </summary>
+    public string? SuppliedSourceBinding(string owner, string workspaceId, string sourceRoot) =>
+        Scope(owner, workspaceId, sourceRoot) is { } scoped
+            ? SnapshotRead(scoped.Path, static _ => false, 0, PreparedSourceExclusion).SnapshotHash
+            : null;
+
     private ScopedSource? Scope(string owner, string workspaceId, string sourceRoot)
     {
         if (OwnedSourcePath(owner, workspaceId, sourceRoot) is not { } selected ||
@@ -313,6 +350,410 @@ public sealed class SourceWorkspaceService : IDisposable
             ? record.Path
             : null;
 
+    /// <summary>
+    /// Folder inside a selected source root that holds artifacts the fleet fetched from the source
+    /// gateway. It sits under the source root on purpose: these bytes ARE source now, so they belong to
+    /// the snapshot identity, unlike <see cref="WorkbenchExecution.OutputRoot"/>, which is run output and
+    /// is excluded from it.
+    /// </summary>
+    public const string PreparedSourceRoot = PreparedSourceTrustStore.PreparedFolder;
+
+    /// <summary>
+    /// Writes one artifact the source gateway returned into a source folder the caller owns.
+    ///
+    /// <paramref name="fileName"/> is a single name segment the caller has already validated as an alias;
+    /// it is re-validated here and resolved under the selected folder, so a name that escapes the
+    /// workspace is refused rather than written. Nothing about the remote gateway reaches the filesystem:
+    /// the gateway never supplies a path, and this method never accepts one.
+    /// </summary>
+    public bool TryWritePreparedArtifact(
+        string owner,
+        string workspaceId,
+        string sourceRoot,
+        string fileName,
+        byte[] content,
+        out string workspaceRelativePath,
+        out string error)
+    {
+        ArgumentNullException.ThrowIfNull(content);
+        workspaceRelativePath = string.Empty;
+
+        if (!IsSafeArtifactName(fileName))
+        {
+            error = "The prepared artifact name is not a simple file name.";
+            return false;
+        }
+
+        if (OwnedSourcePath(owner, workspaceId, sourceRoot) is not { } selected)
+        {
+            error = "That source folder is not part of a copy you own.";
+            return false;
+        }
+
+        string folder = Path.Combine(selected, ".fleet-source", "extraction");
+        string full = Path.GetFullPath(Path.Combine(folder, fileName));
+        string prefix = Path.GetFullPath(selected) + Path.DirectorySeparatorChar;
+        if (!full.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            error = "The prepared artifact did not resolve inside the source folder.";
+            return false;
+        }
+
+        try
+        {
+            Directory.CreateDirectory(folder);
+            if (File.Exists(full))
+            {
+                File.SetAttributes(full, FileAttributes.Normal);
+            }
+
+            File.WriteAllBytes(full, content);
+            File.SetAttributes(full, FileAttributes.ReadOnly);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            error = "The prepared artifact could not be written into the session workspace.";
+            return false;
+        }
+
+        string normalized = WorkspacePath.Normalize(sourceRoot);
+        workspaceRelativePath = normalized.Length == 0
+            ? $"{PreparedSourceRoot}/{fileName}"
+            : $"{normalized}/{PreparedSourceRoot}/{fileName}";
+        error = string.Empty;
+        return true;
+    }
+
+    /// <summary>
+    /// Writes an admitted extraction and its provenance into a source folder the caller owns, and records
+    /// the server-side claim that makes them consumable.
+    ///
+    /// The pair used to be two independent writes, so an artifact could land and its provenance could
+    /// fail, leaving a file in the estate that the normalization phase would later find with nothing
+    /// beside it. Ordering alone cannot fix that, because no ordering survives the process stopping
+    /// between two writes. What fixes it is that the claim is the whole of the trust decision: a file
+    /// with no claim is never read as source, and a claim whose files do not hash to the digests it
+    /// records is refused with a reason rather than read.
+    ///
+    /// So the commit is: take the copy's writer lock, re-establish the caller's authority, both payloads
+    /// to temporary names, then the claim, then the renames. A failure after the claim withdraws it, and
+    /// a process that dies between the two leaves a claim whose files are missing or short — which the
+    /// reader refuses, rather than an artifact that looks admitted.
+    ///
+    /// <paramref name="revalidate"/> is called while the lock is held and immediately before anything is
+    /// recorded. It is where the caller re-checks the things that were true before it went out to the
+    /// gateway — the actor's role, the source profile version and hash, and the copy's own identity — so
+    /// authority that lapsed while a slow external call was in flight denies the write instead of being
+    /// published under. Returning a reason denies the commit and leaves no file and no claim.
+    /// </summary>
+    public async Task<PreparedCommitResult> CommitPreparedModuleAsync(
+        string owner,
+        string workspaceId,
+        string sourceRoot,
+        string artifactFileName,
+        byte[] artifact,
+        string provenanceFileName,
+        byte[] provenance,
+        Func<string, string, PreparedSourceClaim> claim,
+        Func<CancellationToken, Task<string?>> revalidate,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(artifact);
+        ArgumentNullException.ThrowIfNull(provenance);
+        ArgumentNullException.ThrowIfNull(claim);
+        ArgumentNullException.ThrowIfNull(revalidate);
+
+        if (!IsSafeArtifactName(artifactFileName) || !IsSafeArtifactName(provenanceFileName))
+        {
+            return PreparedCommitResult.Refused("The prepared artifact name is not a simple file name.");
+        }
+
+        string ownerBinding = PreparedSourceOwnerBinding.Derive(owner);
+        SemaphoreSlim gate = CommitLock(workspaceId);
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (OwnedSourcePath(owner, workspaceId, sourceRoot) is not { } selected ||
+                !_workspaces.TryGetValue(workspaceId, out WorkspaceRecord? record))
+            {
+                return PreparedCommitResult.Refused("That source folder is not part of a copy you own.");
+            }
+
+            string folder = Path.Combine(selected, ".fleet-source", "extraction");
+            string prefix = Path.GetFullPath(selected) + Path.DirectorySeparatorChar;
+            string artifactFull = Path.GetFullPath(Path.Combine(folder, artifactFileName));
+            string provenanceFull = Path.GetFullPath(Path.Combine(folder, provenanceFileName));
+
+            if (!artifactFull.StartsWith(prefix, StringComparison.Ordinal) ||
+                !provenanceFull.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                return PreparedCommitResult.Refused("The prepared artifact did not resolve inside the source folder.");
+            }
+
+            if (await revalidate(cancellationToken).ConfigureAwait(false) is { } denied)
+            {
+                return PreparedCommitResult.Refused(denied);
+            }
+
+            string stamp = Convert.ToHexString(RandomNumberGenerator.GetBytes(8)).ToLowerInvariant();
+            string artifactTemporary = $"{artifactFull}.{stamp}.part";
+            string provenanceTemporary = $"{provenanceFull}.{stamp}.part";
+
+            try
+            {
+                Directory.CreateDirectory(folder);
+                Stage(artifactTemporary, artifact);
+                Stage(provenanceTemporary, provenance);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                Discard(artifactTemporary);
+                Discard(provenanceTemporary);
+                return PreparedCommitResult.Refused("The prepared artifact could not be written into the session workspace.");
+            }
+
+            string normalized = WorkspacePath.Normalize(sourceRoot);
+            string artifactRelative = Relative(normalized, artifactFileName);
+            string provenanceRelative = Relative(normalized, provenanceFileName);
+
+            if (!PreparedSourceTrustStore.TryAppend(
+                    record.Path, ownerBinding, claim(artifactRelative, provenanceRelative), out string error))
+            {
+                Discard(artifactTemporary);
+                Discard(provenanceTemporary);
+                return PreparedCommitResult.Refused(error);
+            }
+
+            try
+            {
+                Publish(artifactTemporary, artifactFull);
+                Publish(provenanceTemporary, provenanceFull);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                Discard(artifactTemporary);
+                Discard(provenanceTemporary);
+                PreparedSourceTrustStore.TryWithdraw(record.Path, ownerBinding, artifactRelative, out _);
+                return PreparedCommitResult.Refused("The prepared artifact could not be written into the session workspace.");
+            }
+
+            return new PreparedCommitResult(true, [artifactRelative, provenanceRelative], string.Empty);
+        }
+        finally
+        {
+            gate.Release();
+        }
+
+        static string Relative(string root, string fileName) =>
+            root.Length == 0 ? $"{PreparedSourceRoot}/{fileName}" : $"{root}/{PreparedSourceRoot}/{fileName}";
+
+        static void Stage(string path, byte[] content)
+        {
+            Discard(path);
+            using FileStream stream = File.Create(path);
+            stream.Write(content);
+            stream.Flush(flushToDisk: true);
+        }
+
+        static void Publish(string temporary, string final)
+        {
+            if (File.Exists(final))
+            {
+                File.SetAttributes(final, FileAttributes.Normal);
+            }
+
+            File.Move(temporary, final, overwrite: true);
+            File.SetAttributes(final, FileAttributes.ReadOnly);
+        }
+    }
+
+    /// <summary>The one writer lock for a session copy, created on first use and freed with the copy.</summary>
+    private SemaphoreSlim CommitLock(string workspaceId) =>
+        _commitLocks.GetOrAdd(workspaceId, _ => new SemaphoreSlim(1, 1));
+
+    private static void Discard(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.SetAttributes(path, FileAttributes.Normal);
+                File.Delete(path);
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+        }
+    }
+
+    /// <summary>
+    /// Writes an admitted Oracle schema extraction into a source folder the caller owns, and records the
+    /// server-side claim that makes the statements consumable.
+    ///
+    /// Same commit shape as <see cref="CommitPreparedModuleAsync"/> and for the same reason: the copy's
+    /// writer lock is taken, the caller's authority is re-established, every payload is staged under a
+    /// temporary name, the claim is recorded next, and only then are the files published. The claim is
+    /// the whole of the trust decision, so a process that dies mid-commit leaves statements with no
+    /// claim — which read as an upload — rather than statements that look admitted.
+    ///
+    /// The file names are supplied by the caller and validated here; the paths are built from the owned
+    /// source folder alone, so nothing a gateway returned can influence where bytes land.
+    /// </summary>
+    public async Task<PreparedCommitResult> CommitPreparedSchemaAsync(
+        string owner,
+        string workspaceId,
+        string sourceRoot,
+        IReadOnlyList<(string FileName, byte[] Content)> files,
+        Func<IReadOnlyList<string>, PreparedSchemaClaim> claim,
+        Func<CancellationToken, Task<string?>> revalidate,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(files);
+        ArgumentNullException.ThrowIfNull(claim);
+        ArgumentNullException.ThrowIfNull(revalidate);
+
+        if (files.Count is 0 ||
+            files.Any(file => !IsSafeArtifactName(file.FileName) || file.Content is not { Length: > 0 }) ||
+            files.Select(file => file.FileName).Distinct(StringComparer.OrdinalIgnoreCase).Count() != files.Count)
+        {
+            return PreparedCommitResult.Refused(
+                "The prepared schema file names are not distinct simple file names, or a payload was empty.");
+        }
+
+        string ownerBinding = PreparedSourceOwnerBinding.Derive(owner);
+        SemaphoreSlim gate = CommitLock(workspaceId);
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (OwnedSourcePath(owner, workspaceId, sourceRoot) is not { } selected ||
+                !_workspaces.TryGetValue(workspaceId, out WorkspaceRecord? record))
+            {
+                return PreparedCommitResult.Refused("That source folder is not part of a copy you own.");
+            }
+
+            string folder = Path.Combine(selected, ".fleet-source", "extraction");
+            string prefix = Path.GetFullPath(selected) + Path.DirectorySeparatorChar;
+            string[] finals = [.. files.Select(file => Path.GetFullPath(Path.Combine(folder, file.FileName)))];
+
+            if (finals.Any(full => !full.StartsWith(prefix, StringComparison.Ordinal)))
+            {
+                return PreparedCommitResult.Refused("The prepared schema did not resolve inside the source folder.");
+            }
+
+            if (await revalidate(cancellationToken).ConfigureAwait(false) is { } denied)
+            {
+                return PreparedCommitResult.Refused(denied);
+            }
+
+            string stamp = Convert.ToHexString(RandomNumberGenerator.GetBytes(8)).ToLowerInvariant();
+            string[] staged = [.. finals.Select(full => $"{full}.{stamp}.part")];
+
+            try
+            {
+                Directory.CreateDirectory(folder);
+                for (int index = 0; index < files.Count; index++)
+                {
+                    Discard(staged[index]);
+                    using FileStream stream = File.Create(staged[index]);
+                    stream.Write(files[index].Content);
+                    stream.Flush(flushToDisk: true);
+                }
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                foreach (string path in staged) Discard(path);
+                return PreparedCommitResult.Refused("The prepared schema could not be written into the session workspace.");
+            }
+
+            string normalized = WorkspacePath.Normalize(sourceRoot);
+            string[] relatives =
+            [
+                .. files.Select(file => normalized.Length == 0
+                    ? $"{PreparedSourceRoot}/{file.FileName}"
+                    : $"{normalized}/{PreparedSourceRoot}/{file.FileName}"),
+            ];
+
+            PreparedSchemaClaim recorded = claim(relatives);
+            if (!PreparedSchemaTrustStore.TryAppend(record.Path, ownerBinding, recorded, out string error))
+            {
+                foreach (string path in staged) Discard(path);
+                return PreparedCommitResult.Refused(error);
+            }
+
+            try
+            {
+                for (int index = 0; index < finals.Length; index++)
+                {
+                    if (File.Exists(finals[index]))
+                    {
+                        File.SetAttributes(finals[index], FileAttributes.Normal);
+                    }
+
+                    File.Move(staged[index], finals[index], overwrite: true);
+                    File.SetAttributes(finals[index], FileAttributes.ReadOnly);
+                }
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                foreach (string path in staged) Discard(path);
+                PreparedSchemaTrustStore.TryWithdraw(record.Path, ownerBinding, recorded.SchemaDdlPath, out _);
+                return PreparedCommitResult.Refused("The prepared schema could not be written into the session workspace.");
+            }
+
+            return new PreparedCommitResult(true, relatives, string.Empty);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Re-reads a workspace after the fleet wrote into it and republishes its inventory and snapshot
+    /// digest.
+    ///
+    /// The digest deliberately changes. An authorization bound to the pre-preparation source no longer
+    /// matches, which is correct: the estate a run would now read is not the estate that was approved.
+    /// </summary>
+    public SourceWorkspaceFacts? Reindex(string owner, string workspaceId)
+    {
+        if (!_workspaces.TryGetValue(workspaceId, out WorkspaceRecord? record) ||
+            !string.Equals(record.Owner, owner, StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        SourceInventory inventory;
+        try
+        {
+            inventory = SourceInventory.Build(record.Path, MaxFiles, MaxBytes);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+
+        WorkspaceRecord refreshed = record with
+        {
+            Summary = record.Summary with
+            {
+                FileCount = inventory.FileCount,
+                ByteCount = inventory.ByteCount,
+                Artifacts = inventory.Artifacts,
+            },
+            SnapshotHash = SnapshotHash(record.Path),
+        };
+
+        _workspaces[workspaceId] = refreshed;
+        return new SourceWorkspaceFacts(refreshed.Summary, refreshed.SnapshotHash);
+    }
+
+    private static bool IsSafeArtifactName(string? fileName) =>
+        fileName is { Length: > 0 and <= 128 } &&
+        char.IsAsciiLetterOrDigit(fileName[0]) &&
+        fileName.All(character => char.IsAsciiLetterOrDigit(character) || character is '.' or '_' or '-') &&
+        !fileName.Contains("..", StringComparison.Ordinal);
+
     public bool Release(string owner, string workspaceId)
     {
         if (!_workspaces.TryGetValue(workspaceId, out WorkspaceRecord? record) ||
@@ -323,8 +764,18 @@ public sealed class SourceWorkspaceService : IDisposable
         }
 
         _workspaces.TryRemove(workspaceId, out _);
+        ForgetCommitLock(workspaceId);
         DeleteDirectory(record.Path);
         return true;
+    }
+
+    /// <summary>Drops a released copy's writer lock. A commit in flight keeps its own reference.</summary>
+    private void ForgetCommitLock(string workspaceId)
+    {
+        if (_commitLocks.TryRemove(workspaceId, out SemaphoreSlim? gate))
+        {
+            gate.Dispose();
+        }
     }
 
     /// <summary>Frees expired workspaces first, then reports whether the shared disk budget allows another.</summary>
@@ -774,12 +1225,19 @@ public sealed class SourceWorkspaceService : IDisposable
     /// </summary>
     private static string SnapshotHash(string path) => SnapshotRead(path, static _ => false, 0).SnapshotHash;
 
+    /// <summary>Everything this server wrote into a selected source folder, as a relative path prefix.</summary>
+    private const string PreparedSourceExclusion = ".fleet-source/";
+
     /// <summary>
     /// The one pass that computes a snapshot digest, optionally keeping the bytes of the files
     /// <paramref name="retain"/> selects. A kept file is hashed out of the buffer that is handed back, so a
     /// caller that trusts the digest is holding the bytes the digest was taken over.
     /// </summary>
-    private static TrustedSourceRead SnapshotRead(string path, Func<string, bool> retain, long maxRetainedBytes)
+    private static TrustedSourceRead SnapshotRead(
+        string path,
+        Func<string, bool> retain,
+        long maxRetainedBytes,
+        string? alsoExcluded = null)
     {
         string prefix = Path.GetFullPath(path) + Path.DirectorySeparatorChar;
         string excluded = WorkbenchExecution.OutputRoot + "/";
@@ -793,6 +1251,7 @@ public sealed class SourceWorkspaceService : IDisposable
                 .Where(file => file.StartsWith(prefix, StringComparison.Ordinal))
                 .Select(file => file[prefix.Length..].Replace('\\', '/'))
                 .Where(relative => !relative.StartsWith(excluded, StringComparison.Ordinal))
+                .Where(relative => alsoExcluded is null || !relative.StartsWith(alsoExcluded, StringComparison.Ordinal))
                 .Take(MaxFiles + 1)];
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
@@ -867,7 +1326,7 @@ public sealed class SourceWorkspaceService : IDisposable
     /// Stands in for a snapshot that could not be read within the intake limits. It is not a digest, so
     /// it matches nothing an authorization could ever have been issued against.
     /// </summary>
-    private const string UnhashableSource = "unhashable";
+    public const string UnhashableSource = "unhashable";
 
     /// <summary>A pass that could not complete. It carries no file, so nothing is parsed out of a refused read.</summary>
     private static readonly TrustedSourceRead s_unreadableSource = new(UnhashableSource, []);
@@ -918,6 +1377,7 @@ public sealed class SourceWorkspaceService : IDisposable
                 !_retained.ContainsKey(entry.Key) &&
                 _workspaces.TryRemove(entry.Key, out WorkspaceRecord? removed))
             {
+                ForgetCommitLock(entry.Key);
                 DeleteDirectory(removed.Path);
             }
         }
@@ -936,6 +1396,13 @@ public sealed class SourceWorkspaceService : IDisposable
 
         _workspaces.Clear();
         _retained.Clear();
+
+        foreach (KeyValuePair<string, SemaphoreSlim> gate in _commitLocks)
+        {
+            gate.Value.Dispose();
+        }
+
+        _commitLocks.Clear();
     }
 
     private sealed class Retention(Action release) : IDisposable

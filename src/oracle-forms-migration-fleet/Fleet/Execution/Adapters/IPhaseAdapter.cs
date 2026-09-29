@@ -26,6 +26,16 @@ public sealed record PhaseExecutionContext(
     public IReadOnlyList<PhaseOutcome> CompletedPhases { get; init; } = [];
 
     /// <summary>
+    /// The opaque owner this run is carried out for, or null when the host established none.
+    ///
+    /// It is the only thing that makes a prepared-source claim readable, and it comes from the host's
+    /// own record of who owns the session copy — never from the workspace, a manifest, or the request,
+    /// all of which arrive with the operator's archive. A phase that has none reads no claim, so an
+    /// estate carrying a ledger prepared under some other project's authority normalizes nothing.
+    /// </summary>
+    public string? PreparedSourceBinding { get; init; }
+
+    /// <summary>
     /// The server's authority over generating from this run's source, or null when the host established
     /// none.
     ///

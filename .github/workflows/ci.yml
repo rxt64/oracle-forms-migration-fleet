@@ -75,6 +75,42 @@ jobs:
             throw 'The host-to-worker integration test did not execute its real process path.'
           }
 
+      - name: Record worker artifact provenance
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $worker = Get-Item "$env:RUNNER_TEMP/source-worker/OracleFormsMigrationFleet.SourceWorker.exe"
+          $commit = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $commit -cne $env:GITHUB_SHA) {
+            throw 'The worker build does not match the workflow commit.'
+          }
+          $manifest = [ordered]@{
+            schemaVersion = 1
+            repository = $env:GITHUB_REPOSITORY
+            commit = $commit
+            ref = $env:GITHUB_REF
+            event = $env:GITHUB_EVENT_NAME
+            workflow = $env:GITHUB_WORKFLOW
+            runId = $env:GITHUB_RUN_ID
+            runAttempt = $env:GITHUB_RUN_ATTEMPT
+            runtimeIdentifier = 'win-x86'
+            fileName = $worker.Name
+            length = $worker.Length
+            sha256 = (Get-FileHash -LiteralPath $worker.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          }
+          $manifest | ConvertTo-Json | Set-Content "$env:RUNNER_TEMP/source-worker/manifest.json" -Encoding utf8
+
+      - name: Retain trusted main worker artifact
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-worker-win-x86-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/source-worker/OracleFormsMigrationFleet.SourceWorker.exe
+            ${{ runner.temp }}/source-worker/manifest.json
+          if-no-files-found: error
+          retention-days: 30
+
   build-and-test:
     runs-on: ubuntu-latest
     services:

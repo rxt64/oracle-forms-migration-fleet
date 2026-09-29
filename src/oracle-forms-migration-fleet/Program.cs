@@ -351,6 +351,49 @@ builder.Services.AddSingleton(provider => new DispositionLedgerService(
     provider.GetRequiredService<IMigrationRunStore>(),
     provider.GetRequiredService<SourceWorkspaceService>()));
 
+// Source preparation reaches the customer's Forms environment through a separately deployed gateway and
+// never through this process. Without a configured authority and token audience there is no gateway, so
+// the service is registered unconfigured: the GUI operation then answers 503 and writes nothing, which
+// leaves the extraction capabilities blocked exactly as the probe already reports them.
+ISourceGatewayClient? sourceGateway = null;
+if (SourceGatewayOptions.TryRead(
+        builder.Configuration,
+        out SourceGatewayOptions? sourceGatewayOptions,
+        out IReadOnlyList<string> sourceGatewayGaps))
+{
+    TokenCredential sourceGatewayCredential = string.IsNullOrWhiteSpace(managedIdentityClientId)
+        ? new ChainedTokenCredential(
+            new AzureDeveloperCliCredential(new AzureDeveloperCliCredentialOptions { ProcessTimeout = TimeSpan.FromSeconds(30) }),
+            new ManagedIdentityCredential(ManagedIdentityId.SystemAssigned))
+        : new ManagedIdentityCredential(ManagedIdentityId.FromUserAssignedClientId(managedIdentityClientId));
+
+    // Redirects are never followed: a gateway that answered with one could otherwise move this service's
+    // token and its trust to an origin nobody configured.
+    HttpClient sourceGatewayHttp = new(new SocketsHttpHandler { AllowAutoRedirect = false })
+    {
+        Timeout = sourceGatewayOptions!.RequestTimeout,
+    };
+
+    sourceGateway = new HttpSourceGatewayClient(sourceGatewayHttp, sourceGatewayCredential, sourceGatewayOptions);
+    Console.WriteLine($"[INFO] Source gateway: {sourceGatewayOptions.Authority.IdnHost} (managed-identity authentication).");
+}
+else
+{
+    Console.Error.WriteLine(
+        "[WARNING] No authorized source gateway is configured, so Forms module extraction will refuse and write " +
+        "nothing. Unset: " + string.Join(", ", sourceGatewayGaps));
+}
+
+if (sourceGateway is not null)
+{
+    builder.Services.AddSingleton(sourceGateway);
+}
+
+builder.Services.AddSingleton(provider => new SourcePreparationService(
+    provider.GetRequiredService<PlatformAccessService>(),
+    provider.GetRequiredService<SourceWorkspaceService>(),
+    provider.GetService<ISourceGatewayClient>()));
+
 bool migrate = migratePlatformStore;
 IPlatformStateStore startupStore = platformStore;
 builder.Services.AddSingleton<IHostedService>(provider => new PlatformStartupService(

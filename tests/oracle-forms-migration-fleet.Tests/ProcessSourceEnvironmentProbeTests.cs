@@ -111,13 +111,33 @@ public sealed class ProcessSourceEnvironmentProbeTests : IDisposable
     public void Worker_output_is_accepted_only_on_the_exact_contract()
     {
         Assert.True(SourceWorkerProtocol.TryParse(
-            Payload(Capability("forms.installation")), "legacy-order-entry", 2,
+            Payload(Capability("forms.installation")), "legacy-order-entry", "6i", 2,
             out IReadOnlyList<SourceCapabilityResult> capabilities, out DateTimeOffset probedUtc));
         Assert.Equal(
             SourcePrerequisite.OracleFormsInstallation,
             capabilities.Single(capability => capability.Id == "forms.installation").Prerequisite);
         Assert.Equal(DateTimeOffset.Parse("2026-01-01T00:00:00+00:00"), probedUtc);
     }
+
+    [Theory]
+    [InlineData("6i")]
+    [InlineData("6.0.8.11.3")]
+    [InlineData("6.0.8.7.3")]
+    public void The_declared_release_travels_from_the_profile_rather_than_a_pinned_constant(string release)
+    {
+        Assert.True(Parse(Payload(Capability("forms.installation", release: release), release: release), release));
+
+        // A worker that answers about a different release than the profile declared is refused.
+        Assert.False(Parse(Payload(Capability("forms.installation", release: release), release: release), "6.0.8.22.1"));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("6.0.8 22.1")]
+    [InlineData(".6.0.8")]
+    [InlineData("6i;DROP")]
+    public void A_release_token_that_is_not_a_bounded_version_is_refused(string release) =>
+        Assert.False(Parse(Payload(Capability("forms.installation", release: release), release: release), release));
 
     [Theory]
     [InlineData("null")]
@@ -186,7 +206,6 @@ public sealed class ProcessSourceEnvironmentProbeTests : IDisposable
     [Fact]
     public void A_worker_that_does_not_echo_the_expected_release_is_refused() =>
         Assert.False(Parse(Payload(Capability("forms.installation"), release: "6.0.8.22.2")));
-
     [Fact]
     public void An_unexpected_worker_status_is_refused() =>
         Assert.False(Parse(Payload(Capability("forms.installation"), status: "Verified")));
@@ -197,12 +216,12 @@ public sealed class ProcessSourceEnvironmentProbeTests : IDisposable
     [InlineData(65)]
     public void An_unexpected_exit_code_is_refused(int exitCode) =>
         Assert.False(SourceWorkerProtocol.TryParse(
-            Payload(Capability("forms.installation")), "legacy-order-entry", exitCode, out _, out _));
+            Payload(Capability("forms.installation")), "legacy-order-entry", "6i", exitCode, out _, out _));
 
     [Fact]
     public void A_foreign_source_environment_identifier_is_refused() =>
         Assert.False(SourceWorkerProtocol.TryParse(
-            Payload(Capability("forms.installation")), "other-environment", 2, out _, out _));
+            Payload(Capability("forms.installation")), "other-environment", "6i", 2, out _, out _));
 
     [Fact]
     public void Malformed_worker_output_is_refused()
@@ -231,8 +250,8 @@ public sealed class ProcessSourceEnvironmentProbeTests : IDisposable
         Assert.True(SourceWorkerImage.IsAcceptableLength(SourceWorkerImage.MaxImageBytes));
     }
 
-    private static bool Parse(string payload) =>
-        SourceWorkerProtocol.TryParse(payload, "legacy-order-entry", 2, out _, out _);
+    private static bool Parse(string payload, string release = "6i") =>
+        SourceWorkerProtocol.TryParse(payload, "legacy-order-entry", release, 2, out _, out _);
 
     private static SourceEnvironmentProfile Profile() => SourceEnvironmentProfiles.Create(
         "tenant", "project", "legacy-order-entry", 1, "Legacy Order Entry",
@@ -243,32 +262,33 @@ public sealed class ProcessSourceEnvironmentProbeTests : IDisposable
         string capabilities,
         string status = "BlockedPrerequisite",
         string architecture = "X86",
-        string release = "6.0.8.22.1") =>
+        string release = "6i") =>
         $$"""
         {"schemaVersion":1,"sourceEnvironmentId":"legacy-order-entry","status":"{{status}}",
          "probedUtc":"2026-01-01T00:00:00+00:00","operatingSystem":"Windows",
          "processArchitecture":"{{architecture}}","expectedFormsRelease":"{{release}}",
-                 "capabilities":{{(capabilities.StartsWith('[') || capabilities == "null" ? capabilities : $"[{capabilities},{RemainingRequiredCapabilities(capabilities)}]")}}}
+                 "capabilities":{{(capabilities.StartsWith('[') || capabilities == "null" ? capabilities : $"[{capabilities},{RemainingRequiredCapabilities(capabilities, release)}]")}}}
         """;
 
-        private static string RequiredCapabilities() =>
-                $"{Capability("forms.installation")}," +
-                $"{Capability("forms.openapi.load", prerequisite: "OracleFormsOpenApiLibraries", remediation: "operator.supply.authorized.forms.libraries")}," +
-                Capability("forms.module.extract", prerequisite: "OperatorSuppliedExport", remediation: "operator.supply.authorized.source.export");
+        private static string RequiredCapabilities(string release = "6i") =>
+                $"{Capability("forms.installation", release: release)}," +
+                $"{Capability("forms.openapi.load", prerequisite: "OracleFormsOpenApiLibraries", remediation: "operator.supply.authorized.forms.libraries", release: release)}," +
+                Capability("forms.module.extract", prerequisite: "OperatorSuppliedExport", remediation: "operator.supply.authorized.source.export", release: release);
 
-        private static string RemainingRequiredCapabilities(string provided) =>
+        private static string RemainingRequiredCapabilities(string provided, string release) =>
                 provided.Contains("forms.installation", StringComparison.Ordinal)
-                        ? $"{Capability("forms.openapi.load", prerequisite: "OracleFormsOpenApiLibraries", remediation: "operator.supply.authorized.forms.libraries")}," +
-                            Capability("forms.module.extract", prerequisite: "OperatorSuppliedExport", remediation: "operator.supply.authorized.source.export")
-                        : RequiredCapabilities();
+                        ? $"{Capability("forms.openapi.load", prerequisite: "OracleFormsOpenApiLibraries", remediation: "operator.supply.authorized.forms.libraries", release: release)}," +
+                            Capability("forms.module.extract", prerequisite: "OperatorSuppliedExport", remediation: "operator.supply.authorized.source.export", release: release)
+                        : RequiredCapabilities(release);
 
     private static string Capability(
         string id,
         string state = "BlockedPrerequisite",
         string prerequisite = "OracleFormsInstallation",
-        string remediation = "operator.install.forms.6i.worker") =>
+        string remediation = "operator.install.forms.6i.worker",
+        string release = "6i") =>
         $$"""
-        {"id":"{{id}}","state":"{{state}}","prerequisite":"{{prerequisite}}","requiredRelease":"6.0.8.22.1",
+        {"id":"{{id}}","state":"{{state}}","prerequisite":"{{prerequisite}}","requiredRelease":"{{release}}",
          "requiredArchitecture":"x86","requiredHost":"WindowsWorker","remediation":"{{remediation}}"}
         """;
 

@@ -46,6 +46,11 @@ public sealed class SandboxDataMigrationAdapter(
             return PhaseExecutionResult.Failure($"The source root '{sourceRoot}' does not exist in the workspace.");
         }
 
+        if (PreparedSchemaConsumption.Refusal(context, sourceRoot, "nothing was moved and no row was claimed to have been migrated") is { } untrusted)
+        {
+            return PhaseExecutionResult.Failure(untrusted);
+        }
+
         List<DataMigrationStatement> statements = [];
         List<string> skipped = [];
         List<string> programUnitFailures = [];

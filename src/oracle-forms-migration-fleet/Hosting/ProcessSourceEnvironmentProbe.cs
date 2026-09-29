@@ -47,7 +47,6 @@ public sealed record SourceWorkerOptions(string ExecutablePath, string ExpectedS
 /// <summary>Strict, bounded parsing of the native source worker protocol; no worker text reaches the caller.</summary>
 internal static class SourceWorkerProtocol
 {
-    internal const string ExpectedFormsRelease = "6.0.8.22.1";
     internal const string ExpectedArchitecture = "X86";
     internal const string ExpectedStatus = "BlockedPrerequisite";
     internal const int ExpectedExitCode = 2;
@@ -63,16 +62,24 @@ internal static class SourceWorkerProtocol
         Converters = { new JsonStringEnumConverter() },
     };
 
+    /// <summary>A bounded Oracle release token: a family such as <c>6i</c> or a dotted patch release.</summary>
+    internal static bool IsReleaseToken(string? value) =>
+        value is { Length: > 0 and <= 40 } &&
+        char.IsAsciiLetterOrDigit(value[0]) &&
+        char.IsAsciiLetterOrDigit(value[^1]) &&
+        value.All(character => char.IsAsciiLetterOrDigit(character) || character is '.');
+
     internal static bool TryParse(
         string payload,
         string sourceEnvironmentId,
+        string expectedFormsRelease,
         int exitCode,
         out IReadOnlyList<SourceCapabilityResult> capabilities,
         out DateTimeOffset probedUtc)
     {
         capabilities = [];
         probedUtc = default;
-        if (exitCode != ExpectedExitCode || string.IsNullOrEmpty(payload))
+        if (exitCode != ExpectedExitCode || string.IsNullOrEmpty(payload) || !IsReleaseToken(expectedFormsRelease))
         {
             return false;
         }
@@ -90,7 +97,7 @@ internal static class SourceWorkerProtocol
             !string.Equals(worker.Status, ExpectedStatus, StringComparison.Ordinal) ||
             !string.Equals(worker.SourceEnvironmentId, sourceEnvironmentId, StringComparison.Ordinal) ||
             !string.Equals(worker.ProcessArchitecture, ExpectedArchitecture, StringComparison.Ordinal) ||
-            !string.Equals(worker.ExpectedFormsRelease, ExpectedFormsRelease, StringComparison.Ordinal) ||
+            !string.Equals(worker.ExpectedFormsRelease, expectedFormsRelease, StringComparison.Ordinal) ||
             worker.Capabilities is null || worker.Capabilities.Count == 0 ||
             worker.Capabilities.Count > MaxCapabilities)
         {
@@ -122,7 +129,7 @@ internal static class SourceWorkerProtocol
                 capability.Remediation));
         }
 
-            if (!HasRequiredManifest(parsed))
+            if (!HasRequiredManifest(parsed, expectedFormsRelease))
             {
                 return false;
             }
@@ -152,24 +159,25 @@ internal static class SourceWorkerProtocol
 
     private static bool IsOptional(string? value) => value is null || IsBounded(value, MaxDescriptorLength);
 
-    private static bool HasRequiredManifest(IReadOnlyList<SourceCapabilityResult> capabilities) =>
+    private static bool HasRequiredManifest(IReadOnlyList<SourceCapabilityResult> capabilities, string release) =>
         capabilities.Count == 3 &&
-        HasRequiredCapability(capabilities, "forms.installation", SourcePrerequisite.OracleFormsInstallation,
+        HasRequiredCapability(capabilities, release, "forms.installation", SourcePrerequisite.OracleFormsInstallation,
             "operator.install.forms.6i.worker") &&
-        HasRequiredCapability(capabilities, "forms.openapi.load", SourcePrerequisite.OracleFormsOpenApiLibraries,
+        HasRequiredCapability(capabilities, release, "forms.openapi.load", SourcePrerequisite.OracleFormsOpenApiLibraries,
             "operator.supply.authorized.forms.libraries") &&
-        HasRequiredCapability(capabilities, "forms.module.extract", SourcePrerequisite.OperatorSuppliedExport,
+        HasRequiredCapability(capabilities, release, "forms.module.extract", SourcePrerequisite.OperatorSuppliedExport,
             "operator.supply.authorized.source.export");
 
     private static bool HasRequiredCapability(
         IReadOnlyList<SourceCapabilityResult> capabilities,
+        string release,
         string id,
         SourcePrerequisite prerequisite,
         string remediation) => capabilities.Any(capability =>
             capability.Id == id &&
             capability.State == SourceEnvironmentProbeStatus.BlockedPrerequisite &&
             capability.Prerequisite == prerequisite &&
-            capability.RequiredRelease == ExpectedFormsRelease &&
+            capability.RequiredRelease == release &&
             capability.RequiredArchitecture == "x86" &&
             capability.RequiredHost == "WindowsWorker" &&
             capability.Remediation == remediation);
@@ -324,9 +332,10 @@ public sealed class ProcessSourceEnvironmentProbe(SourceWorkerOptions options) :
     {
         byte[] request = JsonSerializer.SerializeToUtf8Bytes(
             new SourceWorkerProtocol.WorkerProbeRequest(
-                1, profile.SourceEnvironmentId, SourceWorkerProtocol.ExpectedFormsRelease),
+                1, profile.SourceEnvironmentId, profile.ExpectedFormsVersion),
             SourceWorkerProtocol.Json);
-        if (request.Length > SourceWorkerProtocol.MaxRequestBytes)
+        if (request.Length > SourceWorkerProtocol.MaxRequestBytes ||
+            !SourceWorkerProtocol.IsReleaseToken(profile.ExpectedFormsVersion))
         {
             return Rejected(profile, "forms.worker.request", "operator.inspect.worker.output");
         }
@@ -397,6 +406,7 @@ public sealed class ProcessSourceEnvironmentProbe(SourceWorkerOptions options) :
                 !SourceWorkerProtocol.TryParse(
                     Encoding.UTF8.GetString(stdout.Bytes),
                     profile.SourceEnvironmentId,
+                    profile.ExpectedFormsVersion,
                     process.ExitCode,
                     out IReadOnlyList<SourceCapabilityResult> capabilities,
                     out DateTimeOffset probedUtc))
@@ -463,7 +473,7 @@ public sealed class ProcessSourceEnvironmentProbe(SourceWorkerOptions options) :
             new(profile.ExpectedFormsVersion, profile.ExpectedDatabaseVersion),
             new(null, null),
             [new(capabilityId, SourceEnvironmentProbeStatus.Rejected, SourcePrerequisite.SourceWorkerExecutable,
-                "6.0.8.22.1", "x86", "WindowsWorker", remediation)],
+                profile.ExpectedFormsVersion, "x86", "WindowsWorker", remediation)],
             [],
             diagnostic is null
                 ? ["The configured native source worker was refused."]

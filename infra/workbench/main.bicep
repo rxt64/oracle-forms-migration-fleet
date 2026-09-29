@@ -65,6 +65,13 @@ param platformDatabaseUser string = ''
 @description('Isolated schema for platform state. Kept separate from any migration target schema.')
 param platformDatabaseSchema string = 'ofm_platform'
 
+@description('Host-owned generated back-end stack. Java remains the compatibility default for existing deployments.')
+@allowed([
+  'JavaSpringBoot'
+  'AspNetCore'
+])
+param targetBackendStack string = 'JavaSpringBoot'
+
 @description('Host name of the sandbox PostgreSQL server. The sandbox database must differ from the platform database.')
 param sandboxDatabaseHost string = ''
 
@@ -296,6 +303,10 @@ resource workbench 'Microsoft.App/containerApps@2025-01-01' = if (deployWorkbenc
             {
               name: 'PLATFORM_PGSCHEMA'
               value: platformDatabaseSchema
+            }
+            {
+              name: 'TARGET_BACKEND_STACK'
+              value: targetBackendStack
             }
             {
               name: 'SANDBOX_PGHOST'

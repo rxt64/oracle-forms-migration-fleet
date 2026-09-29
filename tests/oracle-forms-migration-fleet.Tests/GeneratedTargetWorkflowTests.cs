@@ -37,6 +37,9 @@ public sealed class GeneratedTargetWorkflowTests
     private static readonly string s_dockerfile = RepositoryText(".github/generated-target/Dockerfile");
     private static readonly string s_dockerignore = RepositoryText(".github/generated-target/.dockerignore");
     private static readonly string s_pilotTemplate = RepositoryText("infra/dotnet-pilot/main.bicep");
+    private static readonly string s_pilotParameters = RepositoryText("infra/dotnet-pilot/dev.bicepparam");
+    private static readonly string s_workbenchTemplate = RepositoryText("infra/workbench/main.bicep");
+    private static readonly string s_workbenchParameters = RepositoryText("infra/workbench/dev.bicepparam");
 
     /// <summary>
     /// The ordered fields the product hashes into <c>binding_digest</c>, mirroring
@@ -125,6 +128,75 @@ public sealed class GeneratedTargetWorkflowTests
 
     private static int LineOf(IReadOnlyList<string> commands, string fragment) =>
         commands.ToList().FindIndex(line => line.Contains(fragment, StringComparison.Ordinal));
+
+    private static string ParameterValue(string parameters, string name)
+    {
+        string prefix = $"param {name} = '";
+        string line = parameters.Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Split('\n')
+            .Single(candidate => candidate.StartsWith(prefix, StringComparison.Ordinal));
+        return line[prefix.Length..^1];
+    }
+
+    [Fact]
+    public void Native_worker_ci_retains_hashed_main_artifacts_only_after_contract_checks()
+    {
+        YamlNode workflow = YamlNode.Parse(RepositoryText(".github/workflows/ci.yml"));
+        IReadOnlyList<YamlNode> steps = workflow["jobs"]!["native-worker-contract"]!["steps"]!.Sequence!;
+        YamlNode roundTrip = Assert.Single(steps, step => StepLabel(step) == "Verify host-to-worker round trip");
+        YamlNode provenance = Assert.Single(steps, step => StepLabel(step) == "Record worker artifact provenance");
+        YamlNode artifact = Assert.Single(steps, step => StepLabel(step) == "Retain trusted main worker artifact");
+
+        Assert.True(steps.ToList().IndexOf(roundTrip) < steps.ToList().IndexOf(provenance));
+        Assert.True(steps.ToList().IndexOf(provenance) < steps.ToList().IndexOf(artifact));
+        Assert.Equal("github.event_name == 'push' && github.ref == 'refs/heads/main'", artifact["if"]!.Text);
+        Assert.Equal("actions/upload-artifact@v4", artifact["uses"]!.Text);
+        Assert.Equal("source-worker-win-x86-${{ github.sha }}", artifact["with"]!["name"]!.Text);
+        Assert.Equal("error", artifact["with"]!["if-no-files-found"]!.Text);
+        Assert.Equal("30", artifact["with"]!["retention-days"]!.Text);
+        Assert.Equal(
+            ["${{ runner.temp }}/source-worker/OracleFormsMigrationFleet.SourceWorker.exe", "${{ runner.temp }}/source-worker/manifest.json"],
+            CommandLines(artifact["with"]!["path"]!.Text!));
+
+        IReadOnlyList<string> commands = CommandLines(provenance["run"]!.Text!);
+        Assert.Contains(commands, line => line.Contains("$commit = git rev-parse HEAD", StringComparison.Ordinal));
+        Assert.Contains(commands, line => line.Contains("$commit -cne $env:GITHUB_SHA", StringComparison.Ordinal));
+        Assert.Contains(commands, line => line.Contains("Get-FileHash -LiteralPath $worker.FullName -Algorithm SHA256", StringComparison.Ordinal));
+        Assert.Contains(commands, line => line.Contains("ConvertTo-Json | Set-Content", StringComparison.Ordinal));
+        foreach (string field in new[] { "GITHUB_REPOSITORY", "GITHUB_REF", "GITHUB_EVENT_NAME", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT" })
+        {
+            Assert.Contains(commands, line => line.Contains($"$env:{field}", StringComparison.Ordinal));
+        }
+    }
+
+    [Fact]
+    public void Workbench_release_configuration_targets_the_dedicated_dotnet_sandbox()
+    {
+        Assert.Equal("AspNetCore", ParameterValue(s_workbenchParameters, "targetBackendStack"));
+        Assert.Equal("ofm_platform", ParameterValue(s_workbenchParameters, "platformDatabaseName"));
+        Assert.Equal("ofm_platform", ParameterValue(s_workbenchParameters, "platformDatabaseSchema"));
+        Assert.Equal("ofm_dotnet_pilot", ParameterValue(s_workbenchParameters, "sandboxDatabaseName"));
+        Assert.Equal(
+            ParameterValue(s_pilotParameters, "targetDatabaseName"),
+            ParameterValue(s_workbenchParameters, "sandboxDatabaseName"));
+        Assert.NotEqual(
+            ParameterValue(s_workbenchParameters, "platformDatabaseName"),
+            ParameterValue(s_workbenchParameters, "sandboxDatabaseName"));
+        Assert.Equal("id-ofmfleet-web-dev-ykbpnrpd", ParameterValue(s_workbenchParameters, "sandboxDatabaseUser"));
+        Assert.DoesNotContain("param workbenchArtifactStorageName", s_workbenchParameters, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Dotnet_target_configuration_keeps_runtime_identity_and_security_boundaries_explicit()
+    {
+        Assert.Contains("var targetIdentityName = 'id-ofmfleet-dotnet-${environmentName}-${uniqueSuffix}'", s_pilotTemplate, StringComparison.Ordinal);
+        Assert.Contains("value: targetIdentity.outputs.clientId", s_pilotTemplate, StringComparison.Ordinal);
+        Assert.Contains("param deployTarget = false", s_pilotParameters, StringComparison.Ordinal);
+        Assert.DoesNotContain("ASPNETCORE_ENVIRONMENT", s_pilotTemplate, StringComparison.Ordinal);
+        Assert.DoesNotContain("ASPNETCORE_ENVIRONMENT", s_workbenchTemplate, StringComparison.Ordinal);
+        Assert.DoesNotContain("allowSharedKeyAccess: true", s_workbenchTemplate, StringComparison.Ordinal);
+        Assert.DoesNotContain("publicNetworkAccess: 'Enabled'", s_pilotParameters, StringComparison.Ordinal);
+    }
 
     /// <summary>The body of a shell here-document, so the workflow's own embedded program can be run.</summary>
     private static string HereDocument(string script, string marker)
@@ -1259,6 +1331,57 @@ public sealed class GeneratedTargetWorkflowTests
             liveCalls.IndexOf("az acr login", StringComparison.Ordinal) <
             liveCalls.IndexOf("docker push", StringComparison.Ordinal),
             "The push must follow the registry sign-in it depends on.");
+    }
+
+    [Fact]
+    public void The_workbench_release_projects_the_approved_dotnet_runtime_profile()
+    {
+        YamlNode workflow = YamlNode.Parse(RepositoryText(".github/workflows/deploy.yml"));
+        YamlNode environment = workflow["env"]!;
+        YamlNode deploy = workflow["jobs"]!["deploy"]!;
+        YamlNode update = deploy["steps"]!.Sequence.Single(
+            step => step["name"]?.Text == "Deploy the image");
+        IReadOnlyList<string> commands = CommandLines(update["run"]!.Text);
+
+        Assert.Equal("AspNetCore", environment["TARGET_BACKEND_STACK"]!.Text);
+        Assert.Equal("ofm_dotnet_pilot", environment["SANDBOX_PGDATABASE"]!.Text);
+        Assert.Equal("ofm_platform", environment["PLATFORM_PGDATABASE"]!.Text);
+        Assert.Equal("Production", environment["ASPNETCORE_ENVIRONMENT"]!.Text);
+        Assert.Contains(commands, line => line.Contains(
+            "\"TARGET_BACKEND_STACK=$TARGET_BACKEND_STACK\"", StringComparison.Ordinal));
+        Assert.Contains(commands, line => line.Contains(
+            "\"SANDBOX_PGDATABASE=$SANDBOX_PGDATABASE\"", StringComparison.Ordinal));
+        Assert.Contains(commands, line => line.Contains(
+            "\"ASPNETCORE_ENVIRONMENT=$ASPNETCORE_ENVIRONMENT\"", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void The_workbench_release_reads_back_exact_runtime_coordinates_before_success()
+    {
+        YamlNode workflow = YamlNode.Parse(RepositoryText(".github/workflows/deploy.yml"));
+        YamlNode deploy = workflow["jobs"]!["deploy"]!;
+        IReadOnlyList<YamlNode> steps = deploy["steps"]!.Sequence;
+        YamlNode readiness = steps.Single(step => step["name"]?.Text == "Verify intended revision readiness");
+        IReadOnlyList<string> commands = CommandLines(readiness["run"]!.Text);
+
+        Assert.Contains(commands, line => line.Contains(
+            "ACTUAL_TARGET_BACKEND_STACK=$(jq", StringComparison.Ordinal));
+        Assert.Contains(commands, line => line.Contains(
+            "ACTUAL_SANDBOX_PGDATABASE=$(jq", StringComparison.Ordinal));
+        Assert.Contains(commands, line => line.Contains(
+            "ACTUAL_ASPNETCORE_ENVIRONMENT=$(jq", StringComparison.Ordinal));
+        Assert.Contains(commands, line => line.Contains(
+            "\"$ACTUAL_TARGET_BACKEND_STACK\" == \"$TARGET_BACKEND_STACK\"", StringComparison.Ordinal));
+        Assert.Contains(commands, line => line.Contains(
+            "\"$ACTUAL_SANDBOX_PGDATABASE\" == \"$SANDBOX_PGDATABASE\"", StringComparison.Ordinal));
+        Assert.Contains(commands, line => line.Contains(
+            "\"$ACTUAL_ASPNETCORE_ENVIRONMENT\" == \"$ASPNETCORE_ENVIRONMENT\"", StringComparison.Ordinal));
+
+        int readinessIndex = steps.ToList().IndexOf(readiness);
+        int smokeIndex = steps.ToList().FindIndex(step => step["name"]?.Text == "Start authenticated smoke runner");
+        int reportIndex = steps.ToList().FindIndex(step => step["name"]?.Text == "Report verified release");
+        Assert.True(readinessIndex < smokeIndex);
+        Assert.True(readinessIndex < reportIndex);
     }
 
     private const string FakeDigest = "1f4e9c0a2b6d8e3f5a7c9b1d3e5f7a9c1b3d5e7f9a1c3e5b7d9f1a3c5e7b9d1f";

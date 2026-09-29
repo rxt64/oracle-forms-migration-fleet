@@ -41,9 +41,31 @@ Deployable images are never built from a workstation.
 The existing PostgreSQL server must contain two distinct databases before an application revision is deployed:
 
 - `ofm_platform` stores organizations, projects, memberships, target profiles, and approvals in its `ofm_platform` schema.
-- `postgres` is the sandbox migration target where generated DDL and copied data may be applied.
+- `ofm_dotnet_pilot` is the dedicated sandbox migration target where generated DDL and copied data may be applied in its `public` schema.
 
-The deployment script refuses to use the same host/database pair for both purposes. PostgreSQL does not permit ordinary SQL statements to cross database boundaries, so sandbox DDL cannot address the authorization tables. The managed identity must be provisioned in both databases with only the permissions each role requires. This repository does not create either database or grant those database permissions.
+The deployment script refuses to use the same host/database pair for both purposes. PostgreSQL does not permit ordinary SQL statements to cross database boundaries, so sandbox DDL cannot address the authorization tables. The managed identity must be provisioned in both databases with only the permissions each role requires. This workbench stack does not create either database or grant those database permissions; the separately approved `infra/dotnet-pilot` foundation prepares `ofm_dotnet_pilot` and its scoped principals.
+
+The approved development host binding is explicit and fail-closed:
+
+| Container environment value | Approved value |
+|---|---|
+| `TARGET_BACKEND_STACK` | `AspNetCore` |
+| `SANDBOX_PGHOST` | `pg-ofmfleet-dev-ykbpnrpd.postgres.database.azure.com` |
+| `SANDBOX_PGDATABASE` | `ofm_dotnet_pilot` |
+| `SANDBOX_PGUSER` | `id-ofmfleet-web-dev-ykbpnrpd` |
+| `SANDBOX_PGSCHEMA` | `public` |
+
+`Deploy-Workbench.ps1` and `Preview-WorkbenchInfrastructure.ps1` reject a different generated back end,
+database, or schema after compiling `dev.bicepparam`. Routine application releases must project the same
+values through the trusted exact-SHA workflow; a manual `az containerapp update` is not an approved bridge.
+`ASPNETCORE_ENVIRONMENT` remains `Production` and must not be changed to bypass deployed sandbox-coordinate
+validation.
+
+These host-owned target facts participate in the canonical target-profile identity. Existing projects and
+their approvals remain bound to their recorded Java/`postgres` profile version and must not be relabelled.
+After the corrected host is released, create a new project or explicitly create/select the new profile
+version and rebind the project through the GUI before requesting fresh approvals. The old profile stays
+invalid for a .NET/`ofm_dotnet_pilot` run.
 
 This stack exposes one shared sandbox database, so it deliberately supports sandbox mutation for one
 project per tenant. The first project that requests `SandboxDatabaseWrite` is persisted as the owner;

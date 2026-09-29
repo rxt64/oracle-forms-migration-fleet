@@ -254,10 +254,90 @@ internal static class WorkbenchPlatformEndpoints
                 : Results.Json(new { error = result.Error }, statusCode: result.Status);
         });
 
-        endpoints.MapGet("/api/workbench/projects/{projectId}/approvals", async (
-            HttpContext context, string projectId, CancellationToken cancellationToken) =>
+        // Preparing sources is the operation that actually reaches the customer's Forms environment. It
+        // is addressed by project, source environment, and a workspace the caller owns; the gateway
+        // destination, the token audience, and the bytes that get pinned all come from the server.
+        endpoints.MapPost("/api/workbench/projects/{projectId}/source-environments/{sourceEnvironmentId}/prepare", async (
+            HttpContext context, string projectId, string sourceEnvironmentId, CancellationToken cancellationToken) =>
         {
             if (!WorkbenchEndpoints.TryActor(context, identity, out WorkbenchActor actor))
+            {
+                return Results.Unauthorized();
+            }
+            if (context.RequestServices.GetService<PlatformAccessService>() is null)
+            {
+                return Unavailable();
+            }
+            if (context.RequestServices.GetService<SourcePreparationService>() is not { } preparation)
+            {
+                return Results.Json(
+                    new { error = SourceGatewayUnavailable.Reason },
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+            if (await ReadBodyAsync(context, cancellationToken) is not { } body)
+            {
+                return Results.BadRequest(new { error = "The source preparation request could not be read." });
+            }
+
+            SourcePreparationRequest request = new(
+                sourceEnvironmentId,
+                body.TryGetProperty("profileVersion", out JsonElement version) &&
+                    version.ValueKind == JsonValueKind.Number && version.TryGetInt32(out int declared) ? declared : 0,
+                WorkbenchEndpoints.ReadString(body, "workspaceId") ?? string.Empty,
+                WorkbenchEndpoints.ReadString(body, "sourceRoot") ?? string.Empty,
+                ReadStrings(body, "modules"));
+
+            PlatformResult<SourcePreparationReport> prepared =
+                await preparation.PrepareAsync(actor, projectId, request, cancellationToken);
+
+            return prepared.Succeeded
+                ? Results.Ok(prepared.Value)
+                : Results.Json(new { error = prepared.Error }, statusCode: prepared.Status);
+        });
+
+        // Reading the source database's schema. The body names the workspace and the immutable profile
+        // version only: the schemas read come from that stored profile, and the connection identity
+        // belongs to the gateway, so nothing a browser sends can widen what is read.
+        endpoints.MapPost("/api/workbench/projects/{projectId}/source-environments/{sourceEnvironmentId}/prepare-schema", async (
+            HttpContext context, string projectId, string sourceEnvironmentId, CancellationToken cancellationToken) =>
+        {
+            if (!WorkbenchEndpoints.TryActor(context, identity, out WorkbenchActor actor))
+            {
+                return Results.Unauthorized();
+            }
+            if (context.RequestServices.GetService<PlatformAccessService>() is null)
+            {
+                return Unavailable();
+            }
+            if (context.RequestServices.GetService<SourcePreparationService>() is not { } preparation)
+            {
+                return Results.Json(
+                    new { error = SourceGatewayUnavailable.Reason },
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+            if (await ReadBodyAsync(context, cancellationToken) is not { } body)
+            {
+                return Results.BadRequest(new { error = "The schema preparation request could not be read." });
+            }
+
+            SourceSchemaPreparationRequest request = new(
+                sourceEnvironmentId,
+                body.TryGetProperty("profileVersion", out JsonElement schemaVersion) &&
+                    schemaVersion.ValueKind == JsonValueKind.Number && schemaVersion.TryGetInt32(out int schemaDeclared) ? schemaDeclared : 0,
+                WorkbenchEndpoints.ReadString(body, "workspaceId") ?? string.Empty,
+                WorkbenchEndpoints.ReadString(body, "sourceRoot") ?? string.Empty);
+
+            PlatformResult<SourceSchemaPreparationReport> prepared =
+                await preparation.PrepareSchemaAsync(actor, projectId, request, cancellationToken);
+
+            return prepared.Succeeded
+                ? Results.Ok(prepared.Value)
+                : Results.Json(new { error = prepared.Error }, statusCode: prepared.Status);
+        });
+
+        endpoints.MapGet("/api/workbench/projects/{projectId}/approvals", async (
+            HttpContext context, string projectId, CancellationToken cancellationToken) =>
+        {            if (!WorkbenchEndpoints.TryActor(context, identity, out WorkbenchActor actor))
             {
                 return Results.Unauthorized();
             }
