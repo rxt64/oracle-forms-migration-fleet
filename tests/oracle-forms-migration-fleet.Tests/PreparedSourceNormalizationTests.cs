@@ -761,6 +761,59 @@ public class PreparedSourceNormalizationTests
     }
 
     /// <summary>
+    /// The same nesting with the reserved folder deleted outright. Nothing is left on disk for the layout
+    /// check to name, so the claims over the deleted statements are all that remains of them, and
+    /// selecting the root above the one they were recorded against would filter them away and convert the
+    /// ordinary SQL beside them as though the schema had never been prepared.
+    /// </summary>
+    [Theory]
+    [InlineData("database")]
+    [InlineData("application")]
+    [InlineData("sandbox")]
+    [InlineData("reconciliation")]
+    public async Task Every_consumer_refuses_claims_recorded_below_the_selected_root_when_the_folder_was_deleted(string consumer)
+    {
+        using TemporaryWorkspace workspace = Estate();
+        Prepare(workspace);
+        PrepareSchema(workspace);
+
+        Directory.Delete(workspace.Absolute($"{SourceRoot}/{PreparedSourceTrustStore.PreparedFolder}"), recursive: true);
+
+        PhaseExecutionResult result = await ConsumeAsync(consumer, workspace, Request() with { SourceRoot = OuterRoot });
+
+        Assert.False(result.Succeeded);
+        Assert.Contains($"`{SourceRoot}/{PreparedSchemaTrustStore.PreparedFolder}`", result.FailureReason!, StringComparison.Ordinal);
+        Assert.Contains(
+            "Select the source root the statements were prepared against",
+            result.FailureReason!,
+            StringComparison.Ordinal);
+        Assert.False(workspace.Exists(ConvertedSchemaPath));
+    }
+
+    /// <summary>
+    /// A claim recorded against a root the selected one does not contain. Those statements are outside the
+    /// tree this run reads, so they are another selection's business and the selected root converts its
+    /// own ordinary source.
+    /// </summary>
+    [Fact]
+    public async Task A_claim_recorded_against_a_root_outside_the_selected_tree_leaves_it_convertible()
+    {
+        using TemporaryWorkspace workspace = Estate();
+        Prepare(workspace);
+        PrepareSchema(workspace);
+        workspace.WriteFile("legacy/reports/db/001_schema.sql", OracleSamples.Schema);
+
+        PhaseExecutionResult result = await RunAsync(
+            new DatabaseConversionAdapter(),
+            workspace,
+            Request() with { SourceRoot = "legacy/reports" },
+            binding: null);
+
+        Assert.True(result.Succeeded, result.FailureReason);
+        Assert.True(workspace.Exists(ConvertedSchemaPath));
+    }
+
+    /// <summary>
     /// The reserved name is a whole path segment, so a sibling that merely starts with it is an operator's
     /// own folder and the SQL in it is ordinary source that converts.
     /// </summary>

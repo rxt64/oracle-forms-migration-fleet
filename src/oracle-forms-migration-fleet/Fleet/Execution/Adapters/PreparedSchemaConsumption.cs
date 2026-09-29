@@ -108,6 +108,11 @@ public static class PreparedSchemaConsumption
             return $"{schemaRead.Error} Nothing in `{preparedRoot}` was read, and {consequence}.";
         }
 
+        if (Misscoped(moduleLedger, schemaLedger, sourceRoot, preparedRoot, consequence) is { } nested)
+        {
+            return nested;
+        }
+
         List<PreparedSourceClaim> modules =
         [
             .. moduleLedger.Claims
@@ -248,6 +253,81 @@ public static class PreparedSchemaConsumption
     /// <summary>Whether a workspace-relative path carries the reserved folder name as a whole segment.</summary>
     private static bool Reserved(string path) =>
         path.Split('/').Any(segment => segment.Equals(ReservedSegment, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>Whether a path is the selected root or sits beneath it, where an empty root is the whole copy.</summary>
+    private static bool Within(string root, string path) =>
+        root.Length == 0 || WorkspacePath.IsWithin(root, path);
+
+    /// <summary>Every recorded claim, as the source root it names and one file it covers.</summary>
+    private static IEnumerable<(string Root, string Path)> Claimed(
+        PreparedSourceTrustLedger modules,
+        PreparedSchemaTrustLedger schemas)
+    {
+        foreach (PreparedSourceClaim claim in modules.Claims)
+        {
+            yield return (claim.SourceRoot, claim.ArtifactPath);
+            yield return (claim.SourceRoot, claim.ProvenancePath);
+        }
+
+        foreach (PreparedSchemaClaim claim in schemas.Claims)
+        {
+            foreach ((string path, _) in Files(claim))
+            {
+                yield return (claim.SourceRoot, path);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Why the claims this server holds were recorded against a root the selected one contains, or
+    /// nothing.
+    ///
+    /// Filtering the ledgers to the selected root alone answers the question the layout check asks of the
+    /// disk, and the disk can be emptied: deleting a reserved folder outright leaves nothing for that
+    /// check to name while the records over it still stand, and the claims then drop out of the filter as
+    /// though the source had never been prepared. Reconciling the records against the tree this run reads
+    /// before that filter runs is what makes the two agree, so a root the selected one swallows is refused
+    /// whether or not its files are still there. Claims filed outside the selected tree are another
+    /// selection's business and are left alone.
+    /// </summary>
+    private static string? Misscoped(
+        PreparedSourceTrustLedger modules,
+        PreparedSchemaTrustLedger schemas,
+        string sourceRoot,
+        string preparedRoot,
+        string consequence)
+    {
+        SortedSet<string> nested = new(StringComparer.Ordinal);
+
+        foreach ((string root, string path) in Claimed(modules, schemas))
+        {
+            string claimRoot = WorkspacePath.Normalize(root);
+
+            if (string.Equals(claimRoot, sourceRoot, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (Within(sourceRoot, claimRoot) || Within(sourceRoot, WorkspacePath.Normalize(path)))
+            {
+                nested.Add(Folder(claimRoot));
+            }
+
+            if (nested.Count == MaxNamedStrays)
+            {
+                break;
+            }
+        }
+
+        return nested.Count == 0
+            ? null
+            : $"This server prepared source against {nested.Count.ToString(CultureInfo.InvariantCulture)} reserved folder(s) that " +
+                $"sit inside the selected source root: {string.Join(", ", nested.Select(folder => $"`{folder}`"))}. " +
+                $"`{preparedRoot}` is the only such folder the claims for the selected source root were recorded against, so every " +
+                "phase reading this tree would take those statements as ordinary source with no record standing behind them, and " +
+                $"removing the files a claim covers settles nothing. Nothing was read and {consequence}. Select the source root the " +
+                "statements were prepared against.";
+    }
 
     /// <summary>Why the statements on disk are not the ones the claim was recorded over, or nothing.</summary>
     private static string? Intact(PhaseExecutionContext context, string path, string expectedSha256, string consequence)

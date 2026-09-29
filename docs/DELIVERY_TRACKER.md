@@ -172,6 +172,26 @@ The exact repaired SHA still requires fresh runner CI and Astra review; neither 
 
 ## Current Operational Evidence
 
+### Claim-Root Review Closure, 2026-09-29
+
+CI for `cebc501` passed all four required jobs; deployment was skipped. Independent
+review resumed after the earlier authentication failure and found the combined case of
+deleting an entire prepared child folder before selecting its parent. The follow-up checks
+both ledgers' claimed roots and output paths before exact-root filtering, refusing affected
+mis-scoped records even when no files remain. Unrelated sibling roots stay usable.
+
+Application-specialist red/green evidence: four consumer cases failed before the fix and
+passed after it; the sibling positive control passed in both states. Independent Sol QA
+returned scoped PASS: 59 focused and 2,088 full host tests passed in Release, and 277 worker
+tests passed. This closes the composed bypass at code/unit scope, not native qualification
+or whole-candidate release review. The new commit still needs exact CI and Astra rereview.
+
+Read-only Azure inspection on this continuation confirms live revision
+`ca-ofmfleet-dev-ykbpnrpd--0000098`, image digest
+`sha256:482cd91765c04fdcc23ba81ecf93f6f4cd286690dd743bfcdccdbf6daa1c0e58`, and no VNet
+configuration or workload profiles on `cae-ofmfleet-dev-ykbpnrpd`. No gateway private route
+was established and no Azure resource changed. Migration remains NotExecuted.
+
 ### Latest Guard Repair Checkpoint
 
 Candidate `e569816613a2156a903590e3a39dbf2241c14a42` passed
