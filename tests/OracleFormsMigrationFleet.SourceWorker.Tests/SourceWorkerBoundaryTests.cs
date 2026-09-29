@@ -79,10 +79,11 @@ public sealed class SourceWorkerConfigurationTests
     [Fact]
     public void The_library_and_header_are_fixed_aliases_under_the_configured_home()
     {
-        WorkerConfiguration configuration = Read(new() { [WorkerConfiguration.FormsHomeVariable] = @"C:\orant" });
+        string formsHome = Path.Combine(Path.GetTempPath(), "ofm-config", "orant");
+        WorkerConfiguration configuration = Read(new() { [WorkerConfiguration.FormsHomeVariable] = formsHome });
 
-        Assert.Equal(Path.Combine(@"C:\orant", "bin", "ifd2f60.dll"), configuration.LibraryPath);
-        Assert.Equal(Path.Combine(@"C:\orant", "FORMS60", "API", "D2FDEF.H"), configuration.DefinitionHeaderPath);
+        Assert.Equal(Path.Combine(formsHome, "bin", "ifd2f60.dll"), configuration.LibraryPath);
+        Assert.Equal(Path.Combine(formsHome, "FORMS60", "API", "D2FDEF.H"), configuration.DefinitionHeaderPath);
     }
 
     [Fact]
@@ -196,9 +197,10 @@ public sealed class SourceWorkerTrustedInputTests
     [Fact]
     public void Containment_is_decided_on_whole_segments_so_a_sibling_prefix_cannot_pass()
     {
-        Assert.False(TrustedInput.IsWithin(@"C:\lab\input", @"C:\lab\input-other\orders.fmb"));
-        Assert.True(TrustedInput.IsWithin(@"C:\lab\input", @"C:\lab\input\orders.fmb"));
-        Assert.False(TrustedInput.IsWithin(@"C:\lab\input", @"C:\lab\input"));
+        string root = Path.Combine(Path.GetTempPath(), "ofm-containment", "input");
+        Assert.False(TrustedInput.IsWithin(root, Path.Combine(root + "-other", "orders.fmb")));
+        Assert.True(TrustedInput.IsWithin(root, Path.Combine(root, "orders.fmb")));
+        Assert.False(TrustedInput.IsWithin(root, root));
     }
 
     [Fact]

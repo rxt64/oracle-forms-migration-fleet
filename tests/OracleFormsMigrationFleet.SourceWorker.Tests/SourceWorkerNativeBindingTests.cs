@@ -222,9 +222,9 @@ public sealed class SourceWorkerApprovedVersionTests
 
     private static Dictionary<string, string?> Pinned(string? version) => new()
     {
-        [WorkerConfiguration.InputRootVariable] = @"C:\lab\input",
-        [WorkerConfiguration.OutputRootVariable] = @"C:\lab\output",
-        [WorkerConfiguration.FormsHomeVariable] = @"C:\orant",
+        [WorkerConfiguration.InputRootVariable] = Path.Combine(Path.GetTempPath(), "ofm-version", "input"),
+        [WorkerConfiguration.OutputRootVariable] = Path.Combine(Path.GetTempPath(), "ofm-version", "output"),
+        [WorkerConfiguration.FormsHomeVariable] = Path.Combine(Path.GetTempPath(), "ofm-version", "orant"),
         [WorkerConfiguration.LibraryHashVariable] = new string('a', 64),
         [WorkerConfiguration.LibraryVersionVariable] = version,
     };

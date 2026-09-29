@@ -172,6 +172,28 @@ The exact repaired SHA still requires fresh runner CI and Astra review; neither 
 
 ## Current Operational Evidence
 
+### Candidate CI and Worker Artifact Retention, 2026-09-29
+
+Draft [PR #36](https://github.com/rxt64/oracle-forms-migration-fleet/pull/36)
+contains the implementation and published GUI retest report (`f4adaa0`). Candidate
+[CI run 36603682941](https://github.com/rxt64/oracle-forms-migration-fleet/actions/runs/36603682941)
+passed container builds, guided browser checks, and the Windows native-worker contract.
+The main test job failed: eight worker assertions used Windows literal paths on Ubuntu;
+all 2,044 host tests passed. This is not a successful candidate CI result.
+
+The follow-up changes replace those test fixture paths with platform-native temporary
+paths, without changing production validation or invalid-input rejection cases. CI also
+records worker commit/run provenance and executable SHA-256 after native contract checks,
+and retains the executable plus manifest for 30 days only on main-branch push events.
+Artifact presence does not establish full CI success, release approval, native Forms
+qualification, or installation approval.
+
+Local validation: 40 workflow tests and 42 scoped worker tests passed on Windows.
+Independent GPT 5.6 Sol QA reviewed the four-file code/test patch and returned PASS,
+with the same focused test results and no whitespace errors. Fresh exact-candidate
+Ubuntu/Windows CI, required release review, and live native qualification remain pending.
+No merge, release, gateway installation, migration approval, or target write occurred.
+
 ### Real Forms GUI Retest, 2026-09-29 17:05 UTC
 
 **Assessment exercised; migration execution blocked before queueing.** The operator

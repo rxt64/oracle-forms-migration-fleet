@@ -139,6 +139,37 @@ public sealed class GeneratedTargetWorkflowTests
     }
 
     [Fact]
+    public void Native_worker_ci_retains_hashed_main_artifacts_only_after_contract_checks()
+    {
+        YamlNode workflow = YamlNode.Parse(RepositoryText(".github/workflows/ci.yml"));
+        IReadOnlyList<YamlNode> steps = workflow["jobs"]!["native-worker-contract"]!["steps"]!.Sequence!;
+        YamlNode roundTrip = Assert.Single(steps, step => StepLabel(step) == "Verify host-to-worker round trip");
+        YamlNode provenance = Assert.Single(steps, step => StepLabel(step) == "Record worker artifact provenance");
+        YamlNode artifact = Assert.Single(steps, step => StepLabel(step) == "Retain trusted main worker artifact");
+
+        Assert.True(steps.ToList().IndexOf(roundTrip) < steps.ToList().IndexOf(provenance));
+        Assert.True(steps.ToList().IndexOf(provenance) < steps.ToList().IndexOf(artifact));
+        Assert.Equal("github.event_name == 'push' && github.ref == 'refs/heads/main'", artifact["if"]!.Text);
+        Assert.Equal("actions/upload-artifact@v4", artifact["uses"]!.Text);
+        Assert.Equal("source-worker-win-x86-${{ github.sha }}", artifact["with"]!["name"]!.Text);
+        Assert.Equal("error", artifact["with"]!["if-no-files-found"]!.Text);
+        Assert.Equal("30", artifact["with"]!["retention-days"]!.Text);
+        Assert.Equal(
+            ["${{ runner.temp }}/source-worker/OracleFormsMigrationFleet.SourceWorker.exe", "${{ runner.temp }}/source-worker/manifest.json"],
+            CommandLines(artifact["with"]!["path"]!.Text!));
+
+        IReadOnlyList<string> commands = CommandLines(provenance["run"]!.Text!);
+        Assert.Contains(commands, line => line.Contains("$commit = git rev-parse HEAD", StringComparison.Ordinal));
+        Assert.Contains(commands, line => line.Contains("$commit -cne $env:GITHUB_SHA", StringComparison.Ordinal));
+        Assert.Contains(commands, line => line.Contains("Get-FileHash -LiteralPath $worker.FullName -Algorithm SHA256", StringComparison.Ordinal));
+        Assert.Contains(commands, line => line.Contains("ConvertTo-Json | Set-Content", StringComparison.Ordinal));
+        foreach (string field in new[] { "GITHUB_REPOSITORY", "GITHUB_REF", "GITHUB_EVENT_NAME", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT" })
+        {
+            Assert.Contains(commands, line => line.Contains($"$env:{field}", StringComparison.Ordinal));
+        }
+    }
+
+    [Fact]
     public void Workbench_release_configuration_targets_the_dedicated_dotnet_sandbox()
     {
         Assert.Equal("AspNetCore", ParameterValue(s_workbenchParameters, "targetBackendStack"));
