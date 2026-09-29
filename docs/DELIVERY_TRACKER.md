@@ -172,6 +172,44 @@ The exact repaired SHA still requires fresh runner CI and Astra review; neither 
 
 ## Current Operational Evidence
 
+### Trusted Workbench Release, 2026-09-29
+
+Independent Astra rereview closed the path-alias finding for exact candidate
+`189a0b79435f67f441aa4020d3f033fa016a4ee0`, with 80/80 independently rebuilt focused
+tests and exact CI `36628053547` passing all four required jobs. Its scoped PASS permits
+code release with native integration unconfigured and fail-closed; it is not an exhaustive
+new review of all 99 PR files or native qualification.
+
+Azure Validate completed for the bounded existing-workbench code release. The operator
+delegated decisions after the explicit release-scope question. Only the existing trusted
+workflow update and authenticated smoke checks are in this release; the private-gateway
+proposal remains Draft. The unrelated CLI default subscription was not changed or used;
+workflow OIDC variables were verified against the intended lab subscription and tenant.
+
+PR36 merged at `2026-09-29T21:03:25Z` as
+`5f53b71dc429c33de9adcebf275822a9f4699a40`. Main
+[CI/release run 36630686238](https://github.com/rxt64/oracle-forms-migration-fleet/actions/runs/36630686238)
+passed all four required CI jobs and its exact-commit gate, but failed authenticated smoke:
+the validation approval request returned HTTP 409. The smoke hard-coded JavaSpringBoot
+while the server-owned target profile selected AspNetCore. The server correctly rejected
+the mismatch. The cleanup/rollback step completed successfully at 21:19 UTC, restoring
+the schema-compatible previous template according to workflow verification; separate live
+revision confirmation remains pending. The incidental Northstar demo workflow `36630685698`
+was canceled during compilation before deployment; it is not native migration evidence.
+
+The smoke repair uses the server-owned profile identity and stack, verifies the returned
+approval binding, and revokes a created validation approval even when a later assertion
+fails. Requested/ValidationOnly approvals remain ineffective and cannot authorize side
+effects. Opus implemented the repair; independent Sol QA and Astra scoped code-release
+review passed with 14/14 offline tests. These results do not replace a successful new
+trusted release and live authenticated smoke. No approval guard was weakened.
+
+Trusted worker artifact `11062622419` was downloaded locally and verified without execution:
+main-push commit/run/ref bindings, x86 PE header, length 99,210,652 bytes and SHA-256
+`7ab7d5874b4207fa244197de9285b92078e20ae47dcc0ce2454d1d172ec1ced6`.
+No native installation, source extraction or target migration occurred. Live post-release
+GUI and revision verification remain pending.
+
 ### Canonical Source Identity Repair, 2026-09-29
 
 Exact `210d3f0` CI passed, but Astra found that filesystem aliases such as `legacy/.`

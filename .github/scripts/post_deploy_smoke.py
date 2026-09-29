@@ -6,6 +6,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -142,6 +143,88 @@ def require_status(response: HttpResponse, expected: int | set[int], action: str
         raise RuntimeError(f"{action} returned HTTP {response.status}; expected {sorted(accepted)}.")
 
 
+STACK_FIELDS = ("database", "frontEnd", "backEnd")
+
+
+def select_target_profile(project: Any) -> Any:
+    """Pick the one server-owned profile a project is bound to, from either project shape."""
+    if not isinstance(project, dict):
+        raise RuntimeError("Validation project was not returned as an object.")
+
+    unavailable = project.get("targetProfileUnavailable")
+    if isinstance(unavailable, str) and unavailable.strip():
+        raise RuntimeError(f"Server recorded no target profile for the validation project: {unavailable}")
+
+    if "targetProfile" in project:
+        return project["targetProfile"]
+
+    profiles = project.get("targetProfiles")
+    if not isinstance(profiles, list) or not profiles:
+        raise RuntimeError("Validation project has no server-owned target profile.")
+    if any(not isinstance(item, dict) for item in profiles):
+        raise RuntimeError("A target profile on the validation project was not returned as an object.")
+
+    if len({item.get("targetProfileId") for item in profiles}) != 1:
+        raise RuntimeError(
+            "The validation project names more than one target profile, so the deployment's own "
+            "profile identity is ambiguous."
+        )
+
+    # The server resolves an approval against the newest version of a profile identifier.
+    return max(profiles, key=lambda item: item["version"] if isinstance(item.get("version"), int) else -1)
+
+
+def target_profile_identity(profile: Any) -> tuple[str, int, dict[str, str]]:
+    """Validate the server-owned target profile contract and return its identity and stack."""
+    if not isinstance(profile, dict):
+        raise RuntimeError("Validation project has no server-owned target profile.")
+
+    profile_id = profile.get("targetProfileId")
+    if not isinstance(profile_id, str) or not profile_id.strip():
+        raise RuntimeError("Server-owned target profile carries no profile identifier.")
+
+    version = profile.get("version")
+    if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+        raise RuntimeError(f"Server-owned target profile '{profile_id}' carries no profile version.")
+
+    stack = profile.get("stack")
+    if not isinstance(stack, dict):
+        raise RuntimeError(f"Server-owned target profile '{profile_id}' names no generated stack.")
+
+    resolved: dict[str, str] = {}
+    for field in STACK_FIELDS:
+        value = stack.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise RuntimeError(
+                f"Server-owned target profile '{profile_id}' does not name its {field}, "
+                "so the validation request cannot match the deployment's target."
+            )
+        resolved[field] = value
+
+    return profile_id, version, resolved
+
+
+def revoke_failure(app_url: str, token: str, approval_id: str, version: int) -> str:
+    """Revoke a created validation approval; return cleanup guidance, or "" once revoked."""
+    try:
+        response = json_request(
+            "POST",
+            f"{app_url}/api/workbench/approvals/{urllib.parse.quote(approval_id)}/revoke",
+            token,
+            {"expectedVersion": version, "notes": "Post-deployment validation cleanup."},
+        )
+        state = response.json().get("state") if response.status == 200 else None
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        return f"Validation approval {approval_id} could not be revoked during cleanup: {error}."
+    if state == "Revoked":
+        return ""
+    return (
+        f"Validation approval {approval_id} was not revoked: cleanup revocation returned "
+        f"HTTP {response.status}. This ValidationOnly record cannot authorize side effects, but revoke "
+        "it by hand to complete lifecycle cleanup."
+    )
+
+
 def run() -> None:
     app_url = os.environ["APP_URL"].rstrip("/")
     app_resource = os.environ["APP_RESOURCE"]
@@ -186,7 +269,9 @@ def run() -> None:
         raise RuntimeError("Platform persistence is not configured.")
 
     projects = context.get("projects", [])
-    project = next((item for item in projects if item.get("name") == project_name), None)
+    project = next(
+        (item for item in projects if isinstance(item, dict) and item.get("name") == project_name), None
+    )
     if project is None:
         created = json_request(
             "POST",
@@ -196,8 +281,10 @@ def run() -> None:
         )
         require_status(created, 201, "Validation project creation")
         project = created.json()
-        if project.get("targetProfile") is None:
-            raise RuntimeError("Validation project has no server-owned target profile.")
+
+    # The target stack and the profile identity are deployment facts the server owns. Reading them back
+    # keeps this check honest across a release that changes the generated stack.
+    profile_id, profile_version, stack = target_profile_identity(select_target_profile(project))
 
     project_id = project.get("projectId")
     if not isinstance(project_id, str) or not project_id:
@@ -225,7 +312,11 @@ def run() -> None:
         "engagementId": engagement_id,
         "applicationName": "Deployment validation",
         "requestedMode": "PlanOnly",
-        "target": {"frontEnd": "React", "backEnd": "JavaSpringBoot", "database": "PostgreSql"},
+        "target": {
+            "frontEnd": stack["frontEnd"],
+            "backEnd": stack["backEnd"],
+            "database": stack["database"],
+        },
         "oracleFormsVersion": "12c",
         "oracleDatabaseVersion": "19c",
         "sourceRoot": "forms",
@@ -237,6 +328,9 @@ def run() -> None:
         "attestations": [],
     }
 
+    approval_id = ""
+    approval_version: int | None = None
+    approval_revoked = False
     try:
         requested = json_request(
             "POST",
@@ -244,7 +338,7 @@ def run() -> None:
             primary_token,
             {
                 "workspaceId": workspace_id,
-                "targetProfileId": "sandbox",
+                "targetProfileId": profile_id,
                 "scope": "ValidationOnly",
                 "lifetimeMinutes": 5,
                 "notes": f"Post-deployment validation for {deployment_sha[:12]}.",
@@ -253,10 +347,26 @@ def run() -> None:
         )
         require_status(requested, 201, "Validation approval request")
         approval = requested.json()
+
+        # Capture what the server created before asserting anything about it, so a failed assertion
+        # still leaves cleanup able to revoke the approval it just made.
+        created_id = approval.get("approvalId")
+        if isinstance(created_id, str) and created_id:
+            approval_id = created_id
+        created_version = approval.get("version")
+        if isinstance(created_version, int) and not isinstance(created_version, bool):
+            approval_version = created_version
+
         if approval.get("state") != "Requested" or approval.get("scope") != "ValidationOnly":
             raise RuntimeError("Validation approval was not persisted in the expected non-writing state.")
+        if (
+            approval.get("targetProfileId") != profile_id
+            or approval.get("targetProfileVersion") != profile_version
+        ):
+            raise RuntimeError("Validation approval was not bound to the project's server-owned target profile.")
+        if not approval_id or approval_version is None:
+            raise RuntimeError("Validation approval was created without an identifier and version to revoke.")
 
-        approval_id = approval["approvalId"]
         listed = json_request(
             "GET", f"{app_url}/api/workbench/projects/{project_id}/approvals", primary_token
         )
@@ -268,11 +378,12 @@ def run() -> None:
             "POST",
             f"{app_url}/api/workbench/approvals/{approval_id}/revoke",
             primary_token,
-            {"expectedVersion": approval["version"], "notes": "Post-deployment validation completed."},
+            {"expectedVersion": approval_version, "notes": "Post-deployment validation completed."},
         )
         require_status(revoked, 200, "Validation approval revocation")
         if revoked.json().get("state") != "Revoked":
             raise RuntimeError("Validation approval was not revoked.")
+        approval_revoked = True
 
         persisted = json_request(
             "GET", f"{app_url}/api/workbench/projects/{project_id}/approvals", primary_token
@@ -285,6 +396,13 @@ def run() -> None:
         if stored is None or stored.get("state") != "Revoked" or stored.get("isEffective") is not False:
             raise RuntimeError("Revoked validation approval was not durably retrieved as ineffective.")
     finally:
+        failing = sys.exc_info()[0] is not None
+        if approval_id and approval_version is not None and not approval_revoked:
+            reason = revoke_failure(app_url, primary_token, approval_id, approval_version)
+            if reason and not failing:
+                raise RuntimeError(reason)
+            if reason:
+                print(reason)
         released = http_request(
             "DELETE",
             f"{app_url}/api/workbench/source/{urllib.parse.quote(workspace_id)}?projectId={urllib.parse.quote(project_id)}",
