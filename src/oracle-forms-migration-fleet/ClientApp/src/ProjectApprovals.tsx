@@ -1,6 +1,15 @@
 import { useCallback, useEffect, useState } from "react";
 import { LockKeyhole, RefreshCw, ShieldCheck } from "lucide-react";
 import { InfoTip } from "./InfoTip";
+import {
+  prepareOracleSchema,
+  prepareSources,
+  summarizePreparation,
+  summarizeSchemaPreparation,
+  validateModuleNames,
+  type SourcePreparationReport,
+  type SourceSchemaPreparationReport,
+} from "./sourcePreparation";
 
 /**
  * The authenticated project and approval panel.
@@ -172,6 +181,9 @@ export function ProjectApprovals({ workspaceId, runRequest, onProjectChange, onT
   const [sourceProbe, setSourceProbe] = useState<SourceProbeResult | null>(null);
   const [connector, setConnector] = useState<SourceEnvironmentView["connector"]>("FormsBuilderWorker");
   const [selectedSourceId, setSelectedSourceId] = useState("");
+  const [moduleNames, setModuleNames] = useState("");
+  const [preparation, setPreparation] = useState<SourcePreparationReport | null>(null);
+  const [schemaPreparation, setSchemaPreparation] = useState<SourceSchemaPreparationReport | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -212,8 +224,14 @@ export function ProjectApprovals({ workspaceId, runRequest, onProjectChange, onT
   const requestedStack = (runRequest as { target?: Partial<TargetProfileStack> } | undefined)?.target;
   const stackDifferences = profileStackDifferences(requestedStack, profile?.stack ?? null);
 
+  // The folder the wizard selected, read off the same body the planner receives. The server re-validates
+  // it against the copy the caller owns, so this is the operator's selection and never an authority.
+  const preparationSourceRoot = (runRequest as { sourceRoot?: string } | undefined)?.sourceRoot ?? "";
+
   useEffect(() => {
     setSourceProbe(null);
+    setPreparation(null);
+    setSchemaPreparation(null);
     setSelectedSourceId("");
   }, [selected]);
 
@@ -256,6 +274,7 @@ export function ProjectApprovals({ workspaceId, runRequest, onProjectChange, onT
 
   async function saveSource(projectId: string) {
     setSourceProbe(null);
+    setSchemaPreparation(null);
     await send(`/api/workbench/projects/${projectId}/source-environments`, "POST", {
       sourceEnvironmentId: sourceId,
       name: sourceName,
@@ -382,6 +401,127 @@ export function ProjectApprovals({ workspaceId, runRequest, onProjectChange, onT
           </dd>
         </div>)}</dl>
       </div>}
+      <h3>Prepare sources</h3>
+      {!source
+        ? <p className="mf-help">Declare a source environment first. Preparation runs against one immutable version of it.</p>
+        : !workspaceId
+          ? <p className="mf-help" data-testid="prepare-needs-copy">
+            Copy your source into this session first. Preparation matches each module by name in your own copy and pins the
+            digest it computes from those bytes, so there is nothing to pin until the copy exists.
+          </p>
+          : <>
+            <div className="mf-form-grid" data-testid="prepare-sources">
+              <label className="mf-field">
+                <span>Forms modules to extract</span>
+                <input
+                  data-testid="prepare-modules"
+                  value={moduleNames}
+                  placeholder="ORDERS.fmb, INVOICES.fmb"
+                  onChange={(event) => setModuleNames(event.target.value)}
+                />
+              </label>
+              <button
+                type="button"
+                className="mf-secondary"
+                aria-busy={busy}
+                disabled={busy}
+                data-testid="prepare-run"
+                onClick={() => act(async () => {
+                  const { modules, error: invalid } = validateModuleNames(moduleNames);
+                  if (invalid) throw new Error(invalid);
+                  setPreparation(await prepareSources({
+                    projectId: project.projectId,
+                    sourceEnvironmentId: source.sourceEnvironmentId,
+                    profileVersion: source.version,
+                    workspaceId,
+                    sourceRoot: preparationSourceRoot,
+                    modules,
+                  }));
+                }, "Source preparation finished.")}
+              >
+                Prepare sources
+              </button>
+            </div>
+            <p className="mf-help">
+              Names only, comma separated, as they appear in your copy. The server computes each module's digest from your
+              copy and requires the gateway to have opened a module with the same digest, so nothing is kept unless both
+              sides worked on the same file.
+            </p>
+          </>}
+      {preparation && <div className="mf-review" data-testid="prepare-result" role="status" aria-live="polite">
+        <p><strong>{summarizePreparation(preparation)}</strong></p>
+        <dl>
+          <Row label="Gateway" value={preparation.gateway} testId="prepare-gateway" />
+          <Row label="Source identity re-indexed" value={preparation.snapshotRefreshed ? "Yes" : "No"} testId="prepare-refreshed" />
+          <Row label="Files in copy" value={String(preparation.fileCount)} />
+        </dl>
+        <dl>{preparation.modules.map((module) => <div className="mf-review-row" key={module.moduleAlias}>
+          <dt>{module.moduleAlias}</dt>
+          <dd data-testid={`prepare-module-${module.moduleAlias}`}>
+            {module.status}
+            {module.moduleIdentity ? `; module ${module.moduleIdentity}` : ""}
+            {module.artifactPath ? `; kept ${module.artifactByteCount} byte(s) at ${module.artifactPath}` : ""}
+            <small>{module.detail}</small>
+          </dd>
+        </div>)}</dl>
+      </div>}
+
+      <h4>Read the source database schema</h4>
+      {!source || !workspaceId
+        ? <p className="mf-help" data-testid="schema-needs-source">
+          Declare a source environment and copy your source into this session first. The schema is written into that copy.
+        </p>
+        : source.schemaAllowlist.length === 0
+          ? <p className="mf-help" data-testid="schema-no-allowlist">
+            This source version allows no Oracle schema, so there is nothing a read could cover. Declare a new immutable
+            version naming the schemas an operator approved reading.
+          </p>
+          : <>
+            <div className="mf-form-grid" data-testid="prepare-schema">
+              <div className="mf-review"><dl>
+                <Row label="Schemas this version allows" value={source.schemaAllowlist.join(", ")} testId="schema-allowlist" />
+                <Row label="Connector" value={source.connector} testId="schema-connector" />
+              </dl></div>
+              <button
+                type="button"
+                className="mf-secondary"
+                aria-busy={busy}
+                disabled={busy || source.connector === "OperatorSuppliedExport"}
+                data-testid="prepare-schema-run"
+                onClick={() => act(async () => {
+                  setSchemaPreparation(await prepareOracleSchema({
+                    projectId: project.projectId,
+                    sourceEnvironmentId: source.sourceEnvironmentId,
+                    profileVersion: source.version,
+                    workspaceId,
+                    sourceRoot: preparationSourceRoot,
+                  }));
+                }, "Source schema read.")}
+              >
+                Read schema (read-only)
+              </button>
+            </div>
+            <p className="mf-help">
+              {source.connector === "OperatorSuppliedExport"
+                ? "An operator-supplied export is already the source, so there is no database to connect to."
+                : "The gateway issues parameterized queries against the catalog views for the schemas listed above and " +
+                  "nothing else. You cannot name a schema here: the list is the one stored on this immutable source " +
+                  "version. Nothing is written to the source, and the statements returned are not a converted schema."}
+            </p>
+          </>}
+      {schemaPreparation && <div className="mf-review" data-testid="prepare-schema-result" role="status" aria-live="polite">
+        <p><strong>{summarizeSchemaPreparation(schemaPreparation)}</strong></p>
+        <dl>
+          <Row label="Status" value={schemaPreparation.status} testId="schema-status" />
+          <Row label="Schemas read" value={schemaPreparation.schemas.join(", ") || "none"} testId="schema-read" />
+          <Row label="Schema statements" value={schemaPreparation.schemaDdlPath ?? "Not written"} testId="schema-ddl-path" />
+          <Row label="PL/SQL program units" value={schemaPreparation.programUnitPath ?? "None reported"} testId="schema-plsql-path" />
+          <Row label="Source identity re-indexed" value={schemaPreparation.snapshotRefreshed ? "Yes" : "No"} />
+          <Row label="Gateway" value={schemaPreparation.gateway} />
+        </dl>
+        <p className="mf-help">{schemaPreparation.detail}</p>
+      </div>}
+
       <h3>Target this project is bound to</h3>
       {profile
         ? <div className="mf-review" data-testid="target-profile"><dl>

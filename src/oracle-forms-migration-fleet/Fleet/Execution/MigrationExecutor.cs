@@ -82,6 +82,7 @@ public sealed class MigrationExecutor
     private readonly IEntryVerificationGenerationProvider? _verificationProvider;
     private readonly ITargetDeploymentAuthorityProvider? _deploymentAuthorityProvider;
     private readonly PhaseCompletionObserver? _phaseObserver;
+    private readonly string? _preparedSourceBinding;
 
     /// <summary>
     /// <paramref name="mutationAuthorizer"/> is consulted immediately before any phase that writes
@@ -110,7 +111,8 @@ public sealed class MigrationExecutor
         IGenerationAuthorizationProvider? authorizationProvider = null,
         IEntryVerificationGenerationProvider? verificationProvider = null,
         PhaseCompletionObserver? phaseObserver = null,
-        ITargetDeploymentAuthorityProvider? deploymentAuthorityProvider = null)
+        ITargetDeploymentAuthorityProvider? deploymentAuthorityProvider = null,
+        string? preparedSourceBinding = null)
     {
         _workspace = new WorkspaceWriter(workspaceRoot);
         _mutationAuthorizer = mutationAuthorizer;
@@ -118,6 +120,7 @@ public sealed class MigrationExecutor
         _verificationProvider = verificationProvider;
         _deploymentAuthorityProvider = deploymentAuthorityProvider;
         _phaseObserver = phaseObserver;
+        _preparedSourceBinding = preparedSourceBinding;
 
         foreach (IPhaseAdapter adapter in adapters ?? DefaultAdapters())
         {
@@ -446,6 +449,7 @@ public sealed class MigrationExecutor
                 AuthorizationProvider = _authorizationProvider,
                 VerificationProvider = _verificationProvider,
                 DeploymentAuthorityProvider = _deploymentAuthorityProvider,
+                PreparedSourceBinding = _preparedSourceBinding,
             };
 
             PhaseExecutionResult result;

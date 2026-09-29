@@ -13,4 +13,20 @@
     <AssemblyName>OracleFormsMigrationFleet.SourceWorker</AssemblyName>
     <RootNamespace>OracleFormsMigrationFleet.SourceWorker</RootNamespace>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The same executable serves the source gateway in its serve mode. Kestrel and the standard JWT
+         bearer handler are pinned to the 10.0.11 ASP.NET Core runtime this repository builds against. -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.11" />
+    <!-- The only Oracle client this worker composes. ODBC is chosen because an 8.0.6 era driver is what
+         a Forms 6i host actually has; the extraction service never sees the provider type. -->
+    <PackageReference Include="System.Data.Odbc" Version="10.0.11" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The native binding's export and header-constant tokens are internal. The worker's own tests assert
+         them against the verified SDK spellings, which is the only place those tokens are checked at all. -->
+    <InternalsVisibleTo Include="OracleFormsMigrationFleet.SourceWorker.Tests" />
+  </ItemGroup>
 </Project>

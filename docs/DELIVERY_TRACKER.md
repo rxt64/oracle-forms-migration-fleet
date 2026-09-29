@@ -10,6 +10,114 @@ merged through required gates; Deployed = released artifact observed in Azure; V
 acceptance evidence retained. Blocked names an external prerequisite; NotExecuted means no execution
 evidence. These labels are not interchangeable. Local implementation below remains unpublished unless noted.
 
+## GitHub Checkpoint, 2026-09-29
+
+The operator authorized documenting and pushing all accumulated implementation work to
+`feat/runtime-verification-deployment`. This checkpoint includes native extraction and
+gateway code, GUI preparation, trusted artifact normalization, regression tests, dedicated
+.NET target configuration, source-lab tooling, and the associated operational records.
+Publication does not mean merge, deployment, approval of a migration run, or successful
+native qualification. Exact-commit CI and the existing release/review gates still apply.
+
+Publication excludes machine-local protected `.agent_configs/` and `eval.yaml`, generated
+ARM JSON, build outputs, raw test/browser artifacts, credentials, and Oracle installation
+media/binaries. They are not source changes to publish. Test outcomes and relevant hashes
+are recorded below; operational credentials remain outside the repository.
+
+The private-artifact connectivity document is a proposal, not authorization to enable
+SMB, public storage access, shared keys, or a different security boundary. Publishing
+infrastructure scripts does not run them. The current live migration status remains
+**NotExecuted / HOLD**.
+
+## Full Fleet Migration Test Handoff
+
+Operator request, 2026-09-28: perform a comprehensive migration test using the migration
+fleet now that the native Meridian source application is working. This is the next
+end-to-end delivery objective, not permission to bypass approvals or a claim that the
+migration has started. GUI intake, planning, and a source-compatibility probe were exercised
+on 2026-09-29; migration execution remains **NotExecuted**, blocked before queueing a run.
+
+### Ownership And Rules
+
+- Application specialist: Claude Opus 5. Own product capability gaps, native extraction,
+  schema/application conversion, GUI reachability, and bounded repairs. We build the
+  fleet; only its planner-authorized adapters perform migration operations from the GUI.
+- Infrastructure specialist: GPT 5.6 Sol. Verify approved source connectivity, dedicated
+  Azure target, builder configuration, and trusted release provenance. Use approved
+  `infra/` paths for foundation work, not one-off migration infrastructure.
+- Independent QA: GPT 5.6 Sol. Receive the specialists' explicit handoffs, verify the
+  released candidate and real run evidence, and return PASS/HOLD with unmet criteria.
+  Existing exact-candidate CI and independent Astra review requirements remain in force.
+- Agents propose; deterministic code authorizes. Preserve separate named human plan,
+  sandbox execution, and production approvals. This coordination request is not a
+  recorded approval on any product run and does not authorize production cutover.
+- No console DDL, manual row copies, hand-deployed generated applications, fabricated
+  attestations, checked evidence boxes, or substituted fixtures to get a green result.
+  Fix missing capabilities in the product, release through the trusted runner, and retry
+  through the GUI. Stop at genuine external authorization/licensing prerequisites.
+- Deployable images come only from trusted GitHub CI with OIDC, exact commit/digest
+  provenance, and required reviews. Do not substitute workstation builds. Preserve
+  unrelated work, protected configuration, source databases, and existing evidence.
+- Keep secrets out of prompts, logs, evidence, and output. Preserve scoped connectivity,
+  security controls, and step/cost budgets. No governance bypass or destructive cleanup.
+
+### Required Test And Evidence
+
+1. Recheck source health and pin the genuine generated native FMB, release/tool
+   compatibility, hashes, dependency closure, and source behavioral baseline. Use
+   [native runtime qualification](FORMS6I_AZURE_INSTALLATION_VALIDATION.md#native-meridian-runtime-verified-2026-09-28)
+   as the starting evidence, not a substitute for source extraction by the fleet.
+   Do not import the original empty stub or relabel synthetic XML as native extraction.
+2. Verify the actually released workbench commit/digest, builder availability, dedicated
+   target identity/database, and recorded approver. Recheck known builder and release
+   blockers below; do not infer readiness from source code or stale release evidence.
+3. Drive the real browser with live APIs: import, inventory/extract, assess, record mapping
+   decisions and coverage, obtain approvals, then authorize execution. Capture project/run
+   IDs, ledger version/hash, source snapshot, plan, target, approvals, and adapter artifacts.
+4. Have the fleet generate AND execute Azure-target schema, move rows, and reconcile
+   tables, keys, relationships, counts, amounts, and procedure/sequence semantics against
+   the pinned source. Mere SQL generation or a connection health check is insufficient.
+5. Have the fleet generate, build, test, deploy, and run BOTH the application and database
+   on the approved Azure components. Retain runner/workflow IDs, commit, image digest,
+   deployment identity, target URL, compiler results, and successful runtime attestations.
+6. Independently exercise source/target equivalents: populated customer/product choices,
+   product/quantity totals, create/save, cancel/rollback, invalid quantities, constraints,
+   and required transaction/concurrency behavior. Current source examples include order
+   1001 (quantity 1, total 84.50), cancelled 1002 absent, and 1003 (quantity 2, total 169.00).
+   Recapture the baseline if it changed; never seed expected target answers by hand.
+7. Exercise bounded failures and restart/retry at write/deployment boundaries, preserving
+   checkpoints and proving no duplicate writes/deployments. Test approval expiry/revocation,
+   stale or tampered evidence, unsupported required constructs, and denied execution.
+   Keep such tests scoped to the approved run; do not stop shared databases or the source VM.
+8. Prove the deployed target serves the required workflows with **no Oracle in its runtime
+   path**, not just a frontend proxy to the source. Retain dependency/configuration and
+   request evidence. Record every intervention and distinguish Tested, NotExecuted, and
+   Blocked. Independent QA closes the complete matrix, not an isolated happy-path demo.
+
+Specialist-to-QA handoff must identify the exact candidate, changed product capabilities,
+focused checks, trusted CI/review evidence, GUI run and approval IDs, artifact hashes,
+reconciliation results, deployed URL/digest, behavioral and recovery results, residual
+risks, and next owner for each blocker. No migration completion claim until all four
+standing completion tiers are evidenced: executed schema, reconciled data, running
+generated application, and Oracle-free target runtime.
+
+The source lab must remain usable: Oracle9i currently needs the signed-in administrator
+desktop session with its listener in that same session. Do not log it off or assume
+unattended reboot recovery. The existing full-fleet migration/release HOLDs below are
+not cleared by the successful source Forms tests.
+
+Handoff delivery: the application specialist (Claude Opus 5) and infrastructure
+specialist (GPT 5.6 Sol) acknowledged their scopes in read-only briefings. Their findings
+were explicitly delivered to a separate GPT 5.6 Sol QA invocation, which acknowledged
+both and returned **NotExecuted / HOLD** against the full matrix. No migration, approval,
+release, or resource mutation occurred in these briefings; no background execution is
+implied. First readiness gates are genuine fleet-mediated native extraction, exact-candidate
+CI/Astra evidence, builder/private connectivity and target readiness, followed by the
+applicable named product approvals. Production approval applies only to production
+deployment/cutover, not to a sandbox-only test. A superseded memory-only patch statement
+in the application briefing was corrected before QA: the IPC patch is installed on disk
+with its rollback backup; desktop-session dependence is the remaining source limitation.
+
 ## Refreshed Baseline
 
 - PR32 and PR33 are merged. PR34 head `46bcd135a4b8c260d67051fdda5dfb4ca0e09095` is merged;
@@ -64,6 +172,170 @@ The exact repaired SHA still requires fresh runner CI and Astra review; neither 
 
 ## Current Operational Evidence
 
+### Source Preparation Implementation, 2026-09-29
+
+**Implemented and locally tested; unpublished, not native-qualified, not a migration.**
+The worker now has bounded native Forms extraction, read-only Oracle catalog extraction,
+and an authenticated HTTPS gateway. The GUI can request Forms preparation and schema
+reads. Workbench admission binds inline artifacts to the caller's tenant/project, immutable
+source profile, original source hash, and owner-checked workspace. Server-owned trust
+ledgers prevent uploaded files from impersonating prepared artifacts; normalization
+consumes admitted artifacts rather than treating binary inventory as decoded content.
+
+The release configuration selects `AspNetCore`, database `ofm_dotnet_pilot`, schema
+`public`, and preserves the host's `ASPNETCORE_ENVIRONMENT=Production`. Exact-value
+preflight and postdeployment checks were added. This does not rewrite the existing
+Java/postgres project profile, its approvals, or the deployed configuration.
+
+Native SDK inspection on the existing Forms VM established that `d2ffmdld_Load` takes
+four arguments. The installed `C:\orant\bin\ifd2f60.dll` has SHA-256
+`0FE37A1A56F53D46A4D4498335BCF9BD0071C9458136C888877E9903B6E677B3`
+and no file-version resource. The worker permits an explicit `unversioned` configuration
+only with a valid hash pin; observed version evidence remains absent. This is library
+inspection, not evidence that the worker successfully opened the genuine FMB. The Forms
+VM was started for this read-only inspection and was not stopped afterward.
+
+Validation retained in the outer workspace's `.copilot-artifacts/source-extraction-tests/`:
+
+- `final-solution`: 2,352 passed before the final two QA repairs (2,023 host, 273 worker,
+  56 demo). An earlier load-sensitive authorization-test failure remains retained in
+  `full-solution`; it passed in isolation and in the later complete run.
+- `qa-repairs`: 200 host preparation/admission/normalization checks and 275 worker checks
+  passed after the repairs. Counts overlap the earlier complete run and are not additive.
+- Browser source-preparation checks: 5 passed, 3 duplicate API cases skipped across
+  desktop/mobile Chromium. These exercised rejection and the unconfigured-gateway GUI
+  path, not successful extraction or migration.
+- Independent GPT 5.6 Sol review closed the unnamed PGU/LOV omission and foreign-key
+  owner/inventory/constraint-tail admission findings. This scoped PASS is not release
+  approval or native/live qualification.
+
+Program-unit bodies and LOV definitions are still unsupported native features: both named
+and unnamed instances fail extraction instead of yielding partial success. Menu/library
+modules and other unqualified Forms features must not be represented as supported.
+Oracle catalog tests use fake connections; no real Oracle catalog extraction ran.
+
+Remaining release/integration gates: trusted CI packaging and exact-candidate review;
+gateway TLS, Entra audience/caller authorization and private connectivity; mandatory
+tenant/project source-registry grants and pinned native configuration; approved read-only
+Oracle connection configuration; native FMB and real catalog qualification through the
+product; and GUI migration against a new or explicitly rebound dedicated target profile.
+The separate legacy `Check connection` path still registers unavailable probe/extractor
+providers and needs integration with real gateway evidence, not a fabricated Verified
+status. Cross-replica source-publication atomicity remains a residual risk.
+
+At the end of implementation validation, no commit, push, release, gateway deployment,
+migration approval, target DDL, row movement,
+generated application deployment, or Oracle-free runtime verification occurred in this
+implementation. The full fleet migration remains **NotExecuted / HOLD**.
+
+### Live GUI Test, 2026-09-29
+
+**Result: blocked before migration, not a successful full-fleet test.** The operator used
+the deployed browser workbench, not a console migration harness. Project
+`prj-bc437aa38358444985955993a5855af1`, reference `MERIDIAN-NATIVE-GUI-20260928`, was created
+through the GUI. Management-plane inspection after the GUI checks reported ready revision
+`ca-ofmfleet-dev-ykbpnrpd--0000098` and image digest
+`sha256:482cd91765c04fdcc23ba81ecf93f6f4cd286690dd743bfcdccdbf6daa1c0e58`;
+exact CI/commit provenance was not independently verified by this test.
+
+| GUI action | Observed result |
+| --- | --- |
+| Enter the VM's absolute source path | Correctly refused: a drive path is not a copied repository source |
+| Upload the genuine native FMB as ZIP | Completed: 1 file / 61,440 bytes; FormsModuleInventory and FormsModuleSource recognized; private copy locked read-only; 0 warnings / 0 errors |
+| Select .NET, PostgreSQL, sandbox goal | Accepted as requested planning inputs, not as execution approval |
+| Generate plan against uploaded source | 29 phase blockers; 1 of 4 input requirements met; missing PL/SQL, schema export, and bound test baseline |
+| Check immutable target | Stored profile is JavaSpringBoot, database `postgres`, schema `public`, environment label `Production`; it is not the dedicated .NET pilot profile |
+| Request approval/run controls | Sandbox approval request disabled for the stack mismatch; no approval requested or granted; no run queued |
+| Declare source and click Check connection | Source `meridian-native-6i` advanced to version 2 / `BlockedPrerequisite`; Forms and database observed versions remain `Not observed` |
+
+The source probe named `forms.module.extract`, `forms.openapi.load`,
+`forms.worker.architecture`, and `oracle.schema.extract` as blocked. Its `6.0.8.22.1` x86
+Windows-worker release is the fleet compatibility profile, not a discovered VM version.
+The source-lab runtime was previously observed at `6.0.8.11.3`; compatibility and provenance
+must be established rather than relabeling one as the other. The source alias saved in the
+GUI is a logical declaration only; this test did not provision a gateway alias or worker.
+
+Current host registration uses unavailable source probe, Forms extractor, and Oracle
+schema extractor providers. ZIP acquisition itself is implemented and succeeded; the
+phase table's `Source Acquisition: No adapter` is not evidence that ZIP upload failed.
+Missing fleet-native decoding and schema/PL-SQL extraction must be implemented and
+connected behind the approved source gateway, then released through the trusted pipeline.
+Do not run migration SQL or substitute synthetic XML to evade those gaps.
+
+The FMB was transported unchanged from the Forms VM using the bounded, read-only
+`infra/source-lab/forms6i/Read-MeridianForms6iSource.ps1`, then uploaded through the GUI.
+No native content was extracted or converted by that transport. Its SHA-256 is
+`EF00865A74D164BF409538278F634B5FA79115F2DD3AD06C9D66A442C7CC74D2`; both compressed transport
+and decoded bytes were hash-checked. The new FMB hash still needs explicit linkage to a
+fresh behavioral baseline. Browser workspace: `c54c0badd3e1bcd0fc8d750c65a25fc7`, subject
+to the workbench's four-hour expiry. Local observations and preserved upload bytes are in
+the outer workspace's `.copilot-artifacts/gui-test-prj-bc437aa38358444985955993a5855af1/`,
+including `source-transport.json` and `gui-test-result.json`. These are operator test
+observations, **not** migration attestations.
+
+No migration run ID exists. Zero migration phases executed; no target DDL, moved rows,
+generated application build/deployment, reconciliation, or target behavior claim exists.
+Only the application indexer's two observed artifact kinds were automatically selected;
+the operator manually checked no evidence box and granted no approval. The workbench tab
+is left on the real blocked result. Next: provide the approved source-gateway extractors,
+qualify the actual native release, correct the server-owned dedicated target binding,
+establish exact-candidate CI/review, then obtain named product approval and retry in the GUI.
+
+Independent GPT 5.6 Sol QA subsequently read the live GUI, rechecked the retained FMB
+hash/size and host provider registration, and returned **report accuracy PASS / full
+migration HOLD**. Source-VM transfer provenance, earlier native runtime version, and the
+Azure revision/digest observation remained parent-observed facts, not independently
+re-observed by QA. No material reporting correction was required. This verdict validates
+the failed-test report, not a migrated application.
+
+### Prior Source And Platform Evidence
+
+- The [native Meridian runtime qualification](FORMS6I_AZURE_INSTALLATION_VALIDATION.md#native-meridian-runtime-verified-2026-09-28)
+  supersedes the stub-only and temporary-network status. A separate native FMB/FMX
+  now runs in Forms 6i against the existing Oracle9i schema; the original stub is
+  preserved. Real UI Create/Save, Cancel, zero-quantity rejection, and quantity-two
+  totals passed independent Net8 checks. Saved test orders are 1001 and 1003;
+  cancelled draft 1002 is absent. The final 23,476-byte FMX compiled with exit 0
+  and reopened with database-populated choices and a fitting desktop layout.
+  Durable redirect rules are restricted to the two private VM addresses. The
+  patched DLL persists on disk, but database/listener operation requires the
+  administrator desktop session; unattended reboot recovery is not qualified.
+  No Defender or governance-policy changes were made in this runtime phase.
+  This is working source-lab Forms, not customer migration or product GUI acceptance.
+- At 20:12 UTC on 2026-09-28, the [listener memory workaround](FORMS6I_AZURE_INSTALLATION_VALIDATION.md#listener-memory-workaround-and-defender-restoration-2026-09-28)
+  was serving TCP with the debugger detached. A fresh TCP SQL*Plus session verified
+  `orcl` OPEN, 11 MERIDIAN objects, and zero invalids. Defender was restored after
+  the authorized temporary diagnostic disable, and original installed-file hashes
+  were unchanged. The patch is memory-only and will not survive listener exit;
+  the separate patched DLL copy is staged but not activated. Forms acceptance and
+  persistent startup remain outstanding. This supersedes earlier listener-down
+  observations below, not migration or Forms qualification gates.
+- On 2026-09-28, the separate Oracle9i source VM `vm-ofm-oracle9i-j6mrrerz` was
+  recovered through Bastion: `orcl` opened normally and all 11 MERIDIAN objects were
+  valid. Its Windows 98 Personal Edition listener still fails implicit IPC startup
+  with Windows error 161 on the Server 2022 host; Forms connectivity and automatic
+  database startup remain unverified. Diagnostic configuration changes were restored.
+  See [FORMS6I_AZURE_INSTALLATION_VALIDATION.md](FORMS6I_AZURE_INSTALLATION_VALIDATION.md#oracle-9i-source-database-recovery-2026-09-28).
+  This is source-lab recovery, not a GUI migration or native Forms acceptance.
+- The 18:48 UTC [short-PATH retest](FORMS6I_AZURE_INSTALLATION_VALIDATION.md#oracle-9i-short-path-retest-2026-09-28)
+  reproduced listener error 161 with unchanged configuration. A fresh RDP session
+  initially saw an idle database; normal startup restored `orcl`, and a separate
+  18:52 UTC connection verified OPEN with 11 MERIDIAN objects and zero invalids.
+  Persistence across logoff or reboot remains unverified; the listener is still down.
+- [API tracing](FORMS6I_AZURE_INSTALLATION_VALIDATION.md#oracle-9i-ipc-api-diagnosis-2026-09-28)
+  identified the listener failure: `oranipc9.dll` passes a pipe-style name to
+  `CreateFileMappingA`, which returns NULL with error 161. Independent 32-bit
+  ANSI/Unicode probes fail with that name and succeed with a plain mapping name.
+  No Oracle binaries were patched. At 19:34 UTC the debugger had exited and `orcl`
+  remained OPEN with 11 MERIDIAN objects and zero invalids. An NT-build replacement
+  is still untested; listener and Forms acceptance remain outstanding.
+- Windows Oracle9i replacement media remains unavailable locally. Oracle FAQ1727
+  confirms the non-technical media-request route. The delayed assistant-to-SR
+  handoff eventually displayed an unsubmitted creation form, but session renewal
+  and an SR number remain unconfirmed. Entitlement and availability remain
+  unverified; no media was downloaded or installed. The
+  [media follow-up](FORMS6I_AZURE_INSTALLATION_VALIDATION.md#oracle-9i-media-acquisition-follow-up-2026-09-28)
+  retains the inquiry and observed portal failure for a non-duplicating retry.
 - Meridian is installed in the existing Oracle source container: 37 verifier assertions passed,
   zero compile errors, seed counts 5/6/2/3, BANKING unchanged at 19 objects/0 invalid. Single-exec
   two-session tests proved commit blocking/oversell rejection and rollback release, then restored
@@ -105,7 +377,7 @@ supersede its historical source-lab, foundation, and platform-release status.
 | Product-controlled build/deploy | Existing adapters/worker plus required controlled workflow | NotExecuted | No autonomous deployment evidence | Bind approved source/plan/artifact/target, runner build/digest, operation/recovery and URL |
 | Platform release | .github/workflows/ci.yml and deploy.yml | NotExecuted | New code local, live platform unchanged | Publish candidate, exact-SHA CI/review, resolve merge authorization, release |
 | Data migration/reconciliation | Existing migration/reconciliation adapters | NotExecuted | No new pilot run | Dedicated DB/principal; product applies schema/data and retains row reconciliation |
-| Fresh GUI migration | Workbench durable runs | NotExecuted | No project/run ID for new pilot | Import, assess, decide, approve, generate, test, deploy and execute order workflow |
+| Fresh GUI migration | Workbench durable runs | Blocked | 2026-09-29 real FMB ZIP intake and source probe; project prj-bc437aa38358444985955993a5855af1; no migration run queued | Wire qualified source extractors and correct dedicated target profile, release/review, then approve and execute through GUI |
 | Restart/retry safety | MigrationRunWorker leases/fences plus deployment state | NotExecuted | Existing run controls; new side effects untested | Exercise interruption at deployment/write boundary, prove no duplicate writes |
 | Bounded model dispatch | Existing reviewer/Foundry integration | NotExecuted | No new pilot model invocation claimed | Use typed bounded roles only where needed; retain observed invocation evidence |
 | Independent closure | Astra milestone records; PILOT_LOCAL_VALIDATION.md | Tested | Focused re-review closed four findings; addendum verified actual aggregate TRX and source hashes; overall HOLD | Exact-commit CI/review and separate operational review; no release approval |

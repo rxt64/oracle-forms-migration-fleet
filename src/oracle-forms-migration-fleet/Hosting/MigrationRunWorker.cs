@@ -304,7 +304,8 @@ public sealed class MigrationRunWorker(
                             return null;
                     }
                 },
-            deploymentAuthority);
+            deploymentAuthority,
+            PreparedSourceOwnerBinding.Derive(run.WorkspaceOwnerId));
 
         WorkbenchExecution.ResetOutput(workspaceRoot, request.OutputRoot);
         Channel<ExecutionProgress> progress = Channel.CreateUnbounded<ExecutionProgress>(

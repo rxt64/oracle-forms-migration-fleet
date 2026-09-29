@@ -1,5 +1,82 @@
 # Native source prerequisites and source-lab readiness
 
+## Current Implementation Update, 2026-09-29
+
+The September 22 inventory below is historical. Genuine Forms media, a native Meridian
+application, and a runtime baseline now exist; see
+[native runtime qualification](FORMS6I_AZURE_INSTALLATION_VALIDATION.md) and the
+[current delivery record](DELIVERY_TRACKER.md#source-preparation-implementation-2026-09-29).
+The source worker is no longer refusal-only: native extraction, read-only catalog extraction,
+authenticated gateway operations, GUI preparation, and trusted artifact admission are locally
+implemented and tested. They have not been deployed or qualified against the real source.
+The separate legacy connection probe remains unavailable.
+
+The installed Open API library is `C:\orant\bin\ifd2f60.dll`, SHA-256
+`0FE37A1A56F53D46A4D4498335BCF9BD0071C9458136C888877E9903B6E677B3`.
+Its file-version resource is absent: configure the explicit hash-bound `unversioned` pin,
+not an executable's version number. SDK inspection confirmed the four-argument native
+`d2ffmdld_Load` signature, but no genuine worker module-open test has run. Program-unit
+bodies and LOV definitions remain explicit extraction blockers, not silently omitted facts.
+
+### Gateway Configuration Reference
+
+This is the implemented configuration contract, not a deployed configuration or permission
+to provision resources. Deploy the reviewed Windows x86 worker through trusted CI; native
+libraries remain on the authorized source host, outside the Linux workbench process.
+The worker's `--serve` mode hosts the gateway; `--extract` and `--extract-schema` are
+bounded child-worker operations used by it, not an operator migration workaround.
+
+| Setting | Meaning |
+| --- | --- |
+| `OFM_GATEWAY_URL` | HTTPS listener origin; configure its certificate on the host. |
+| `OFM_GATEWAY_TENANT_ID` | Entra tenant GUID allowed to issue caller tokens. |
+| `OFM_GATEWAY_AUDIENCE` | Single expected token audience for the gateway application. |
+| `OFM_GATEWAY_CALLER_APP_IDS` | Comma-separated allowlist of caller application GUIDs. |
+| `OFM_GATEWAY_SOURCE_REGISTRY` | Absolute path to the operator-controlled JSON source registry. |
+| `OFM_GATEWAY_MAX_CONCURRENT_EXTRACTIONS` | Bounded concurrency, default 1, maximum 8. |
+| `OFM_GATEWAY_EXTRACTION_TIMEOUT_SECONDS` | Child-process limit, default 300, maximum 900 seconds. |
+| `OFM_GATEWAY_MAX_WORKER_OUTPUT_BYTES` | Forms child output bound, default 1 MiB, maximum 8 MiB. |
+| `OFM_GATEWAY_MAX_SCHEMA_OUTPUT_BYTES` | Schema child output bound, default 24 MiB, maximum 32 MiB. |
+| `SourceGateway__Authority` | Workbench HTTPS gateway origin, with no path or credentials. |
+| `SourceGateway__TokenScope` | Workbench managed-identity scope for that gateway audience. |
+
+`OFM_GATEWAY_ALLOW_LOOPBACK_HTTP` is only a local development exception, never a remote
+transport option. The workbench client still requires HTTPS and refuses redirects.
+
+The registry has `schemaVersion: 1` and a `sources` array. Each entry binds
+`sourceEnvironmentId`, `supportedFormsRelease`, separate `inputRoot` and `outputRoot`,
+`formsHome`, `approvedLibrarySha256`, `approvedLibraryFileVersion`, and `schemaAllowlist`.
+`authorizedTenantId` and `authorizedProjectIds` are mandatory: a shared workbench identity
+alone does not authorize every project to read every source. Optional `authorizedProfileHash`
+and `authorizedProfileVersion` pin the exact approved source-profile version.
+
+An optional `oracleCredential` contains `environmentVariable` and `providerAlias`, not a
+connection string. Its variable name must start with `OFM_GATEWAY_ORACLE_`; provision the
+value securely on the gateway host using an approved read-only Oracle account. Never put
+it in the registry, browser, command history, documentation, or Git. The gateway supplies
+the child worker's `OFM_WORKER_*` settings from this trusted configuration, not caller paths.
+
+The GUI's Prepare sources and Read schema (read-only) controls call project/source-scoped
+`/prepare` and `/prepare-schema` workbench endpoints. They authorize membership, correlate
+the immutable profile and original source, call `/source/forms-module/extract` or
+`/source/oracle-schema/extract`, and admit only validated inline artifacts. Successful
+preparation reindexes the copied source and invalidates stale approvals; it is not a
+behavioral baseline, execution approval, or migration attestation. The older Check connection
+probe remains a separate integration gap. Gateway configuration, genuine extraction,
+and the subsequent approved GUI migration all still require live qualification.
+
+## Current Native-Environment Scope
+
+The operator requests a new fictional application authored with genuine Oracle Forms Builder.
+An existing FMB is not an operator prerequisite: creating and retaining the FMB, compiling runtime
+artifacts, and executing query/procedure/commit/rollback acceptance belong to this implementation.
+The historical inventory below establishes absence, not an investigation of download availability.
+Authorized installation media and applicable license acceptance/entitlement remain external gates;
+OS/client/database selection, isolated Azure setup, application creation, and evidence collection are
+implementation work once the release is selected and its prerequisites are verified. Do not silently
+substitute another Forms version or the ASP.NET replica. Generated-target deployment prerequisites
+are unrelated to this source-environment track.
+
 Evidence date: 2026-09-22 UTC. Scope: subscription
 `d4394e57-c076-4c92-a870-5de6bf44f255`, resource group
 `rg-oracle-forms-migration-fleet-dev-b9f0e875`, and known source paths in this repository only.
@@ -63,8 +140,9 @@ authorized media records must independently establish the exact patch.
   certification and the organization's security controls permit it. It need not be in Azure.
 - **Not selected:** Linux for Forms 6i, a Linux container, or a 64-bit worker. NDAPI documents Linux
   x64 only for listed 12c/14c releases, not for 6i.
-- **No host should be provisioned yet.** Media, module, library, and client/database evidence must be
-  present first so a host is not created empty.
+- Provision a host only after the selected release's media and OS/client/database path is viable.
+  A pre-existing module is not required: author the fictional module with the installed Builder.
+  An empty host does not satisfy native-environment acceptance.
 
 ## Source-lab evidence
 
@@ -164,8 +242,8 @@ Do not provision a native VM yet. The next bounded implementation is an owned ex
 4. Build and release a new immutable database image through the trusted repository workflow, then
    deploy it only under a separate approval. Record the new tag, digest, revision, verifier output,
    and the exact no-secret health/query evidence.
-5. Keep the native path separate. Once every external row in the manifest is supplied, validate the
-   tuple on an isolated Windows x86-capable host, build the original fictional order form with the real
+5. Keep the native path separate. Once authorized installation prerequisites are available, validate the
+  selected tuple on an isolated compatible host, build the original fictional order form with the real
    6i Builder, compile and execute it against the verified database tuple, and only then enable the
    pinned native provider.
 

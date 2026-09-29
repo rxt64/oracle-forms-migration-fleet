@@ -500,7 +500,9 @@ internal static class WorkbenchEndpoints
                     context.RequestServices.GetService<ITargetApplicationVerificationGateway>(),
                     entryVerification,
                     context.RequestServices.GetService<ITargetApplicationDeploymentGateway>()),
-                preparation.MutationAuthorizer);
+                preparation.MutationAuthorizer,
+                preparedSourceBinding: PreparedSourceOwnerBinding.Derive(
+                    PlatformIdentity.WorkspaceOwner(actor, projectId!)));
 
             // The run moves off the request thread to keep progress frames flowing while it works.
             Task<MigrationExecutionResult> run = Task.Run(async () =>

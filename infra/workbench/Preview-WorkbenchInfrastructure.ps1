@@ -23,6 +23,23 @@ try {
         throw 'Local Bicep parameter compilation failed.'
     }
 
+    $parameters = Get-Content -LiteralPath $compiledParameterFile -Raw | ConvertFrom-Json -Depth 100
+    if ($parameters.parameters.targetBackendStack.value -cne 'AspNetCore') {
+        throw 'The workbench preview must explicitly select targetBackendStack=AspNetCore.'
+    }
+    if ($parameters.parameters.sandboxDatabaseName.value -cne 'ofm_dotnet_pilot') {
+        throw "The workbench preview must target sandboxDatabaseName='ofm_dotnet_pilot'."
+    }
+    $sandboxSchema = if ($null -eq $parameters.parameters.sandboxDatabaseSchema) {
+        'public'
+    }
+    else {
+        [string] $parameters.parameters.sandboxDatabaseSchema.value
+    }
+    if ($sandboxSchema -cne 'public') {
+        throw "The workbench preview must target sandboxDatabaseSchema='public'."
+    }
+
     $raw = & az deployment group what-if `
         --name 'preview-migration-fleet-workbench' `
         --resource-group $ResourceGroupName `

@@ -45,8 +45,14 @@ Foundation application (`deployTarget=false`) adds only:
 | File service/share | `default/workbench-artifacts` | Transaction Optimized SMB share, 20 GiB quota, seven-day soft delete. |
 | ACA environment storage | `cae-ofmfleet-dev-ykbpnrpd/dotnet-pilot-artifacts` | Read/write Azure Files link used by the workbench volume. |
 | Role assignment | `AcrPull` on `acrofmfleedevykbpnrpd` | Assigned only to the new runtime identity. |
-| PostgreSQL database | `ofm_dotnet_pilot` | Dedicated application database on the existing server; never `postgres` or `ofm_platform`. |
-| PostgreSQL principal/grants | `id-ofmfleet-dotnet-dev-ykbpnrpd` | Database owner; `CONNECT`, `CREATE`, and `TEMPORARY` only in the dedicated database, plus `USAGE`/`CREATE` on its `public` schema. Public database connect and public schema create are revoked. |
+| PostgreSQL database | `ofm_dotnet_pilot` | Dedicated administrator-owned application database on the existing server; never `postgres` or `ofm_platform`. |
+| Runtime PostgreSQL principal/grants | `id-ofmfleet-dotnet-dev-ykbpnrpd` | `CONNECT` and `TEMPORARY` only in the dedicated database, plus `USAGE`/`CREATE` on its `public` schema. It is not database owner and has no database-level `CREATE`. |
+| Migration PostgreSQL principal/grants | `id-ofmfleet-web-dev-ykbpnrpd` | Separately parameterized `CONNECT`/`TEMPORARY` and `public` schema `USAGE`/`CREATE` for planner-authorized product migrations. |
+
+`ofm_platform` revokes the PostgreSQL default `PUBLIC CONNECT` grant and explicitly preserves access for
+the named administrator and workbench migration principal. The generated runtime principal receives no
+platform grant. `database-probe.bicep` creates a one-shot ACI verifier that proves both managed identities
+against the dedicated database and proves that the runtime identity cannot connect to `ofm_platform`.
 
 The existing workbench template is prepared to mount that environment storage at
 `/mnt/workbench-sources` and set `WORKBENCH_SOURCE_ROOT` to the mount. Applying that separate workbench
@@ -130,9 +136,9 @@ value in `finally`, and never prints it. No credential is written to a generated
 1. `MigrationExecutor.DefaultAdapters` has no production application deployment adapter. The product
    must add a deterministic, approval-gated gateway that verifies the run, source SHA, generated artifact
    hashes, CI evidence, ACR repository, and exact digest immediately before the Azure write.
-2. The generated .NET API currently creates `NpgsqlDataSource` from a passwordless connection string but
-   does not acquire a PostgreSQL Microsoft Entra token. The runtime must use its managed identity to supply
-   a renewable access token; build/test execution must remain network-isolated from Azure credentials.
+2. The generated .NET API now uses `DefaultAzureCredential` with Npgsql's periodic password provider to
+  acquire and renew PostgreSQL Microsoft Entra tokens. Build/test execution remains network-isolated from
+  Azure credentials, and an Azure runtime probe is still required before target deployment.
 3. CI builds only the workbench and demos. A generated-app workflow must build from retained artifacts,
    run the generated acceptance suite without Azure deployment credentials, publish to a dedicated ACR
    repository with immutable source metadata, and return the verified digest to the product.
