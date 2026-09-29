@@ -172,9 +172,59 @@ The exact repaired SHA still requires fresh runner CI and Astra review; neither 
 
 ## Current Operational Evidence
 
+### Real Forms GUI Retest, 2026-09-29 17:05 UTC
+
+**Assessment exercised; migration execution blocked before queueing.** The operator
+requested another GUI test against the genuine Forms 6i application after source commit
+`84093b8101ada4ad2e9f897b295f5727fbd3d14c` was pushed. The existing workbench tab's expired
+sign-in session was recovered with a normal reload. No authentication control was bypassed.
+
+The retained `MRD_ORDER_ENTRY.fmb` and the sole entry in `meridian-native-forms6i.zip`
+were rehashed before upload: 61,440 bytes, SHA-256
+`EF00865A74D164BF409538278F634B5FA79115F2DD3AD06C9D66A442C7CC74D2`.
+This matches the previously transported real source; it is not a freshly recaptured VM
+snapshot or a new source-runtime baseline. The unchanged archive was uploaded through
+the GUI into a new session copy, with one file, two recognized artifact kinds, zero
+warnings, and zero errors. No synthetic XML or additional evidence was supplied.
+
+| Retest observation | Result |
+| --- | --- |
+| Project | `prj-bc437aa38358444985955993a5855af1` |
+| Plan reference / application | `MERIDIAN-NATIVE-RETEST-20260929` / `MERIDIAN_ORDER_ENTRY` |
+| Requested plan | Forms 6i, Oracle 9i, React / AspNetCore / PostgreSql, sandbox migration |
+| Proposed session output | `out/meridian-native-retest-20260929` |
+| Fresh Check connection | `BlockedPrerequisite` for native extraction, Open API load, x86 worker, and Oracle schema extraction; observed versions remain absent |
+| Stored source profile | `meridian-native-6i`, version 2, identity digest prefix `9bac4950b7794d2a` |
+| Stored target profile | Version 1, JavaSpringBoot, database `postgres`, schema `public`; not the requested dedicated .NET pilot target |
+| Assessment | 29 blockers; 1 of 4 required inputs; missing verified PL/SQL, schema export, and bound test baseline |
+| Preparation controls | Prepare sources and Read schema (read-only) are absent from the live GUI |
+| Approval / run | Sandbox approval request disabled for target mismatch; no approval requested or granted; no run queued |
+| Execution results | 0/6 stages ready, 0/0 phases ran, 0 files written; no target DDL, moved rows, build, deployment, or runtime verification |
+
+A read-only Azure Resource Graph query scoped to the known subscription and app returned
+`Succeeded` and latest/ready revision `ca-ofmfleet-dev-ykbpnrpd--0000098`. The query did not
+return the image digest, so this retest does not independently re-establish it. GitHub's
+workflow-run query for exact commit `84093b8101ada4ad2e9f897b295f5727fbd3d14c` returned no
+runs at this observation. The pushed implementation is not a tested released candidate.
+
+The browser remains on the actual blocked plan with its blocker list expanded. No evidence
+checkbox was manually selected; only the uploaded FMB and derived module inventory were
+auto-selected. No direct API mutation, console migration, or target-profile rewrite was
+used. This test verifies real-source intake and the current refusal path, not native
+decoding or migration. Next gates remain exact-candidate CI/review and trusted release,
+gateway deployment/configuration and real-source qualification, a correctly bound .NET
+target project, and the separate named execution approval before a GUI migration run.
+
+Independent GPT 5.6 Sol QA returned **report accuracy PASS / full migration HOLD**.
+It independently read the 29 blockers, blocked source, Java target (labeled Production),
+disabled approval, empty run history, zero execution/file counts, and absent preparation
+controls; it also rehashed both the FMB and ZIP entry. Plan-input choices, upload activity
+counts, connection-check freshness, Azure revision, and GitHub workflow-query results
+remain parent-observed provenance, not independently re-observed facts.
+
 ### Source Preparation Implementation, 2026-09-29
 
-**Implemented and locally tested; unpublished, not native-qualified, not a migration.**
+**Implemented and locally tested; pushed as `84093b8`, not deployed or native-qualified.**
 The worker now has bounded native Forms extraction, read-only Oracle catalog extraction,
 and an authenticated HTTPS gateway. The GUI can request Forms preparation and schema
 reads. Workbench admission binds inline artifacts to the caller's tenant/project, immutable
