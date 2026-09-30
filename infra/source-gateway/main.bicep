@@ -24,6 +24,15 @@ param infrastructureSubnetName string = 'snet-ofmfleet-private-workbench'
 ])
 param infrastructureSubnetPrefix string = '10.246.0.64/27'
 
+@description('Dedicated subnet name for private endpoints used by the private workbench.')
+param privateEndpointSubnetName string = 'snet-ofmfleet-private-endpoints'
+
+@description('Approved dedicated private endpoint subnet prefix.')
+@allowed([
+  '10.246.0.96/27'
+])
+param privateEndpointSubnetPrefix string = '10.246.0.96/27'
+
 @description('Internal Container Apps managed environment name.')
 param managedEnvironmentName string = 'cae-ofmfleet-private-dev'
 
@@ -65,6 +74,19 @@ resource infrastructureSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-05
   }
 }
 
+resource privateEndpointSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-05-01' = {
+  parent: existingVnet
+  name: privateEndpointSubnetName
+  dependsOn: [
+    infrastructureSubnet
+  ]
+  properties: {
+    addressPrefix: privateEndpointSubnetPrefix
+    privateEndpointNetworkPolicies: 'Disabled'
+    privateLinkServiceNetworkPolicies: 'Enabled'
+  }
+}
+
 resource managedEnvironment 'Microsoft.App/managedEnvironments@2025-01-01' = {
   name: managedEnvironmentName
   location: location
@@ -95,3 +117,4 @@ output managedEnvironmentId string = managedEnvironment.id
 output managedEnvironmentDefaultDomain string = managedEnvironment.properties.defaultDomain
 output managedEnvironmentInboundStaticIp string = managedEnvironment.properties.staticIp
 output existingWorkbenchIdentityId string = existingWorkbenchIdentity.id
+output privateEndpointSubnetId string = privateEndpointSubnet.id

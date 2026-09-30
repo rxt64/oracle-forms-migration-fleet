@@ -193,6 +193,34 @@ certificate trust publication, and protected read-only Oracle credential provisi
 No gateway service, certificate, identity, network resource or source database was changed
 by these checks. The actual migration remains NotExecuted.
 
+Gateway commit `0c5154f437b3a34e45817cc32844f2796ca41ba3` passed all four
+required CI jobs in `36748627097`, including Ubuntu worker execution and Windows
+worker checks. Exact-candidate code-release validation completed; PR39 merged as
+`c2595857471fc5a39e5b509dfd4d834acf2c1952`. Trusted main CI/release
+`36757666326` is in progress; no main worker installation is claimed yet.
+
+### Private PostgreSQL Route, 2026-09-30
+
+The live PostgreSQL server supports Private Link with subresource `postgresqlServer`
+and zone `privatelink.postgres.database.azure.com`. The bounded artifact proposal adds
+a private endpoint on the free `10.246.0.96/27` subnet, its private DNS wiring, and
+limits the private workbench to one replica. Existing PostgreSQL public access and
+firewall rules remain unchanged. No NAT Gateway or guessed outbound firewall IP is used.
+Estimated incremental cost is about USD 27.05/month scaled to zero or USD 66.47/month
+continuously active, before queries, logs and data processing. The USD 70 planning
+ceiling is not a hard billing cap.
+
+Independent Sol artifact QA passed; Astra closed the subnet concurrency finding after
+the endpoint subnet was made dependent on the ACA subnet. Both templates compile,
+PowerShell behavior/parser checks pass, and the recorded Checkov scan reports four
+passed checks and no failures. Fresh full foundation what-if reports three creates
+(ACA environment and two subnets), 37 ignored existing resources, no modifications,
+no deletes, and no diagnostics. An earlier two-create report was incomplete and is
+not the controlling evidence. The application-stage what-if still requires real
+foundation outputs and the trusted image/auth inputs. This is artifact-generation
+and validation evidence only; infrastructure apply, Entra changes, Forms VM service
+installation and Oracle credential provisioning have not been authorized or performed.
+
 ### Gateway Unattended-Host Prerequisite, 2026-09-29
 
 Implemented the source-worker code prerequisite the Draft private-gateway proposal names,

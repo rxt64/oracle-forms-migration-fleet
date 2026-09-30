@@ -12,6 +12,8 @@ param(
 
     [string] $ManagedEnvironmentInboundStaticIp = '',
 
+    [string] $PrivateEndpointSubnetId = '',
+
     [string] $ContainerImage = '',
 
     [guid] $SourceGatewayApplicationClientId = [guid]::Empty,
@@ -103,6 +105,10 @@ if ($ContainerImage -cnotmatch '^acrofmfleedevykbpnrpd\.azurecr\.io/migration-fl
 if ($ManagedEnvironmentDefaultDomain -notmatch '^[a-z0-9.-]+\.azurecontainerapps\.io$') {
     throw 'ManagedEnvironmentDefaultDomain must be the exact defaultDomain output of the internal ACA environment.'
 }
+$expectedPrivateEndpointSubnetId = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Network/virtualNetworks/vnet-ofm-forms6i-j6mrrerz/subnets/snet-ofmfleet-private-endpoints"
+if ($PrivateEndpointSubnetId -cne $expectedPrivateEndpointSubnetId) {
+    throw 'PrivateEndpointSubnetId must be the exact privateEndpointSubnetId output of the approved foundation deployment.'
+}
 $parsedIp = $null
 if (-not [Net.IPAddress]::TryParse($ManagedEnvironmentInboundStaticIp, [ref] $parsedIp) -or
     $parsedIp.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork) {
@@ -128,6 +134,7 @@ try {
         parameters = [ordered]@{
             managedEnvironmentDefaultDomain = @{ value = $ManagedEnvironmentDefaultDomain }
             managedEnvironmentInboundStaticIp = @{ value = $ManagedEnvironmentInboundStaticIp }
+            privateEndpointSubnetId = @{ value = $PrivateEndpointSubnetId }
             containerImage = @{ value = $ContainerImage }
             workbenchAuthClientSecret = @{ value = $env:OFM_WORKBENCH_AUTH_CLIENT_SECRET }
             operatorPrincipalObjectIds = @{ value = @($OperatorPrincipalObjectIds.Guid) }
@@ -156,5 +163,5 @@ finally {
     Remove-Item -LiteralPath $parameterPath -Force -ErrorAction SilentlyContinue
 }
 
-Write-Output 'What-if completed without apply. Review the diff for creates only and the single approved NSG rule addition.'
+Write-Output 'What-if completed without apply. Review the diff for creates only, the single approved NSG rule addition, and no PostgreSQL server modification.'
 Write-Output "Repository root: $repositoryRoot"

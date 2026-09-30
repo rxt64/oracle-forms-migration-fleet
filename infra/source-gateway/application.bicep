@@ -20,6 +20,10 @@ param managedEnvironmentInboundStaticIp string
 @description('Existing VNet containing the private workbench and source hosts.')
 param existingVnetName string = 'vnet-ofm-forms6i-j6mrrerz'
 
+@description('Exact privateEndpointSubnetId output returned by main.bicep.')
+@minLength(1)
+param privateEndpointSubnetId string
+
 @description('Existing Forms 6i VM NSG. Only one source-gateway ingress rule is added.')
 param existingFormsNsgName string = 'nsg-ofm-forms6i-j6mrrerz'
 
@@ -92,6 +96,8 @@ param azureAiReviewModelDeploymentName string = 'gpt-5.6-sol'
 param containerAppName string = 'ca-ofmfleet-private-dev'
 param sourceGatewayPrivateDnsZoneName string = 'ofm.source.internal'
 param sourceGatewayHostName string = 'gateway'
+param postgresPrivateDnsZoneName string = 'privatelink.postgres.database.azure.com'
+param postgresPrivateEndpointName string = 'pe-ofmfleet-postgres-dev'
 @allowed([
   '10.246.0.4'
 ])
@@ -132,6 +138,10 @@ resource existingWorkbenchIdentity 'Microsoft.ManagedIdentity/userAssignedIdenti
 
 resource existingRegistry 'Microsoft.ContainerRegistry/registries@2023-07-01' existing = {
   name: existingRegistryName
+}
+
+resource existingPostgresServer 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' existing = {
+  name: sandboxServerName
 }
 
 resource allowPrivateWorkbenchToGateway 'Microsoft.Network/networkSecurityGroups/securityRules@2024-05-01' = {
@@ -207,6 +217,62 @@ resource sourceGatewayRecord 'Microsoft.Network/privateDnsZones/A@2024-06-01' = 
     aRecords: [
       {
         ipv4Address: sourceGatewayPrivateIp
+      }
+    ]
+  }
+}
+
+resource postgresPrivateDnsZone 'Microsoft.Network/privateDnsZones@2024-06-01' = {
+  name: postgresPrivateDnsZoneName
+  location: 'global'
+  tags: tags
+}
+
+resource postgresPrivateDnsLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = {
+  parent: postgresPrivateDnsZone
+  name: 'link-${existingVnetName}'
+  location: 'global'
+  properties: {
+    registrationEnabled: false
+    virtualNetwork: {
+      id: existingVnet.id
+    }
+  }
+}
+
+resource postgresPrivateEndpoint 'Microsoft.Network/privateEndpoints@2024-05-01' = {
+  name: postgresPrivateEndpointName
+  location: location
+  tags: tags
+  properties: {
+    subnet: {
+      id: privateEndpointSubnetId
+    }
+    privateLinkServiceConnections: [
+      {
+        name: 'postgresqlServer'
+        properties: {
+          privateLinkServiceId: existingPostgresServer.id
+          groupIds: [
+            'postgresqlServer'
+          ]
+          requestMessage: 'Private source-gateway workbench PostgreSQL route.'
+        }
+      }
+    ]
+  }
+}
+
+resource postgresPrivateDnsZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-05-01' = {
+  parent: postgresPrivateEndpoint
+  name: 'default'
+  properties: {
+    privateDnsZoneConfigs: [
+      {
+        name: 'postgresqlServer'
+        properties: {
+          privateDnsZoneId: postgresPrivateDnsZone.id
+        }
       }
     ]
   }
@@ -307,7 +373,7 @@ resource privateWorkbench 'Microsoft.App/containerApps@2025-01-01' = {
       ]
       scale: {
         minReplicas: 0
-        maxReplicas: 2
+        maxReplicas: 1
         rules: [
           {
             name: 'private-http'
@@ -373,4 +439,5 @@ output privateWorkbenchUrl string = 'https://${appFqdn}'
 output requiredWorkbenchRedirectUri string = 'https://${appFqdn}/.auth/login/aad/callback'
 output sourceGatewayAuthority string = sourceGatewayAuthority
 output sourceGatewayTokenScope string = sourceGatewayTokenScope
-output postgresFirewallRequirement string = 'Not generated: supply a separately verified stable ACA outbound IPv4 /32. The managed-environment staticIp above is inbound-only.'
+output postgresPrivateEndpointId string = postgresPrivateEndpoint.id
+output postgresPrivateDnsZoneId string = postgresPrivateDnsZone.id
