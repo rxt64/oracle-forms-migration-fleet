@@ -172,6 +172,74 @@ The exact repaired SHA still requires fresh runner CI and Astra review; neither 
 
 ## Current Operational Evidence
 
+### Gateway Publication Review, 2026-09-30
+
+The unattended gateway and private-network installation artifacts are implemented but
+not installed. Independent QA closed the final publication findings: credential-input
+validation now precedes platform checks, restricted ACLs replace existing explicit grants,
+the trust-overlay workflow declares Actions read permission, and transfer-certificate
+cleanup deletes and verifies removal of the CNG private key, including creation failures.
+
+Observed local checks: 317/317 Windows worker tests, 3/3 focused credential tests, installer
+behavior/parser checks (`SOURCE_GATEWAY_POWERSHELL_TESTS_PASS`), clean diagnostics and
+scoped whitespace checks. No native Linux execution was available locally; trusted CI
+must supply that evidence. Astra returned scoped CODE PUBLICATION PASS for these fixes,
+not host-apply or operational qualification. An interrupted unrelated test invocation is
+not counted as evidence.
+
+Host installation still requires the successful main-push worker artifact, separately
+approved private connectivity and stable PostgreSQL egress, Entra gateway identity,
+certificate trust publication, and protected read-only Oracle credential provisioning.
+No gateway service, certificate, identity, network resource or source database was changed
+by these checks. The actual migration remains NotExecuted.
+
+### Gateway Unattended-Host Prerequisite, 2026-09-29
+
+Implemented the source-worker code prerequisite the Draft private-gateway proposal names,
+so the existing console host can be installed honestly as a Windows service later. This is
+**code capability only**. The gateway is **NotExecuted**: no service was installed, no
+certificate was created or read, no credential was provisioned, no Oracle connection was
+opened, no source was extracted, and nothing in Azure, Entra, the Forms VM or the Oracle
+host was inspected or changed. The proposal in `.azure/deployment-plan.md` stays Draft.
+
+Three capabilities, all fail-closed:
+
+- Windows service lifetime under the constant service name `OFMSourceGateway`, with the
+  content root pinned to the installed directory rather than the working directory the
+  Service Control Manager supplies. `--serve` is unchanged as a console entry point.
+- Server certificate selection from `LocalMachine\My` by pinned thumbprint, or by DNS
+  name defaulting to the listener host. A candidate must hold a private key, be inside
+  its validity window and carry Server Authentication EKU. No match, nothing usable, or
+  two usable candidates each refuse to start. No PFX, no password, no wildcard, no
+  developer-certificate or cleartext fallback, and no validation bypass on either side.
+- DPAPI `CurrentUser` protected credential files, located by a single configured root and
+  named for the variable the registry already declares. Entropy binds each blob to that
+  variable name. A protected file that cannot be decrypted or does not decrypt to one
+  connect string is a refused request with no environment fallback; the environment is
+  read only where no protected file was provisioned. `--protect-credential` reads the
+  value from standard input, never an argument, and echoes nothing.
+
+The resolved connect string still reaches only the schema child's
+`OFM_WORKER_ORACLE_CONNECTION_STRING`. It is not placed in the gateway's own environment
+and never in a Forms child; the protected root and registry path are not inherited by a
+schema child. Native extraction scope, the caller allowlist, the tenant/project binding and
+the read-only registry surface are unchanged.
+
+Validation, local development diagnostics only, not release evidence: full solution build
+clean, and `OracleFormsMigrationFleet.SourceWorker.Tests` 309/309 passing (277 before this
+change, 32 added). New regressions cover thumbprint parsing and normalization, https
+subject defaulting, loopback listeners selecting no certificate, credential-root validation,
+certificate selection by pin and by SAN with wrong-host, expired, missing-EKU, missing-key
+and ambiguity refusals, host build refusal on an unmatched pin, a real Windows DPAPI round
+trip with the variable-name binding proven by a renamed blob, malformed and undecryptable
+protected files refusing without fallback, redaction of values from failure text, and schema
+child environment isolation. CLI checks on this Windows host: `--help` renders, a real
+DPAPI blob was written for a non-secret placeholder variable in a temporary directory and
+contained no plaintext, a non-allowlisted variable name was rejected, and `--serve` with an
+unmatched pinned thumbprint refused to listen and exited 64. The temporary directory was
+removed. No commit, push, release or deployment was made. Operator-facing requirements are
+in `docs/OPERATIONS.md`; installation remains outstanding and unauthorized here.
+
 ### Trusted Workbench Release, 2026-09-29
 
 Independent Astra rereview closed the path-alias finding for exact candidate
@@ -260,11 +328,16 @@ The specialist's preceding full solution run passed 2,105 host, 277 worker and 5
 tests. New-commit CI and exact-candidate release review remain required.
 
 Infrastructure assessment recommends a parallel VNet-integrated workbench and private
-HTTPS source gateway, retaining the existing environment. The current local deployment
-plan contains a Draft proposal, not an apply authorization. Its subnet, TLS hostname and
-certificate, Entra configuration, durability and budget remain unresolved. A Standard-tier
-retail pricing query returned no matching meters, so no verified incremental cost is
-claimed. No public gateway was exposed, Azure resources changed, or migration run started.
+HTTPS source gateway, retaining the existing environment. The local plan is approved only
+for artifact generation and validation, not apply. Independent infrastructure QA repaired
+installer rerun trust churn, checked every SCM/ACL native exit, stopped the service before
+binary replacement, admitted both LocalService and the restricted service SID where needed,
+converted the reviewed DER root to PEM in the trusted Linux image workflow, retained a
+commit/digest image manifest, and pinned the approved gateway IP/subnet. Local Bicep,
+PowerShell/mock, and Checkov gates pass. Real Forms-VM service/certificate behavior, the
+public root bytes, Entra app/role, stable PostgreSQL egress, exact what-if, trusted image
+build, and native extraction remain unverified. No public gateway was exposed, Azure/VM/
+Entra/Oracle resources changed, secret handled, or migration run started.
 
 ### Claim-Root Review Closure, 2026-09-29
 

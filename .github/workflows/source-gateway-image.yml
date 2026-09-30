@@ -1,0 +1,177 @@
+name: Build private source-gateway workbench image
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: 'Full main SHA whose successful CI produced the release-approved base image'
+        required: true
+        type: string
+      ci_run_id:
+        description: 'Successful main-push CI run for commit_sha'
+        required: true
+        type: string
+      base_image:
+        description: 'Immutable release-approved workbench image, including @sha256:<digest>'
+        required: true
+        type: string
+      root_certificate_sha256:
+        description: 'Reviewed SHA-256 of the committed public root CER'
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+
+concurrency:
+  group: oracle-forms-migration-fleet-source-gateway-image
+  cancel-in-progress: false
+
+env:
+  REGISTRY: acrofmfleedevykbpnrpd
+  BASE_REPOSITORY: migration-fleet-workbench
+  OUTPUT_REPOSITORY: migration-fleet-workbench-source-gateway
+  RESOURCE_GROUP: rg-oracle-forms-migration-fleet-dev-b9f0e875
+  RELEASED_CONTAINER_APP: ca-ofmfleet-dev-ykbpnrpd
+  EXPECTED_SUBSCRIPTION_ID: d4394e57-c076-4c92-a870-5de6bf44f255
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Verify exact main commit and trusted CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_SHA: ${{ inputs.commit_sha }}
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ || ! "$CI_RUN_ID" =~ ^[0-9]+$ ]]; then
+            echo 'commit_sha and ci_run_id are malformed.' >&2
+            exit 1
+          fi
+          git fetch --no-tags origin main "$REQUESTED_SHA"
+          if ! git merge-base --is-ancestor "$REQUESTED_SHA" origin/main; then
+            echo 'Requested commit is not reachable from main.' >&2
+            exit 1
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CI_RUN_ID" > "$RUNNER_TEMP/ci-run.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CI_RUN_ID/jobs?filter=latest&per_page=100" > "$RUNNER_TEMP/ci-jobs.json"
+          python3 .github/scripts/verify_required_ci.py \
+            "$GITHUB_REPOSITORY" "$REQUESTED_SHA" manual \
+            "$RUNNER_TEMP/ci-run.json" "$RUNNER_TEMP/ci-jobs.json"
+          git checkout --detach "$REQUESTED_SHA"
+
+      - name: Verify public root certificate
+        env:
+          EXPECTED_ROOT_SHA256: ${{ inputs.root_certificate_sha256 }}
+        run: |
+          set -euo pipefail
+          CERT=infra/source-gateway/trust/ofm-source-gateway-dev-root-2026.cer
+          if [[ ! "$EXPECTED_ROOT_SHA256" =~ ^[0-9a-f]{64}$ || ! -f "$CERT" ]]; then
+            echo 'The reviewed public root certificate or its SHA-256 is missing.' >&2
+            exit 1
+          fi
+          ACTUAL=$(sha256sum "$CERT" | cut -d' ' -f1)
+          if [[ "$ACTUAL" != "$EXPECTED_ROOT_SHA256" ]]; then
+            echo 'The committed public root certificate does not match the reviewed SHA-256.' >&2
+            exit 1
+          fi
+          PEM=infra/source-gateway/trust/ofm-source-gateway-dev-root-2026.pem
+          openssl x509 -inform DER -in "$CERT" -out "$PEM"
+          openssl x509 -in "$PEM" -noout -checkend 0
+          if ! openssl x509 -in "$PEM" -noout -text | grep -q 'CA:TRUE'; then
+            echo 'The reviewed root certificate is not a valid certificate authority.' >&2
+            exit 1
+          fi
+          openssl verify -CAfile "$PEM" "$PEM"
+
+      - name: Sign in to Azure and registry
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - run: az acr login --name "$REGISTRY"
+
+      - name: Verify and build trust overlay
+        env:
+          BASE_IMAGE: ${{ inputs.base_image }}
+          DEPLOY_SHA: ${{ inputs.commit_sha }}
+          ROOT_SHA256: ${{ inputs.root_certificate_sha256 }}
+        run: |
+          set -euo pipefail
+          ACTUAL_SUBSCRIPTION_ID=$(az account show --query id --output tsv)
+          if [[ "$ACTUAL_SUBSCRIPTION_ID" != "$EXPECTED_SUBSCRIPTION_ID" ]]; then
+            echo 'Azure login did not select the pinned lab subscription.' >&2
+            exit 1
+          fi
+          if [[ ! "$BASE_IMAGE" =~ ^$REGISTRY\.azurecr\.io/$BASE_REPOSITORY@sha256:[0-9a-f]{64}$ ]]; then
+            echo 'base_image is not an immutable digest in the approved workbench repository.' >&2
+            exit 1
+          fi
+          RELEASE=$(az containerapp show --name "$RELEASED_CONTAINER_APP" --resource-group "$RESOURCE_GROUP" --output json)
+          RELEASE_IMAGE=$(jq -r '.properties.template.containers[0].image' <<< "$RELEASE")
+          RELEASE_LATEST=$(jq -r '.properties.latestRevisionName' <<< "$RELEASE")
+          RELEASE_READY=$(jq -r '.properties.latestReadyRevisionName' <<< "$RELEASE")
+          RELEASE_STATUS=$(jq -r '.properties.runningStatus' <<< "$RELEASE")
+          if [[ "$RELEASE_IMAGE" != "$BASE_IMAGE" || "$RELEASE_LATEST" != "$RELEASE_READY" || \
+                "$RELEASE_STATUS" != "Running" || -z "$RELEASE_READY" ]]; then
+            echo 'base_image is not the healthy latest-ready image of the released public workbench.' >&2
+            exit 1
+          fi
+          docker pull "$BASE_IMAGE"
+          REVISION=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$BASE_IMAGE")
+          if [[ "$REVISION" != "$DEPLOY_SHA" ]]; then
+            echo 'The base image revision does not match the trusted main commit.' >&2
+            exit 1
+          fi
+          TAG="${DEPLOY_SHA::12}-${ROOT_SHA256::12}"
+          docker buildx build --push --provenance=false \
+            --file infra/source-gateway/Dockerfile.private-workbench \
+            --build-arg "BASE_IMAGE=$BASE_IMAGE" \
+            --label "org.opencontainers.image.revision=$DEPLOY_SHA" \
+            --label "com.microsoft.ofmfleet.base-image=$BASE_IMAGE" \
+            --label "com.microsoft.ofmfleet.source-gateway-root-sha256=$ROOT_SHA256" \
+            --tag "$REGISTRY.azurecr.io/$OUTPUT_REPOSITORY:$TAG" \
+            infra/source-gateway
+          DIGEST=$(az acr manifest show-metadata --registry "$REGISTRY" \
+            --name "$OUTPUT_REPOSITORY:$TAG" --query digest --output tsv)
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo 'ACR did not return a valid immutable digest.' >&2
+            exit 1
+          fi
+          MANIFEST_DIR="$RUNNER_TEMP/source-gateway-image"
+          mkdir -p "$MANIFEST_DIR"
+          jq -n \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg sourceCommit "$DEPLOY_SHA" \
+            --arg workflowCommit "$GITHUB_SHA" \
+            --arg ciRunId "${{ inputs.ci_run_id }}" \
+            --arg buildRunId "$GITHUB_RUN_ID" \
+            --arg buildRunAttempt "$GITHUB_RUN_ATTEMPT" \
+            --arg baseImage "$BASE_IMAGE" \
+            --arg baseRevision "$RELEASE_READY" \
+            --arg rootCertificateSha256 "$ROOT_SHA256" \
+            --arg image "$REGISTRY.azurecr.io/$OUTPUT_REPOSITORY@$DIGEST" \
+            --arg tag "$TAG" \
+            '{schemaVersion:1, repository:$repository, sourceCommit:$sourceCommit, workflowCommit:$workflowCommit, ciRunId:$ciRunId, buildRunId:$buildRunId, buildRunAttempt:$buildRunAttempt, baseImage:$baseImage, baseRevision:$baseRevision, rootCertificateSha256:$rootCertificateSha256, image:$image, tag:$tag}' \
+            > "$MANIFEST_DIR/manifest.json"
+          echo "Trusted private workbench image: $REGISTRY.azurecr.io/$OUTPUT_REPOSITORY@$DIGEST" >> "$GITHUB_STEP_SUMMARY"
+          echo 'This workflow builds and pushes an image only. It does not deploy or mutate the Container App.' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Retain private workbench image provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-gateway-image-${{ inputs.commit_sha }}
+          path: ${{ runner.temp }}/source-gateway-image/manifest.json
+          if-no-files-found: error
+          retention-days: 30

@@ -35,6 +35,7 @@ public sealed class GatewayWorkspace : IDisposable
         OutputRoot = Directory.CreateDirectory(Path.Combine(Root, "artifacts")).FullName;
         FormsHome = Directory.CreateDirectory(Path.Combine(Root, "orant")).FullName;
         Elsewhere = Directory.CreateDirectory(Path.Combine(Root, "elsewhere")).FullName;
+        CredentialRoot = Directory.CreateDirectory(Path.Combine(Root, "credentials")).FullName;
         RegistryPath = Path.Combine(Root, "source-registry.json");
         File.WriteAllText(RegistryPath, RegistryJson(InputRoot, OutputRoot, FormsHome, oracleConnection));
     }
@@ -46,6 +47,9 @@ public sealed class GatewayWorkspace : IDisposable
     public string OutputRoot { get; }
 
     public string FormsHome { get; }
+
+    /// <summary>Where DPAPI-protected credential files live. Empty until a test provisions one.</summary>
+    public string CredentialRoot { get; }
 
     /// <summary>A directory that is not any registered root, used to prove containment is enforced.</summary>
     public string Elsewhere { get; }
@@ -135,6 +139,12 @@ public sealed class GatewayWorkspace : IDisposable
     }
 
     public GatewaySourceEntry Entry() => Options().Registry.Find(SourceId)!;
+
+    /// <summary>Places a protected credential blob where the provider derives its path.</summary>
+    public void WriteProtectedCredential(string variableName, byte[] blob) =>
+        File.WriteAllBytes(
+            Path.Combine(CredentialRoot, variableName + GatewayCredentialProvider.ProtectedFileExtension),
+            blob);
 
     /// <summary>Places a module under the registered input root and returns the digest a request must pin.</summary>
     public string WriteModule(string alias, string content)

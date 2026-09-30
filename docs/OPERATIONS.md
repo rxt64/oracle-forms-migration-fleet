@@ -39,6 +39,65 @@ az group show -n rg-oracle-forms-migration-fleet-dev-b9f0e875 --query id -o tsv
 az ad app list --display-name 'Migration Fleet Workbench - dev' --query "[0].appId" -o tsv
 ```
 
+## Run the source gateway unattended
+
+The source worker also serves the gateway (`--serve`), and that mode is the Windows service entry point.
+`--help` prints every setting. Nothing below installs anything: it states what the code now requires, and
+the gateway is not installed or running anywhere.
+
+Deterministic identity. The service name is the constant `OFMSourceGateway`, not a setting, so an
+installer, a log line and an ACL cannot disagree about which service is the gateway. The host pins its
+content root to the installed directory, because the Service Control Manager starts a service with the
+system directory as its working directory.
+
+TLS from the machine store, never a PFX. An https listener selects one certificate out of
+`LocalMachine\My`. There is no PFX path and no password anywhere in configuration, so the private key
+stays non-exportable and the installer's only job is granting the service account read access to it.
+
+- `OFM_GATEWAY_TLS_CERTIFICATE_THUMBPRINT` pins the exact approved certificate. Prefer it. A pin does not
+  bypass DNS validation: the same certificate must also match the configured subject/listener host.
+- `OFM_GATEWAY_TLS_CERTIFICATE_SUBJECT` matches by DNS name instead, defaulting to the listener host.
+- A candidate must hold a usable private key, be inside its validity window, and carry a Server
+  Authentication enhanced key usage. A certificate with no EKU extension is refused, not treated as
+  unconstrained, and no wildcard is honoured.
+- Every failure is a refusal to start: nothing matched, nothing usable, or two usable candidates. The
+  gateway will not choose between two certificates during a rotation, and it never falls back to a
+  development certificate or to cleartext. Cleartext is available only on a loopback host with
+  `OFM_GATEWAY_ALLOW_LOOPBACK_HTTP=true`, for local development.
+
+Oracle credentials in DPAPI files, not the service environment. The source registry still holds only a
+variable **name** beginning `OFM_GATEWAY_ORACLE_`. Set `OFM_GATEWAY_PROTECTED_CREDENTIAL_ROOT` to a
+directory and the gateway reads that variable from `<root>\<VARIABLE>.dpapi` instead of its own
+environment block. Provision each file as the service account:
+
+```powershell
+# Run as the service account, on the gateway host. The value is typed or piped; it is never an argument.
+$env:OFM_GATEWAY_PROTECTED_CREDENTIAL_ROOT = 'C:\ProgramData\OracleFormsMigrationFleet\credentials'
+OracleFormsMigrationFleet.SourceWorker.exe --protect-credential OFM_GATEWAY_ORACLE_MERIDIAN_RO
+```
+
+- The file name is derived from the variable name. No registry document and no request can point the
+  gateway at an arbitrary blob.
+- The root must be provisioned before startup, must be a real directory rather than a filesystem link,
+  and must inherit an ACL limited to administrators and the gateway service identity. The utility does
+  not create a potentially broad directory on the operator's behalf.
+- Credential entries must be regular non-link files and are capped at 32 KiB before DPAPI is invoked.
+- The blob is encrypted for `CurrentUser` with entropy that includes the variable name, so a file copied
+  to another account, another host, or another variable's name does not decrypt.
+- A protected file that exists but cannot be decrypted, or decrypts to anything other than a single-line
+  connect string, is a refused request. It does **not** fall back to the environment. The environment is
+  read only when no protected file was provisioned for that variable at all.
+- The resolved connect string is written into one place: the schema child process's
+  `OFM_WORKER_ORACLE_CONNECTION_STRING`. It never enters the gateway's own environment, a Forms child, a
+  command line, a log line, a protocol field or a failure message. Failure messages name the variable and
+  the file path only. The protected root and the registry path are not among the variables a schema child
+  inherits.
+
+Installation prerequisites this code does not perform: copy only a CI-produced, hash-verified
+`win-x86` worker; register the service under a least-privileged account with a restricted service SID;
+grant that SID read/execute on the worker and registry, modify on the output root only, and private-key
+read on the pinned certificate; and keep the listener off any public network.
+
 ## Deploy an application revision
 
 Deployable images are built by the GitHub runner and tagged from the commit. Dispatch the same workflow

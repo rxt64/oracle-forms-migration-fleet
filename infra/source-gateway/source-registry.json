@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "sources": [
+    {
+      "sourceEnvironmentId": "meridian-native-6i",
+      "supportedFormsRelease": "6.0.8.22.1",
+      "inputRoot": "C:\\OracleForms6iSourceLab\\app\\generated",
+      "outputRoot": "C:\\OracleForms6iSourceLab\\gateway\\output",
+      "formsHome": "C:\\orant",
+      "approvedLibrarySha256": "0fe37a1a56f53d46a4d4498335bcf9bd0071c9458136c888877e9903b6e677b3",
+      "approvedLibraryFileVersion": "unversioned",
+      "schemaAllowlist": [
+        "MERIDIAN"
+      ],
+      "authorizedTenantId": "1984d248-06ca-4d04-a3b8-4c0c1577ab86",
+      "authorizedProjectIds": [
+        "prj-d616e6e807e14b6bb5a468a33da3d744"
+      ],
+      "oracleConnection": {
+        "environmentVariable": "OFM_GATEWAY_ORACLE_MERIDIAN_RO",
+        "providerAlias": "odbc"
+      }
+    }
+  ]
+}

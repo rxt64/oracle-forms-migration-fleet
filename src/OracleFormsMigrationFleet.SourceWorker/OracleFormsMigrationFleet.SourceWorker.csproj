@@ -22,6 +22,10 @@
     <!-- The only Oracle client this worker composes. ODBC is chosen because an 8.0.6 era driver is what
          a Forms 6i host actually has; the extraction service never sees the provider type. -->
     <PackageReference Include="System.Data.Odbc" Version="10.0.11" />
+    <!-- Unattended operation: an SCM service lifetime, and DPAPI so the Oracle connect string can live in
+         a file only the service account can decrypt rather than in the service's environment block. -->
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.11" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
   </ItemGroup>
 
   <ItemGroup>

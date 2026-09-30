@@ -412,6 +412,48 @@ public sealed class GatewaySourceRegistry
 }
 
 /// <summary>
+/// Which certificate an https listener presents. There is no PFX path and no password here by design:
+/// the private key stays non-exportable in <c>LocalMachine\My</c>, and this names the certificate only.
+/// </summary>
+public sealed record GatewayTlsOptions(string? PinnedThumbprint, string SubjectHost)
+{
+    public const string ThumbprintVariable = "OFM_GATEWAY_TLS_CERTIFICATE_THUMBPRINT";
+    public const string SubjectVariable = "OFM_GATEWAY_TLS_CERTIFICATE_SUBJECT";
+
+    /// <summary>
+    /// Reads the certificate selection for <paramref name="listenerHost"/>. The subject defaults to the
+    /// host the listener was configured to bind, because presenting a certificate for a different name
+    /// than the URI callers use is a misconfiguration the gateway should not help an operator into.
+    /// </summary>
+    public static GatewayTlsOptions? TryRead(Func<string, string?> read, string listenerHost, List<string> failures)
+    {
+        string? thumbprint = read(ThumbprintVariable)?.Trim();
+        if (thumbprint is { Length: > 0 })
+        {
+            string normalized = GatewayServerCertificate.Normalize(thumbprint);
+            if (normalized.Length is not (40 or 64) || !normalized.All(char.IsAsciiHexDigit))
+            {
+                failures.Add($"{ThumbprintVariable} must be a SHA-1 or SHA-256 certificate thumbprint in hexadecimal.");
+                return null;
+            }
+
+            thumbprint = normalized.ToUpperInvariant();
+        }
+
+        string? subject = read(SubjectVariable)?.Trim();
+        if (subject is { Length: > 0 } && !GatewayText.IsIdentifier(subject, 253))
+        {
+            failures.Add($"{SubjectVariable} must be the DNS host name the approved certificate was issued for.");
+            return null;
+        }
+
+        return new GatewayTlsOptions(
+            thumbprint is { Length: > 0 } ? thumbprint : null,
+            subject is { Length: > 0 } ? subject : listenerHost);
+    }
+}
+
+/// <summary>
 /// Everything the gateway must be told before it will listen. None of it is a credential: the gateway
 /// authenticates callers with Entra tokens it validates itself, and authenticates to nothing outbound.
 ///
@@ -428,8 +470,16 @@ public sealed record GatewayOptions(
     int MaxConcurrentExtractions,
     TimeSpan ExtractionTimeout,
     int MaxWorkerOutputBytes,
-    int MaxSchemaWorkerOutputBytes)
+    int MaxSchemaWorkerOutputBytes,
+    GatewayTlsOptions? Tls = null,
+    string? ProtectedCredentialRoot = null)
 {
+    /// <summary>
+    /// The Windows service this host installs as. It is a constant rather than a setting so an operator,
+    /// an installer and a log line cannot disagree about which service is the source gateway.
+    /// </summary>
+    public const string ServiceName = "OFMSourceGateway";
+
     public const string UrlVariable = "OFM_GATEWAY_URL";
     public const string LoopbackHttpVariable = "OFM_GATEWAY_ALLOW_LOOPBACK_HTTP";
     public const string TenantVariable = "OFM_GATEWAY_TENANT_ID";
@@ -440,6 +490,12 @@ public sealed record GatewayOptions(
     public const string TimeoutVariable = "OFM_GATEWAY_EXTRACTION_TIMEOUT_SECONDS";
     public const string OutputBytesVariable = "OFM_GATEWAY_MAX_WORKER_OUTPUT_BYTES";
     public const string SchemaOutputBytesVariable = "OFM_GATEWAY_MAX_SCHEMA_OUTPUT_BYTES";
+
+    /// <summary>
+    /// Directory holding DPAPI-protected credential files. It is a locator, never a credential: the file
+    /// within it is named for the variable a registry entry already declares.
+    /// </summary>
+    public const string CredentialRootVariable = "OFM_GATEWAY_PROTECTED_CREDENTIAL_ROOT";
 
     public const int MaxCallerAppIds = 8;
     private const int DefaultConcurrency = 1;
@@ -543,6 +599,34 @@ public sealed record GatewayOptions(
             return false;
         }
 
+        // Only an https listener selects a certificate. A loopback development listener presents none, so
+        // reading a thumbprint there would suggest a protection it does not have.
+        GatewayTlsOptions? tls = null;
+        if (string.Equals(bind!.Scheme, Uri.UriSchemeHttps, StringComparison.Ordinal))
+        {
+            tls = GatewayTlsOptions.TryRead(read, bind.Host, failures);
+            if (failures.Count > 0)
+            {
+                errors = failures;
+                return false;
+            }
+        }
+
+        string? credentialRoot = read(CredentialRootVariable)?.Trim();
+        if (credentialRoot is { Length: > 0 })
+        {
+            credentialRoot = GatewayText.Directory(credentialRoot);
+            if (credentialRoot is null || !GatewayCredentialProvider.IsExistingUnlinkedDirectory(credentialRoot))
+            {
+                errors =
+                [
+                    $"{CredentialRootVariable} must be the fully qualified path of an existing protected credential " +
+                    "directory that is not a filesystem link. Provision and ACL that directory before starting the gateway.",
+                ];
+                return false;
+            }
+        }
+
         options = new GatewayOptions(
             bind!,
             tenant!.ToLowerInvariant(),
@@ -552,7 +636,9 @@ public sealed record GatewayOptions(
             Bounded(read(ConcurrencyVariable), DefaultConcurrency, 1, MaximumConcurrency),
             TimeSpan.FromSeconds(Bounded(read(TimeoutVariable), (int)s_defaultTimeout.TotalSeconds, 1, (int)s_maximumTimeout.TotalSeconds)),
             Bounded(read(OutputBytesVariable), DefaultWorkerOutputBytes, 4 * 1024, MaximumWorkerOutputBytes),
-            Bounded(read(SchemaOutputBytesVariable), DefaultSchemaOutputBytes, MinimumSchemaOutputBytes, MaximumSchemaOutputBytes));
+            Bounded(read(SchemaOutputBytesVariable), DefaultSchemaOutputBytes, MinimumSchemaOutputBytes, MaximumSchemaOutputBytes),
+            tls,
+            credentialRoot is { Length: > 0 } ? credentialRoot : null);
 
         errors = [];
         return true;
