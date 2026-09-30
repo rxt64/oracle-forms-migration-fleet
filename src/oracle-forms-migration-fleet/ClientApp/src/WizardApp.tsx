@@ -674,7 +674,9 @@ export default function WizardApp() {
   const dialogBody = useRef<HTMLElement>(null);
   const dialogOpener = useRef<HTMLElement | null>(null);
   const acquisition = useRef<AbortController | null>(null);
+  const planning = useRef<AbortController | null>(null);
   const run = useRef<AbortController | null>(null);
+  const artifactRequest = useRef<AbortController | null>(null);
   const closeActivity = useCallback(() => setConsoleOpen(false), []);
 
   useEffect(() => {
@@ -701,6 +703,52 @@ export default function WizardApp() {
   // held locator a statement about something else, so it is dropped rather than carried into a run
   // the server would refuse it for.
   useEffect(() => { setLedgerId(null); }, [projectId, workspace?.workspaceId]);
+
+  // The copy the server took, the ticks read off it, the plan generated from it, the run output and
+  // the run being followed are all produced under one project. Moving to another project makes every
+  // one of them a statement about something else, so this tab stops showing them and stops offering
+  // them as inputs. Only the browser's view is dropped: the copy is owned by the project that took
+  // it and expires on the server's own lifetime, and an enqueued run keeps running and stays in that
+  // project's history. The first binding clears nothing, because nothing was produced before it, and
+  // re-reading the context for the same project never reaches here at all.
+  const boundProject = useRef<string | null>(null);
+  useEffect(() => {
+    const previous = boundProject.current;
+    boundProject.current = projectId;
+    if (previous === null) return;
+
+    // In-flight replies were asked for as the previous project and would otherwise land as this one.
+    acquisition.current?.abort();
+    acquisition.current = null;
+    planning.current?.abort();
+    planning.current = null;
+    run.current?.abort();
+    run.current = null;
+    artifactRequest.current?.abort();
+    artifactRequest.current = null;
+
+    setWorkspace(null);
+    setEvidence((current) => current.filter((kind) => !autoEvidence.includes(kind)));
+    setAutoEvidence([]);
+    setAcquiring(false);
+    setSourceError("");
+    setConsoleLines([]);
+    setConsoleOpen(false);
+    setPlan(null);
+    setSubmitting(false);
+    setExecuting(false);
+    setExecution(null);
+    setExecutionError("");
+    setActiveRunId(null);
+    setArtifact(null);
+    setDialog((current) => (current === "artifact" ? null : current));
+    // The new project owns no copy yet, so the operator is returned to the step that takes one
+    // rather than being left on a review of answers that no longer have a source behind them.
+    setStep(0);
+    setStatus(projectId
+      ? "You are working in a different project now. The previous project's copy, plan and run output are no longer shown here; they are still held for the project that owns them."
+      : "No project is selected. The previous project's copy, plan and run output are no longer shown here.");
+  }, [projectId]);
 
   // The database a project writes to is a deployment fact its immutable profile records, and the
   // server refuses an approval and a run that name a different one. Offering the catalog's first
@@ -1062,6 +1110,9 @@ export default function WizardApp() {
       setStatus("Review the highlighted fields before planning.");
       return;
     }
+    planning.current?.abort();
+    const controller = new AbortController();
+    planning.current = controller;
     setSubmitting(true);
     setExecution(null);
     setExecutionError("");
@@ -1070,6 +1121,7 @@ export default function WizardApp() {
       const response = await fetch("/api/workbench/plan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
         // The identifier lets the server derive source facts from the copy it took itself. Without a
         // copy it plans from declarations alone, and nothing in the plan is marked verified.
         body: JSON.stringify(workspace
@@ -1078,13 +1130,17 @@ export default function WizardApp() {
       });
       if (!response.ok) throw new Error(`Planner failed (${response.status}).`);
       const result = await response.json() as PlanResponse;
+      // The plan was asked for as one project. If the operator has moved on, it describes a project
+      // that is no longer selected, so it is discarded rather than shown under the new one.
+      if (planning.current !== controller) return;
       startTransition(() => setPlan(result));
       setView("results");
       setStatus(`Plan generated with ${result.plan.blockers.length} blocker${result.plan.blockers.length === 1 ? "" : "s"}.`);
     } catch (error) {
+      if (controller.signal.aborted) return;
       setStatus(error instanceof Error ? error.message : "The planner request failed.");
     } finally {
-      setSubmitting(false);
+      if (planning.current === controller) setSubmitting(false);
     }
   }
 
@@ -1165,6 +1221,7 @@ export default function WizardApp() {
         projectId,
         targetProfileId: "sandbox",
       });
+      if (run.current !== controller || controller.signal.aborted) return;
       setActiveRunId(durableRunId);
       await followWithReconnect(durableRunId, controller);
     } catch (error) {
@@ -1205,12 +1262,17 @@ export default function WizardApp() {
 
   async function openArtifact(path: string) {
     if ((!workspace && !activeRunId) || !projectId) return;
+    artifactRequest.current?.abort();
+    const controller = new AbortController();
+    artifactRequest.current = controller;
     setArtifact({ path, text: "", error: "" });
     setDialog("artifact");
     try {
-      const text = await fetchArtifact(workspace?.workspaceId ?? "", path, projectId, undefined, activeRunId);
+      const text = await fetchArtifact(workspace?.workspaceId ?? "", path, projectId, controller.signal, activeRunId);
+      if (artifactRequest.current !== controller) return;
       setArtifact({ path, text, error: "" });
     } catch (error) {
+      if (controller.signal.aborted) return;
       setArtifact({ path, text: "", error: error instanceof Error ? error.message : "The artifact could not be loaded." });
     }
   }
@@ -1477,7 +1539,7 @@ export default function WizardApp() {
           </p>
         </div>
 
-        <ProjectApprovals onProjectChange={setProjectId} onTargetProfileStackChange={setProfileStack} />
+        <ProjectApprovals selectedProjectId={projectId} onProjectChange={setProjectId} onTargetProfileStackChange={setProfileStack} />
 
         <div className="mf-intro-actions">
           <button type="button" className="mf-primary" disabled={!projectId} onClick={() => beginSetup()}><Play aria-hidden="true" />New migration</button>
@@ -1500,7 +1562,13 @@ export default function WizardApp() {
         </nav>
 
         <section className="mf-page">
-          {step === 0 && <ProjectApprovals onProjectChange={setProjectId} onTargetProfileStackChange={setProfileStack} />}
+          {step === 0 && <ProjectApprovals
+            workspaceId={workspace?.workspaceId}
+            runRequest={runRequestBody()}
+            selectedProjectId={projectId}
+            onProjectChange={setProjectId}
+            onTargetProfileStackChange={setProfileStack}
+          />}
           <div className="mf-progress"><span aria-hidden="true">Step {step + 1} of {STEPS.length}</span><progress max={STEPS.length} value={step + 1} /></div>
           <p className="mf-visually-hidden" aria-live="polite">{`Step ${step + 1} of ${STEPS.length}: ${STEPS[step]}`}</p>
 
@@ -1712,6 +1780,7 @@ export default function WizardApp() {
         <ProjectApprovals
           workspaceId={workspace?.workspaceId}
           runRequest={runRequestBody()}
+          selectedProjectId={projectId}
           onProjectChange={setProjectId}
           onTargetProfileStackChange={setProfileStack}
         />

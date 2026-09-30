@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { LockKeyhole, RefreshCw, ShieldCheck } from "lucide-react";
 import { InfoTip } from "./InfoTip";
 import {
@@ -123,6 +123,8 @@ interface Props {
   workspaceId?: string;
   /** The same body the planner receives. The server re-derives every binding from it. */
   runRequest?: unknown;
+  /** The caller's current project. The panel is mounted more than once, so it cannot own the selection. */
+  selectedProjectId?: string | null;
   onProjectChange?: (projectId: string | null) => void;
   /** The stored profile's stack, so the wizard can report a mismatch instead of relabelling it. */
   onTargetProfileStackChange?: (stack: TargetProfileStack | null) => void;
@@ -166,9 +168,9 @@ function Row({ label, value, testId }: { label: string; value: string; testId?: 
   return <div className="mf-review-row"><dt>{label}</dt><dd data-testid={testId}>{value}</dd></div>;
 }
 
-export function ProjectApprovals({ workspaceId, runRequest, onProjectChange, onTargetProfileStackChange }: Props) {
+export function ProjectApprovals({ workspaceId, runRequest, selectedProjectId, onProjectChange, onTargetProfileStackChange }: Props) {
   const [context, setContext] = useState<WorkbenchContext | null>(null);
-  const [selected, setSelected] = useState<string>("");
+  const [selected, setSelected] = useState<string>(selectedProjectId ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
@@ -184,10 +186,12 @@ export function ProjectApprovals({ workspaceId, runRequest, onProjectChange, onT
   const [moduleNames, setModuleNames] = useState("");
   const [preparation, setPreparation] = useState<SourcePreparationReport | null>(null);
   const [schemaPreparation, setSchemaPreparation] = useState<SourceSchemaPreparationReport | null>(null);
+  const generation = useRef(0);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (expectedGeneration?: number) => {
     try {
       const payload = await send("/api/workbench/context", "GET") as unknown as WorkbenchContext;
+      if (expectedGeneration !== undefined && expectedGeneration !== generation.current) return false;
       setContext(payload);
       setSelected((current) => {
         const next = payload.projects.some((project) => project.projectId === current)
@@ -197,9 +201,12 @@ export function ProjectApprovals({ workspaceId, runRequest, onProjectChange, onT
         return next;
       });
       setError("");
+      return true;
     } catch (failure) {
+      if (expectedGeneration !== undefined && expectedGeneration !== generation.current) return false;
       setContext(null);
       setError(failure instanceof Error ? failure.message : "The project context could not be read.");
+      return false;
     }
   }, [onProjectChange]);
 
@@ -235,6 +242,13 @@ export function ProjectApprovals({ workspaceId, runRequest, onProjectChange, onT
     setSelectedSourceId("");
   }, [selected]);
 
+  // Counted rather than compared, so leaving a project and coming back is a different run: the gateway
+  // keeps working under the project that asked, but its reply can no longer speak for what is on screen.
+  useLayoutEffect(() => {
+    generation.current += 1;
+    setBusy(false);
+  }, [selected, workspaceId]);
+
   useEffect(() => {
     if (source) {
       setSourceId(source.sourceEnvironmentId);
@@ -246,6 +260,26 @@ export function ProjectApprovals({ workspaceId, runRequest, onProjectChange, onT
       setSchemaAllowlist(source.schemaAllowlist.join(", "));
     }
   }, [source?.canonicalHash]);
+
+  async function runPreparation<T>(run: () => Promise<T>, apply: (report: T) => void, done: string) {
+    const started = generation.current;
+    setBusy(true);
+    setError("");
+    setStatus("");
+    try {
+      const report = await run();
+      if (started !== generation.current) return;
+      apply(report);
+      if (!await load(started)) return;
+      if (started !== generation.current) return;
+      setStatus(done);
+    } catch (failure) {
+      if (started !== generation.current) return;
+      setError(failure instanceof Error ? failure.message : "That action was refused.");
+    } finally {
+      if (started === generation.current) setBusy(false);
+    }
+  }
 
   async function act(action: () => Promise<void>, done: string) {
     setBusy(true);
@@ -327,7 +361,13 @@ export function ProjectApprovals({ workspaceId, runRequest, onProjectChange, onT
         className="mf-secondary"
         disabled={busy || !context.persistence.configured}
         data-testid="create-project"
-        onClick={() => act(async () => { await send("/api/workbench/projects", "POST", { name: `Migration ${new Date().toISOString().slice(0, 16)}` }); }, "Project created.")}
+        onClick={() => act(async () => {
+          const created = await send("/api/workbench/projects", "POST", { name: `Migration ${new Date().toISOString().slice(0, 16)}` });
+          if (typeof created.projectId === "string" && created.projectId) {
+            setSelected(created.projectId);
+            onProjectChange?.(created.projectId);
+          }
+        }, "Project created.")}
       >
         Create a project
       </button>
@@ -426,18 +466,18 @@ export function ProjectApprovals({ workspaceId, runRequest, onProjectChange, onT
                 aria-busy={busy}
                 disabled={busy}
                 data-testid="prepare-run"
-                onClick={() => act(async () => {
+                onClick={() => runPreparation(async () => {
                   const { modules, error: invalid } = validateModuleNames(moduleNames);
                   if (invalid) throw new Error(invalid);
-                  setPreparation(await prepareSources({
+                  return await prepareSources({
                     projectId: project.projectId,
                     sourceEnvironmentId: source.sourceEnvironmentId,
                     profileVersion: source.version,
                     workspaceId,
                     sourceRoot: preparationSourceRoot,
                     modules,
-                  }));
-                }, "Source preparation finished.")}
+                  });
+                }, (report) => setPreparation(report), "Source preparation finished.")}
               >
                 Prepare sources
               </button>
@@ -488,15 +528,13 @@ export function ProjectApprovals({ workspaceId, runRequest, onProjectChange, onT
                 aria-busy={busy}
                 disabled={busy || source.connector === "OperatorSuppliedExport"}
                 data-testid="prepare-schema-run"
-                onClick={() => act(async () => {
-                  setSchemaPreparation(await prepareOracleSchema({
-                    projectId: project.projectId,
-                    sourceEnvironmentId: source.sourceEnvironmentId,
-                    profileVersion: source.version,
-                    workspaceId,
-                    sourceRoot: preparationSourceRoot,
-                  }));
-                }, "Source schema read.")}
+                onClick={() => runPreparation(async () => await prepareOracleSchema({
+                  projectId: project.projectId,
+                  sourceEnvironmentId: source.sourceEnvironmentId,
+                  profileVersion: source.version,
+                  workspaceId,
+                  sourceRoot: preparationSourceRoot,
+                }), (report) => setSchemaPreparation(report), "Source schema read.")}
               >
                 Read schema (read-only)
               </button>

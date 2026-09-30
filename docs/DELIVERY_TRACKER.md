@@ -193,8 +193,10 @@ passed all four required CI jobs and its exact-commit gate, but failed authentic
 the validation approval request returned HTTP 409. The smoke hard-coded JavaSpringBoot
 while the server-owned target profile selected AspNetCore. The server correctly rejected
 the mismatch. The cleanup/rollback step completed successfully at 21:19 UTC, restoring
-the schema-compatible previous template according to workflow verification; separate live
-revision confirmation remains pending. The incidental Northstar demo workflow `36630685698`
+the schema-compatible previous template. Independent live validation confirmed revision
+`ca-ofmfleet-dev-ykbpnrpd--0000100` healthy, active and serving 100 percent traffic on
+the previous digest `482cd91765c04fdcc23ba81ecf93f6f4cd286690dd743bfcdccdbf6daa1c0e58`;
+the temporary smoke runner was absent. The incidental Northstar demo workflow `36630685698`
 was canceled during compilation before deployment; it is not native migration evidence.
 
 The smoke repair uses the server-owned profile identity and stack, verifies the returned
@@ -204,11 +206,47 @@ effects. Opus implemented the repair; independent Sol QA and Astra scoped code-r
 review passed with 14/14 offline tests. These results do not replace a successful new
 trusted release and live authenticated smoke. No approval guard was weakened.
 
+Repair commit `7200ff9eafcfb7a7926d6875f283f0b03e337502` passed all four required
+jobs in CI `36637308763`. Azure Validate completed for the exact bounded retry,
+retaining the separate private-gateway proposal as Draft. PR37 merged as
+`a06046f2be81ff8b2c3c8569a94cbe179f203bb0`; trusted main release
+`36639136287` passed all CI, exact-commit, deployment and authenticated smoke checks.
+Independent infrastructure QA confirmed revision `ca-ofmfleet-dev-ykbpnrpd--0000101`
+healthy and active at 100 percent traffic, with immutable digest
+`0a0a4cce64a7650a1e33e38af960e3229ae9e8226e01893456d20c41a6ece096`
+matching the commit-tagged ACR image. The temporary smoke runner was absent.
+SourceGateway configuration remains absent; release PASS is not native qualification.
+
 Trusted worker artifact `11062622419` was downloaded locally and verified without execution:
 main-push commit/run/ref bindings, x86 PE header, length 99,210,652 bytes and SHA-256
 `7ab7d5874b4207fa244197de9285b92078e20ae47dcc0ce2454d1d172ec1ced6`.
-No native installation, source extraction or target migration occurred. Live post-release
-GUI and revision verification remain pending.
+No native installation, source extraction or target migration occurred.
+
+### Live GUI Project Selection Repair, 2026-09-29
+
+The released GUI created project `prj-d616e6e807e14b6bb5a468a33da3d744`
+(`Migration 2026-09-29T22:50`), bound to React / AspNetCore / PostgreSql and
+`ofm_dotnet_pilot`. The old Java / `postgres` project was preserved. The new project
+received a declared FormsBuilderWorker source environment for Forms 6i / Oracle 9i,
+alias `meridian-native-6i`, schema allowlist `MERIDIAN`, and the retained genuine FMB
+through GUI ZIP upload (one file, 61,440 bytes; no warnings or errors). No approver
+was entered, missing evidence was not asserted, and the request stayed PlanOnly.
+
+The walkthrough exposed a GUI defect: remounting the project panel on results reset
+selection to the first, older Java project. The server's immutable-profile refusal
+remained intact. The scoped client repair preserves the parent-selected project,
+selects newly created projects, and retires local project-bound copies, evidence and
+results on an actual switch without deleting durable server records. Late plan,
+enqueue, preview and preparation responses are fenced from the new project context.
+Step-one preparation now receives the current workspace and source-root binding.
+
+Opus implemented the repair; independent Sol QA repaired late-response gaps and
+passed 10/10 focused browser tests plus the client build. Astra's final scoped
+three-file code-release review passed. Earlier broader suites passed 85 desktop
+tests (2 skipped) and 64 mobile tests (23 skipped), before the final reload guard.
+The operator delegated the explicitly bounded GUI release decision. Publication,
+fresh exact-commit CI, validation and a trusted release are still required for this
+GUI repair. These tests do not claim real source extraction or migration.
 
 ### Canonical Source Identity Repair, 2026-09-29
 
