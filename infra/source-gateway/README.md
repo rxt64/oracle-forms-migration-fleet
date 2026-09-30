@@ -6,8 +6,8 @@ objects, create an Oracle account, extract a source, or deploy a migration.
 
 ## Artifacts
 
-- `main.bicep`: stage 1, adding only the `.64/27` delegated subnet and internal workload-profiles ACA environment.
-- `application.bicep`: stage 2, adding the private app, private DNS, and one exact NSG rule.
+- `main.bicep`: stage 1, adding the `.64/27` delegated ACA subnet, the `.96/27` private-endpoint subnet, and internal workload-profiles ACA environment.
+- `application.bicep`: stage 2, adding the private app, source/ACA private DNS, one exact NSG rule, and a PostgreSQL private endpoint with its DNS zone group and VNet link.
 - `Preview-SourceGateway.ps1`: pinned-subscription compilation and non-applying group what-if wrapper.
 - `Install-SourceGateway.ps1`: trusted main-push x86 artifact verification plus LocalService/TLS/service bootstrap.
 - `New-*`, `Protect-*`, `Complete-*`: one-time public-key transfer and LocalService DPAPI CurrentUser provisioning.
@@ -44,15 +44,17 @@ pwsh infra/source-gateway/Preview-SourceGateway.ps1 -Stage Foundation
 ```
 
 Stage 2 what-if is intentionally impossible until stage 1 has been separately approved and applied,
-because the returned `defaultDomain` and inbound `staticIp` are deployment outputs. Set the existing
-workbench auth secret only in the trusted release process; the wrapper places it in a restricted temporary
-parameter file and deletes it in `finally`, so it is never a command argument or transcript line.
+because the returned `defaultDomain`, inbound `staticIp`, and `privateEndpointSubnetId` are deployment
+outputs. Set the existing workbench auth secret only in the trusted release process; the wrapper places it
+in a restricted temporary parameter file and deletes it in `finally`, so it is never a command argument or
+transcript line.
 
 ```powershell
 $env:OFM_WORKBENCH_AUTH_CLIENT_SECRET = '<trusted-release-secret>'
 pwsh infra/source-gateway/Preview-SourceGateway.ps1 -Stage Application `
     -ManagedEnvironmentDefaultDomain '<stage-1-defaultDomain>' `
     -ManagedEnvironmentInboundStaticIp '<stage-1-staticIp>' `
+   -PrivateEndpointSubnetId '<stage-1-privateEndpointSubnetId>' `
     -ContainerImage 'acrofmfleedevykbpnrpd.azurecr.io/migration-fleet-workbench-source-gateway@sha256:<digest>' `
     -SourceGatewayApplicationClientId '<gateway-app-client-id>' `
     -FoundryAgentEndpoint '<existing-hosted-agent-endpoint>' `
@@ -76,10 +78,10 @@ The following are not invented or auto-selected:
    `migration-fleet-workbench-source-gateway@sha256:<digest>` built from the release-approved base digest.
 6. Oracle DBA output: a read-only `OFM_GATEWAY_ORACLE_MERIDIAN_RO` connect value transferred through the one-time public
    key flow. It is never supplied in chat, Git, ARM, a command argument, or a log.
-7. Stable ACA outbound decision: the ACA environment `staticIp` is ingress and must not be placed in the
-   PostgreSQL firewall. Current Microsoft documentation says outbound IPs may change and documents NAT
-   Gateway for deterministic workload-profile egress. No PostgreSQL firewall rule is generated until an
-   exact supported `/32` and its cost are separately approved.
+7. PostgreSQL private route: stage 1 must return the exact `.96/27` private-endpoint subnet ID. Stage 2
+   creates one private endpoint for the existing flexible server with group ID `postgresqlServer`, the
+   `privatelink.postgres.database.azure.com` zone, zone group, and VNet link. The existing server remains
+   an `existing` resource: public access and firewall settings are retained and no NAT Gateway is added.
 
 ## Later Mutation Commands
 
@@ -112,15 +114,18 @@ creates no Oracle credential.
 ## Cost And Security Delta
 
 The generated ACA/DNS scope retains the plan estimate of about `$19.25/month` at scale zero and about
-`$58.67/month` at continuous `0.5 vCPU/1 GiB` activity, plus logs/data processing, below the delegated
-`$70/month` ceiling. A NAT Gateway/static public IP is not included: its fixed cost can push continuous
-usage over the ceiling and requires a new cost/security decision.
+`$58.67/month` at continuous `0.5 vCPU/1 GiB` activity. The private endpoint adds an estimated
+`$7.30/month`, and the added PostgreSQL Private DNS zone adds `$0.50/month`, so continuous usage is
+estimated at about `$66.47/month` before DNS queries, logs, and data processing. `maxReplicas: 1`
+bounds compute concurrency, but the delegated `$70/month` ceiling is a planning target, not a hard billing
+cap. Budgets/alerts and usage charges can exceed it.
+A NAT Gateway/static public IP is not included because its fixed cost would exceed this bounded design.
 
 There is no public gateway listener, no TLS bypass, no hardcoded secret, no external role assignment, no
-PostgreSQL firewall guess, and no use or change of corporate default subscription
+PostgreSQL firewall mutation, and no use or change of corporate default subscription
 `0832b3b6-22b3-4c47-8d8b-572054b97257`.
 
 Official networking references:
 
 - https://learn.microsoft.com/azure/container-apps/networking
-- https://learn.microsoft.com/azure/container-apps/custom-virtual-networks#azure-nat-gateway-integration
+- https://learn.microsoft.com/azure/postgresql/flexible-server/concepts-networking-private-link
