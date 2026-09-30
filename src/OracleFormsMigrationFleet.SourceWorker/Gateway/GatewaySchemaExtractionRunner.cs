@@ -32,11 +32,13 @@ public interface IGatewaySchemaExtractionRunner
 ///    the platform put there. It is cleared and repopulated from a fixed list of operating-system and
 ///    ODBC variables, so a schema extraction cannot carry an unrelated secret into a child that is about
 ///    to talk to a customer database.
-/// 2. <b>The connect string is read at spawn time from a name the registry pinned.</b> It is resolved
-///    from this host's environment under a variable whose name must begin with
-///    <see cref="GatewayOracleCredential.RequiredPrefix"/>, it is written only into the child's own
-///    <see cref="OracleSourceConfiguration.ConnectionStringVariable"/>, and the source variable is not
-///    among the names copied across, so the child cannot read it twice or read a sibling entry's.
+/// 2. <b>The connect string is resolved at spawn time under a name the registry pinned.</b> It comes from
+///    a DPAPI-protected file this service account can decrypt, or — when none was provisioned — from this
+///    host's environment under a variable whose name must begin with
+///    <see cref="GatewayOracleCredential.RequiredPrefix"/>. Either way it is written only into the child's
+///    own <see cref="OracleSourceConfiguration.ConnectionStringVariable"/>, and neither the source
+///    variable nor the protected root is among the names copied across, so the child cannot read it twice
+///    or read a sibling entry's.
 ///
 /// Nothing on the request influences the command line, the variable names, or the schemas: the allowlist
 /// handed down is the registry's, and the worker narrows it against the request itself.
@@ -44,9 +46,12 @@ public interface IGatewaySchemaExtractionRunner
 public sealed class ChildProcessSchemaExtractionRunner(
     GatewayOptions options,
     Func<string, string?>? readEnvironment = null,
-    Func<ProcessStartInfo>? launcher = null) : IGatewaySchemaExtractionRunner
+    Func<ProcessStartInfo>? launcher = null,
+    GatewayCredentialProvider? credentials = null) : IGatewaySchemaExtractionRunner
 {
-    private readonly Func<string, string?> _read = readEnvironment ?? Environment.GetEnvironmentVariable;
+    private readonly GatewayCredentialProvider _credentials =
+        credentials ?? new GatewayCredentialProvider(options.ProtectedCredentialRoot, readEnvironment);
+
     private readonly Func<ProcessStartInfo> _launcher = launcher ?? ChildProcessExtractionRunner.SelfLauncher;
 
     /// <summary>
@@ -77,12 +82,12 @@ public sealed class ChildProcessSchemaExtractionRunner(
                 "This source environment registers no Oracle connection, so no worker was started and no connection was opened.");
         }
 
-        if (_read(credential.EnvironmentVariable) is not { Length: > 0 } connectionString)
+        GatewayCredentialResolution resolution = _credentials.Resolve(credential.EnvironmentVariable);
+        if (resolution.Value is not { Length: > 0 } connectionString)
         {
-            // The NAME is safe to repeat; it is what an operator must set. The value is never read here.
-            return GatewaySchemaRunOutcome.Failed(
-                $"The Oracle connection variable this source environment names ({credential.EnvironmentVariable}) is unset on " +
-                "the gateway host, so no worker was started and no connection was opened.");
+            // The NAME and the file PATH are safe to repeat; they are what an operator must fix. The value
+            // is never read here, and a protected file that failed to decrypt does not fall back.
+            return GatewaySchemaRunOutcome.Failed(resolution.Failure!);
         }
 
         ProcessStartInfo start = _launcher();

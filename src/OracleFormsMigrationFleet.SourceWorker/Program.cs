@@ -3,6 +3,7 @@
 using System.Data.Common;
 using System.Data.Odbc;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using OracleFormsMigrationFleet.SourceWorker.Gateway;
@@ -22,6 +23,20 @@ internal static class Program
             return await ServeAsync();
         }
 
+        if (args is ["--help"] or ["-h"] or ["/?"])
+        {
+            await UsageAsync(Console.Out);
+            return WorkerExit.Success;
+        }
+
+        // Provisioning a protected credential is an operator action on the gateway host, not a request.
+        // The value is read from standard input so it never reaches a command line, a log or this
+        // process's own environment, and it is written back only as a DPAPI blob.
+        if (args is ["--protect-credential", var variableName])
+        {
+            return await ProtectCredentialAsync(variableName);
+        }
+
         WorkerConfiguration configuration = WorkerConfiguration.FromEnvironment(Environment.GetEnvironmentVariable);
 
         using CancellationTokenSource cancellation = new(configuration.Timeout);
@@ -38,7 +53,7 @@ internal static class Program
                 ["--probe"] => await ProbeAsync(configuration, cancellation.Token),
                 ["--extract"] => await ExtractAsync(configuration, cancellation.Token),
                 ["--extract-schema"] => await ExtractSchemaAsync(cancellation.Token),
-                _ => await UsageAsync(),
+                _ => await UsageRejectedAsync(),
             };
         }
         catch (OperationCanceledException)
@@ -52,6 +67,11 @@ internal static class Program
     /// Runs the source gateway. Configuration comes from this host's own environment; a host that cannot
     /// state its tenant, audience, allowed callers and source registry does not listen at all, because a
     /// gateway that guesses any of those cannot say what an operator approved.
+    ///
+    /// Under the Service Control Manager this same path is the service entry point: the host registers a
+    /// Windows service lifetime for <see cref="GatewayOptions.ServiceName"/> and pins its content root to
+    /// the installed directory, so nothing about running unattended depends on the working directory the
+    /// SCM happens to supply.
     /// </summary>
     private static async Task<int> ServeAsync()
     {
@@ -66,9 +86,124 @@ internal static class Program
             return WorkerExit.UsageRejected;
         }
 
-        await using WebApplication app = WorkerGatewayHost.Build(options!);
-        await app.RunAsync();
+        try
+        {
+            GatewayHostBuild build = WorkerGatewayHost.TryBuild(options!);
+            if (build.Application is null)
+            {
+                await Console.Error.WriteLineAsync($"The source gateway did not start: {build.Failure}");
+                return WorkerExit.UsageRejected;
+            }
+
+            await using WebApplication app = build.Application;
+            await app.RunAsync();
+            return WorkerExit.Success;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            await Console.Error.WriteLineAsync(
+                $"The source gateway could not start or remain listening ({exception.GetType().Name}).");
+            return WorkerExit.ExtractionFailed;
+        }
+    }
+
+    /// <summary>
+    /// Encrypts one Oracle connect string to a file only this account can decrypt.
+    ///
+    /// The value arrives on standard input and is never echoed, never logged and never placed in an
+    /// argument. The destination is derived from the variable name beneath the configured protected
+    /// credential root, so this utility cannot be pointed at an arbitrary path either.
+    /// </summary>
+    private static async Task<int> ProtectCredentialAsync(string variableName)
+    {
+        string? root = Environment.GetEnvironmentVariable(GatewayOptions.CredentialRootVariable)?.Trim();
+        if (string.IsNullOrEmpty(root) || !Path.IsPathFullyQualified(root))
+        {
+            await Console.Error.WriteLineAsync(
+                $"Set {GatewayOptions.CredentialRootVariable} to the fully qualified protected credential directory first.");
+            return WorkerExit.UsageRejected;
+        }
+
+        string? protectedRoot = GatewayText.Directory(root);
+        if (protectedRoot is null || !GatewayCredentialProvider.IsExistingUnlinkedDirectory(protectedRoot))
+        {
+            await Console.Error.WriteLineAsync(
+                $"The directory named by {GatewayOptions.CredentialRootVariable} must already exist, must not be a " +
+                "filesystem link, and must be ACLed for the gateway service account; nothing was written.");
+            return WorkerExit.UsageRejected;
+        }
+
+        GatewayCredentialProvider provider = new(protectedRoot);
+        if (provider.ProtectedPathFor(variableName) is not { } destination)
+        {
+            await Console.Error.WriteLineAsync(
+                $"The variable name must begin '{GatewayOracleCredential.RequiredPrefix}' and contain only A-Z, 0-9 and underscore.");
+            return WorkerExit.UsageRejected;
+        }
+
+        string? value = Console.IsInputRedirected
+            ? await Console.In.ReadLineAsync()
+            : ReadCredentialWithoutEcho();
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            await Console.Error.WriteLineAsync("No connect string was supplied on standard input; nothing was written.");
+            return WorkerExit.UsageRejected;
+        }
+
+        try
+        {
+            byte[] blob = GatewayCredentialProvider.Protect(variableName, value);
+            await File.WriteAllBytesAsync(destination, blob);
+        }
+        catch (Exception exception) when (exception is PlatformNotSupportedException or ArgumentException or
+            IOException or UnauthorizedAccessException or System.Security.Cryptography.CryptographicException)
+        {
+            // The exception type is named; its message is not echoed, because a failing DPAPI or file
+            // layer can quote the value it was handed.
+            await Console.Error.WriteLineAsync(
+                $"The protected credential file could not be written ({exception.GetType().Name}).");
+            return WorkerExit.ExtractionFailed;
+        }
+
+        await Console.Out.WriteLineAsync(
+            $"Wrote a DPAPI-protected credential for {variableName}. Only the account that ran this command can decrypt it, " +
+            $"so run it as the {GatewayOptions.ServiceName} service account.");
         return WorkerExit.Success;
+    }
+
+    private static string? ReadCredentialWithoutEcho()
+    {
+        StringBuilder value = new();
+        while (value.Length <= GatewayCredentialProvider.MaxCredentialCharacters)
+        {
+            ConsoleKeyInfo key = Console.ReadKey(intercept: true);
+            if (key.Key is ConsoleKey.Enter)
+            {
+                return value.ToString();
+            }
+
+            if (key.Key is ConsoleKey.Backspace)
+            {
+                if (value.Length > 0)
+                {
+                    value.Length--;
+                }
+
+                continue;
+            }
+
+            if (key.Key is ConsoleKey.C && key.Modifiers.HasFlag(ConsoleModifiers.Control))
+            {
+                return null;
+            }
+
+            if (!char.IsControl(key.KeyChar))
+            {
+                value.Append(key.KeyChar);
+            }
+        }
+
+        return null;
     }
 
     private static string? ReadRegistry(string path)
@@ -83,10 +218,59 @@ internal static class Program
         }
     }
 
-    private static async Task<int> UsageAsync()
+    private static async Task<int> UsageRejectedAsync()
     {
-        await Console.Error.WriteLineAsync("This worker accepts --probe, --extract or --extract-schema, each reading one JSON request from standard input, or --serve to run the source gateway.");
+        await UsageAsync(Console.Error);
         return WorkerExit.UsageRejected;
+    }
+
+    private static async Task UsageAsync(TextWriter writer)
+    {
+        await writer.WriteLineAsync($"""
+            OracleFormsMigrationFleet.SourceWorker
+
+              --probe                          Report this host's Forms capability. Reads one JSON request from stdin.
+              --extract                        Extract one Forms module to neutral IR. Reads one JSON request from stdin.
+              --extract-schema                 Read the approved Oracle schemas. Reads one JSON request from stdin.
+              --serve                          Run the source gateway. Also the Windows service entry point.
+              --protect-credential <VARIABLE>  DPAPI-protect one connect string read from stdin, for the service account.
+              --help                           Print this text.
+
+            Gateway settings, read from this host's environment. There is no configuration file, and no
+            setting below is a credential:
+
+            {Settings()}
+            Running unattended: install this executable as Windows service '{GatewayOptions.ServiceName}' with --serve,
+            grant the service account read access to the pinned certificate's private key, and provision each Oracle
+            connect string with --protect-credential run as that same service account. The gateway refuses to start
+            rather than presenting an unapproved certificate, and refuses a request rather than falling back to an
+            unprotected credential when a protected file exists but cannot be decrypted.
+            """);
+    }
+
+    private static string Settings()
+    {
+        (string Name, string Description)[] settings =
+        [
+            (GatewayOptions.UrlVariable, "Listener origin. Must be https unless a loopback development listener was asked for."),
+            (GatewayOptions.LoopbackHttpVariable, "Set to true to permit a cleartext loopback listener."),
+            (GatewayOptions.TenantVariable, "Entra tenant GUID whose tokens are accepted."),
+            (GatewayOptions.AudienceVariable, "Single audience this gateway's app registration exposes."),
+            (GatewayOptions.CallerAppIdsVariable, "Comma-separated allowlist of caller application GUIDs."),
+            (GatewayOptions.RegistryVariable, "Fully qualified path of the source registry document."),
+            (GatewayTlsOptions.ThumbprintVariable, @"Thumbprint pinning the server certificate in LocalMachine\My. Preferred."),
+            (GatewayTlsOptions.SubjectVariable, "DNS name the approved certificate was issued for. Defaults to the listener host."),
+            (GatewayOptions.CredentialRootVariable, "Directory of DPAPI-protected credential files, one per registered variable."),
+            (GatewayOptions.ConcurrencyVariable, "Concurrent extractions, 1 to 8."),
+            (GatewayOptions.TimeoutVariable, "Per-extraction time budget in seconds."),
+            (GatewayOptions.OutputBytesVariable, "Forms worker output ceiling in bytes."),
+            (GatewayOptions.SchemaOutputBytesVariable, "Schema worker output ceiling in bytes."),
+        ];
+
+        int width = settings.Max(setting => setting.Name.Length);
+        return string.Join(
+            Environment.NewLine,
+            settings.Select(setting => $"  {setting.Name.PadRight(width)}  {setting.Description}"));
     }
 
     /// <summary>

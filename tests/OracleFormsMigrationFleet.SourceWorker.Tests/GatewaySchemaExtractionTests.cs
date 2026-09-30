@@ -299,6 +299,326 @@ public sealed class GatewaySchemaExtractionTests
             workspace.Options(values => values[GatewayOptions.SchemaOutputBytesVariable] = "1").MaxSchemaWorkerOutputBytes);
     }
 
+    // ---- Protected credentials --------------------------------------------------------------------
+    //
+    // An unattended service must not hold the Oracle connect string in its own environment block. These
+    // cover the DPAPI file that replaces it, and specifically the refusals: a protected file that exists
+    // but cannot be used must never fall through to an unprotected value.
+
+    [Fact]
+    public void A_variable_with_no_protected_file_and_no_environment_value_is_refused_by_name_and_path()
+    {
+        using GatewayWorkspace workspace = new();
+        GatewayCredentialProvider provider = new(workspace.CredentialRoot, readEnvironment: _ => null);
+
+        GatewayCredentialResolution resolution = provider.Resolve(GatewayWorkspace.OracleConnectionVariable);
+
+        Assert.Null(resolution.Value);
+        Assert.Contains(GatewayWorkspace.OracleConnectionVariable, resolution.Failure!, StringComparison.Ordinal);
+        Assert.Contains(workspace.CredentialRoot, resolution.Failure!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void An_absent_protected_file_falls_back_to_the_environment_because_none_was_provisioned()
+    {
+        using GatewayWorkspace workspace = new();
+        GatewayCredentialProvider provider = new(
+            workspace.CredentialRoot,
+            readEnvironment: name => name == GatewayWorkspace.OracleConnectionVariable ? GatewayWorkspace.OracleConnectionValue : null);
+
+        GatewayCredentialResolution resolution = provider.Resolve(GatewayWorkspace.OracleConnectionVariable);
+
+        Assert.Equal(GatewayWorkspace.OracleConnectionValue, resolution.Value);
+        Assert.Equal("environment", resolution.Source);
+    }
+
+    [Fact]
+    public void A_protected_file_that_cannot_be_decrypted_is_refused_and_never_falls_back()
+    {
+        using GatewayWorkspace workspace = new();
+        workspace.WriteProtectedCredential(GatewayWorkspace.OracleConnectionVariable, [0x01, 0x02, 0x03, 0x04]);
+
+        // The environment holds a perfectly good value. It must not be used: an operator who provisioned
+        // a protected file has to be told it is broken, not quietly served from somewhere else.
+        GatewayCredentialProvider provider = new(
+            workspace.CredentialRoot,
+            readEnvironment: _ => GatewayWorkspace.OracleConnectionValue,
+            unprotect: (_, _) => throw new System.Security.Cryptography.CryptographicException("decrypt failed"));
+
+        GatewayCredentialResolution resolution = provider.Resolve(GatewayWorkspace.OracleConnectionVariable);
+
+        Assert.Null(resolution.Value);
+        Assert.Equal("protected-file", resolution.Source);
+        Assert.Contains(ProtectedFileRefusal, resolution.Failure!, StringComparison.Ordinal);
+        Assert.DoesNotContain("Pwd=", resolution.Failure!, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("decrypt failed", resolution.Failure!, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("Dsn=HRMS;Pwd=x\nOFM_WORKER_ORACLE_SCHEMA_ALLOWLIST=SYS")]
+    [InlineData("Dsn=HRMS\u0007")]
+    public void A_protected_file_that_decrypts_to_something_other_than_one_connect_string_is_refused(string plaintext)
+    {
+        using GatewayWorkspace workspace = new();
+        workspace.WriteProtectedCredential(GatewayWorkspace.OracleConnectionVariable, [0xAA]);
+
+        GatewayCredentialProvider provider = new(
+            workspace.CredentialRoot,
+            readEnvironment: _ => GatewayWorkspace.OracleConnectionValue,
+            unprotect: (_, _) => Encoding.UTF8.GetBytes(plaintext));
+
+        GatewayCredentialResolution resolution = provider.Resolve(GatewayWorkspace.OracleConnectionVariable);
+
+        Assert.Null(resolution.Value);
+        Assert.Equal("protected-file", resolution.Source);
+        if (plaintext.Trim() is { Length: > 0 } quoted)
+        {
+            Assert.DoesNotContain(quoted, resolution.Failure!, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void A_protected_file_this_service_account_cannot_open_is_refused_rather_than_treated_as_absent()
+    {
+        using GatewayWorkspace workspace = new();
+        GatewayCredentialProvider provider = new(
+            workspace.CredentialRoot,
+            readEnvironment: _ => GatewayWorkspace.OracleConnectionValue,
+            readProtectedFile: _ => [],
+            unprotect: (_, _) => throw new System.Security.Cryptography.CryptographicException());
+
+        Assert.Null(provider.Resolve(GatewayWorkspace.OracleConnectionVariable).Value);
+    }
+
+    [Fact]
+    public void A_non_file_at_the_protected_path_is_refused_rather_than_treated_as_absent()
+    {
+        using GatewayWorkspace workspace = new();
+        Directory.CreateDirectory(Path.Combine(
+            workspace.CredentialRoot,
+            GatewayWorkspace.OracleConnectionVariable + GatewayCredentialProvider.ProtectedFileExtension));
+        GatewayCredentialProvider provider = new(
+            workspace.CredentialRoot,
+            readEnvironment: _ => GatewayWorkspace.OracleConnectionValue);
+
+        GatewayCredentialResolution resolution = provider.Resolve(GatewayWorkspace.OracleConnectionVariable);
+
+        Assert.Null(resolution.Value);
+        Assert.Equal("protected-file", resolution.Source);
+    }
+
+    [Fact]
+    public void An_oversized_protected_blob_is_refused_before_it_is_decrypted()
+    {
+        using GatewayWorkspace workspace = new();
+        workspace.WriteProtectedCredential(
+            GatewayWorkspace.OracleConnectionVariable,
+            new byte[GatewayCredentialProvider.MaxProtectedBlobBytes + 1]);
+        int decryptions = 0;
+        GatewayCredentialProvider provider = new(
+            workspace.CredentialRoot,
+            readEnvironment: _ => GatewayWorkspace.OracleConnectionValue,
+            unprotect: (_, _) =>
+            {
+                decryptions++;
+                return Encoding.UTF8.GetBytes(GatewayWorkspace.OracleConnectionValue);
+            });
+
+        GatewayCredentialResolution resolution = provider.Resolve(GatewayWorkspace.OracleConnectionVariable);
+
+        Assert.Null(resolution.Value);
+        Assert.Equal(0, decryptions);
+    }
+
+    [Fact]
+    public void A_filesystem_link_at_the_protected_path_is_refused_rather_than_followed()
+    {
+        using GatewayWorkspace workspace = new();
+        string target = Path.Combine(workspace.Elsewhere, "protected-target.dpapi");
+
+        // What sits on the far side of the link does not matter, because a reader that refuses links
+        // never reaches it. Arbitrary bytes keep this case off DPAPI, which no Linux host has.
+        File.WriteAllBytes(target, [0x01, 0x02, 0x03, 0x04]);
+        string link = Path.Combine(
+            workspace.CredentialRoot,
+            GatewayWorkspace.OracleConnectionVariable + GatewayCredentialProvider.ProtectedFileExtension);
+
+        try
+        {
+            File.CreateSymbolicLink(link, target);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return;
+        }
+
+        int decryptions = 0;
+        GatewayCredentialResolution resolution = new GatewayCredentialProvider(
+            workspace.CredentialRoot,
+            readEnvironment: _ => GatewayWorkspace.OracleConnectionValue,
+            unprotect: (_, _) =>
+            {
+                decryptions++;
+                return Encoding.UTF8.GetBytes(GatewayWorkspace.OracleConnectionValue);
+            })
+            .Resolve(GatewayWorkspace.OracleConnectionVariable);
+
+        Assert.Null(resolution.Value);
+        Assert.Equal("protected-file", resolution.Source);
+
+        // Refused for being a link, not for holding something undecryptable: the target was never read.
+        Assert.Equal(0, decryptions);
+    }
+
+    [Fact]
+    public void A_variable_name_outside_the_readable_prefix_resolves_to_nothing_and_names_no_file()
+    {
+        using GatewayWorkspace workspace = new();
+        GatewayCredentialProvider provider = new(workspace.CredentialRoot, readEnvironment: _ => "Dsn=anything");
+
+        Assert.Null(provider.ProtectedPathFor("AZURE_CLIENT_SECRET"));
+        Assert.Null(provider.Resolve("AZURE_CLIENT_SECRET").Value);
+    }
+
+    [Fact]
+    public void The_protected_file_is_derived_from_the_variable_name_and_nothing_else()
+    {
+        using GatewayWorkspace workspace = new();
+        GatewayCredentialProvider provider = new(workspace.CredentialRoot);
+
+        Assert.Equal(
+            Path.Combine(workspace.CredentialRoot, GatewayWorkspace.OracleConnectionVariable + GatewayCredentialProvider.ProtectedFileExtension),
+            provider.ProtectedPathFor(GatewayWorkspace.OracleConnectionVariable));
+    }
+
+    /// <summary>
+    /// The real DPAPI round trip, on the only platform that has one. It also proves the blob is bound to
+    /// the variable name: a file copied over a sibling's name does not decrypt, so a mistake during
+    /// provisioning cannot point one source environment at another source environment's database.
+    ///
+    /// Off Windows the assertion is the other half of the same rule: a protected file that exists on a
+    /// host with no DPAPI is a refusal, not a reason to read the environment instead.
+    /// </summary>
+    [Fact]
+    public void A_credential_protected_on_this_Windows_host_round_trips_and_is_bound_to_its_variable_name()
+    {
+        using GatewayWorkspace workspace = new();
+
+        if (!OperatingSystem.IsWindows())
+        {
+            workspace.WriteProtectedCredential(GatewayWorkspace.OracleConnectionVariable, [0x01, 0x02]);
+            GatewayCredentialResolution unavailable =
+                new GatewayCredentialProvider(workspace.CredentialRoot, readEnvironment: _ => GatewayWorkspace.OracleConnectionValue)
+                    .Resolve(GatewayWorkspace.OracleConnectionVariable);
+
+            Assert.Null(unavailable.Value);
+            Assert.Contains("DPAPI is a Windows facility", unavailable.Failure!, StringComparison.Ordinal);
+            return;
+        }
+
+        byte[] blob = GatewayCredentialProvider.Protect(GatewayWorkspace.OracleConnectionVariable, GatewayWorkspace.OracleConnectionValue);
+        workspace.WriteProtectedCredential(GatewayWorkspace.OracleConnectionVariable, blob);
+
+        GatewayCredentialProvider provider = new(workspace.CredentialRoot, readEnvironment: _ => null);
+        GatewayCredentialResolution resolution = provider.Resolve(GatewayWorkspace.OracleConnectionVariable);
+
+        Assert.Equal(GatewayWorkspace.OracleConnectionValue, resolution.Value);
+        Assert.Equal("protected-file", resolution.Source);
+
+        // Same bytes, filed under another registered variable: the entropy no longer matches.
+        const string Sibling = "OFM_GATEWAY_ORACLE_OTHER_SOURCE";
+        workspace.WriteProtectedCredential(Sibling, blob);
+        GatewayCredentialResolution moved = provider.Resolve(Sibling);
+
+        Assert.Null(moved.Value);
+        Assert.Contains("could not be decrypted", moved.Failure!, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("Dsn=HRMS\nPwd=x")]
+    [InlineData("Dsn=HRMS\u0007")]
+    public void Provisioning_refuses_a_multiline_or_control_shaped_credential(string value)
+    {
+        Assert.Throws<ArgumentException>(() =>
+            GatewayCredentialProvider.Protect(GatewayWorkspace.OracleConnectionVariable, value));
+    }
+
+    [Fact]
+    public void Provisioning_refuses_a_credential_larger_than_the_reader_accepts()
+    {
+        Assert.Throws<ArgumentException>(() => GatewayCredentialProvider.Protect(
+            GatewayWorkspace.OracleConnectionVariable,
+            new string('x', GatewayCredentialProvider.MaxCredentialCharacters + 1)));
+    }
+
+    [Fact]
+    public void A_schema_runner_resolves_its_credential_through_the_protected_provider()
+    {
+        using GatewayWorkspace workspace = new();
+        GatewayOptions options = workspace.Options(values => values[GatewayOptions.CredentialRootVariable] = workspace.CredentialRoot);
+
+        Assert.Equal(workspace.CredentialRoot, options.ProtectedCredentialRoot);
+    }
+
+    [Fact]
+    public async Task A_source_whose_protected_credential_is_unusable_starts_no_worker_and_quotes_no_value()
+    {
+        using GatewayWorkspace workspace = new();
+        workspace.WriteProtectedCredential(GatewayWorkspace.OracleConnectionVariable, [0x09, 0x09]);
+
+        ChildProcessSchemaExtractionRunner runner = new(
+            workspace.Options(),
+            launcher: WorkerProcess.Launcher,
+            credentials: new GatewayCredentialProvider(
+                workspace.CredentialRoot,
+                readEnvironment: _ => GatewayWorkspace.OracleConnectionValue,
+                unprotect: (_, _) => throw new System.Security.Cryptography.CryptographicException()));
+
+        GatewaySchemaRunOutcome outcome = await runner.RunAsync(
+            workspace.Entry(), WorkerSchemaRequest(), CancellationToken.None);
+
+        Assert.Null(outcome.Result);
+        Assert.Null(outcome.ExitCode);
+        Assert.Contains(ProtectedFileRefusal, outcome.Failure!, StringComparison.Ordinal);
+        Assert.DoesNotContain("Pwd=", outcome.Failure!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void The_protected_credential_root_never_reaches_a_schema_child()
+    {
+        using GatewayWorkspace workspace = new();
+        ProcessStartInfo start = new("dotnet");
+        start.Environment[GatewayOptions.CredentialRootVariable] = workspace.CredentialRoot;
+        start.Environment[GatewayOptions.RegistryVariable] = workspace.RegistryPath;
+
+        ChildProcessSchemaExtractionRunner.BuildEnvironment(
+            start,
+            workspace.Entry(),
+            workspace.Entry().OracleCredential!,
+            GatewayWorkspace.OracleConnectionValue,
+            TimeSpan.FromMinutes(2));
+
+        // A child that could find the protected root could read every registered source's credential,
+        // and a child that could read the registry could learn which variables to look for.
+        Assert.False(start.Environment.ContainsKey(GatewayOptions.CredentialRootVariable));
+        Assert.False(start.Environment.ContainsKey(GatewayOptions.RegistryVariable));
+
+        // The connect string reaches the child under the worker's own name and under no other.
+        Assert.Equal(GatewayWorkspace.OracleConnectionValue, start.Environment[OracleSourceConfiguration.ConnectionStringVariable]);
+        Assert.Single(start.Environment, pair => pair.Value == GatewayWorkspace.OracleConnectionValue);
+    }
+
+    /// <summary>
+    /// The fragment a refused protected credential file carries on this host. DPAPI is a Windows
+    /// facility, so off Windows the provider refuses at the missing facility before it attempts any
+    /// decryption. The rule under test is the same on both platforms — a protected file that exists but
+    /// cannot be used is a refusal and never a fallback to the environment — only the wording differs.
+    /// The real decryption path is exercised by the Windows leg of CI.
+    /// </summary>
+    private static string ProtectedFileRefusal =>
+        OperatingSystem.IsWindows() ? "could not be decrypted" : "DPAPI is a Windows facility";
+
     private static GatewayExtractionCoordinator Coordinator(
         GatewayWorkspace workspace,
         IGatewaySchemaExtractionRunner schemaRunner) =>

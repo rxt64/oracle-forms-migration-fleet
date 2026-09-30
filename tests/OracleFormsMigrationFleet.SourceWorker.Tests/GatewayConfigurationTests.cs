@@ -138,6 +138,104 @@ public sealed class GatewayConfigurationTests
         Assert.NotEmpty(errors);
     }
 
+    // ---- Unattended service settings ----------------------------------------------------------------
+
+    [Fact]
+    public void The_service_name_is_a_constant_so_an_installer_and_a_log_line_cannot_disagree()
+    {
+        Assert.Equal("OFMSourceGateway", GatewayOptions.ServiceName);
+    }
+
+    [Fact]
+    public void An_https_listener_defaults_its_certificate_subject_to_the_host_it_binds()
+    {
+        using GatewayWorkspace workspace = new();
+
+        GatewayOptions options = workspace.Options(values =>
+        {
+            values[GatewayOptions.UrlVariable] = "https://gateway.ofm.source.internal/";
+            values.Remove(GatewayOptions.LoopbackHttpVariable);
+        });
+
+        Assert.NotNull(options.Tls);
+        Assert.Equal("gateway.ofm.source.internal", options.Tls!.SubjectHost);
+        Assert.Null(options.Tls.PinnedThumbprint);
+    }
+
+    [Fact]
+    public void A_loopback_development_listener_selects_no_certificate_at_all()
+    {
+        using GatewayWorkspace workspace = new();
+
+        // A thumbprint set against a cleartext listener would suggest a protection it does not have.
+        Assert.Null(workspace.Options(values => values[GatewayTlsOptions.ThumbprintVariable] = new string('A', 40)).Tls);
+    }
+
+    [Fact]
+    public void A_pinned_thumbprint_is_normalized_so_a_pasted_store_value_still_matches()
+    {
+        using GatewayWorkspace workspace = new();
+
+        GatewayOptions options = workspace.Options(values =>
+        {
+            values[GatewayOptions.UrlVariable] = "https://gateway.ofm.source.internal/";
+            values.Remove(GatewayOptions.LoopbackHttpVariable);
+            values[GatewayTlsOptions.ThumbprintVariable] = "ab cd ef 01 23 45 67 89 ab cd ef 01 23 45 67 89 ab cd ef 01";
+        });
+
+        Assert.Equal("ABCDEF0123456789ABCDEF0123456789ABCDEF01", options.Tls!.PinnedThumbprint);
+    }
+
+    [Theory]
+    [InlineData("not-a-thumbprint")]
+    [InlineData("ABCDEF")]
+    [InlineData("ZZCDEF0123456789ABCDEF0123456789ABCDEF01")]
+    public void An_https_listener_with_an_unusable_thumbprint_does_not_start(string thumbprint)
+    {
+        using GatewayWorkspace workspace = new();
+        Dictionary<string, string?> values = workspace.Environment("https://gateway.ofm.source.internal/");
+        values.Remove(GatewayOptions.LoopbackHttpVariable);
+        values[GatewayTlsOptions.ThumbprintVariable] = thumbprint;
+
+        bool read = GatewayOptions.TryRead(Reader(values), File.ReadAllText, out _, out IReadOnlyList<string> errors);
+
+        Assert.False(read);
+        Assert.Contains(errors, error => error.Contains(GatewayTlsOptions.ThumbprintVariable, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_protected_credential_root_must_be_a_fully_qualified_directory()
+    {
+        using GatewayWorkspace workspace = new();
+        Dictionary<string, string?> values = workspace.Environment();
+        values[GatewayOptions.CredentialRootVariable] = "credentials";
+
+        bool read = GatewayOptions.TryRead(Reader(values), File.ReadAllText, out _, out IReadOnlyList<string> errors);
+
+        Assert.False(read);
+        Assert.Contains(errors, error => error.Contains(GatewayOptions.CredentialRootVariable, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_configured_credential_root_that_does_not_exist_does_not_degrade_to_environment_fallback()
+    {
+        using GatewayWorkspace workspace = new();
+        Dictionary<string, string?> values = workspace.Environment();
+        values[GatewayOptions.CredentialRootVariable] = Path.Combine(workspace.Root, "missing-credentials");
+
+        bool read = GatewayOptions.TryRead(Reader(values), File.ReadAllText, out _, out IReadOnlyList<string> errors);
+
+        Assert.False(read);
+        Assert.Contains(errors, error => error.Contains("existing", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_gateway_with_no_protected_credential_root_keeps_reading_its_own_environment()
+    {
+        using GatewayWorkspace workspace = new();
+        Assert.Null(workspace.Options().ProtectedCredentialRoot);
+    }
+
     [Fact]
     public void A_loopback_cleartext_listener_needs_an_explicit_opt_in()
     {

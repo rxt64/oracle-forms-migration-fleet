@@ -1,0 +1,10 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+USER root
+COPY trust/ofm-source-gateway-dev-root-2026.pem /usr/local/share/ca-certificates/ofm-source-gateway-dev-root-2026.crt
+RUN chmod 0644 /usr/local/share/ca-certificates/ofm-source-gateway-dev-root-2026.crt \
+ && update-ca-certificates \
+ && test -L /etc/ssl/certs/ofm-source-gateway-dev-root-2026.pem
+
+USER app

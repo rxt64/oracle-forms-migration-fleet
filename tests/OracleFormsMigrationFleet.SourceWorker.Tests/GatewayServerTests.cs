@@ -1,10 +1,41 @@
 using System.Net;
 using System.Net.Http.Headers;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
 using OracleFormsMigrationFleet.SourceWorker.Gateway;
 
 namespace OracleFormsMigrationFleet.SourceWorker.Tests;
+
+/// <summary>
+/// Self-signed certificates built in memory, so the selection rules can be exercised without installing
+/// anything into a machine store. They are never trusted by anything; only the selector reads them.
+/// </summary>
+internal static class GatewayCertificates
+{
+    public static X509Certificate2 Server(
+        string dnsName,
+        bool serverAuthentication = true,
+        DateTimeOffset? notBefore = null,
+        DateTimeOffset? notAfter = null)
+    {
+        using RSA key = RSA.Create(2048);
+        CertificateRequest request = new($"CN={dnsName}", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+
+        SubjectAlternativeNameBuilder alternative = new();
+        alternative.AddDnsName(dnsName);
+        request.CertificateExtensions.Add(alternative.Build());
+
+        request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(
+            [new Oid(serverAuthentication ? "1.3.6.1.5.5.7.3.1" : "1.3.6.1.5.5.7.3.2")],
+            critical: false));
+
+        return request.CreateSelfSigned(
+            notBefore ?? DateTimeOffset.UtcNow.AddDays(-1),
+            notAfter ?? DateTimeOffset.UtcNow.AddDays(30));
+    }
+}
 
 /// <summary>
 /// The gateway over a real Kestrel loopback listener with the real JWT bearer handler.
@@ -19,6 +50,175 @@ public sealed class GatewayServerTests
     private const string Alias = "hrms_employee.fmb";
     private const string ProfileHash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     private static readonly string s_contentHash = new('b', 64);
+
+    // ---- Server certificate selection ---------------------------------------------------------------
+    //
+    // An unattended service has nobody to hand a PFX to, so it names a certificate in LocalMachine\My.
+    // Every case below is a refusal to listen rather than a fallback: presenting the wrong certificate,
+    // an expired one, or one chosen arbitrarily from two candidates is worse than not starting.
+
+    private const string GatewayHost = "gateway.ofm.source.internal";
+
+    [Fact]
+    public void A_pinned_thumbprint_selects_exactly_the_certificate_an_operator_approved()
+    {
+        using X509Certificate2 approved = GatewayCertificates.Server(GatewayHost);
+        using X509Certificate2 other = GatewayCertificates.Server(GatewayHost);
+
+        GatewayCertificateSelection selection = GatewayServerCertificate.Select(
+            new GatewayTlsOptions(approved.Thumbprint, GatewayHost),
+            DateTimeOffset.UtcNow,
+            [other, approved]);
+
+        Assert.Null(selection.Failure);
+        Assert.Equal(approved.Thumbprint, selection.Certificate!.Thumbprint);
+    }
+
+    [Fact]
+    public void A_pinned_thumbprint_that_matches_nothing_in_the_store_does_not_fall_back_to_a_host_name_search()
+    {
+        using X509Certificate2 present = GatewayCertificates.Server(GatewayHost);
+
+        GatewayCertificateSelection selection = GatewayServerCertificate.Select(
+            new GatewayTlsOptions(new string('A', 40), GatewayHost),
+            DateTimeOffset.UtcNow,
+            [present]);
+
+        Assert.Null(selection.Certificate);
+        Assert.Contains("thumbprint", selection.Failure!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_pinned_certificate_for_another_DNS_name_is_refused()
+    {
+        using X509Certificate2 wrongHost = GatewayCertificates.Server("other.ofm.source.internal");
+
+        GatewayCertificateSelection selection = GatewayServerCertificate.Select(
+            new GatewayTlsOptions(wrongHost.Thumbprint, GatewayHost),
+            DateTimeOffset.UtcNow,
+            [wrongHost]);
+
+        Assert.Null(selection.Certificate);
+        Assert.Contains("thumbprint", selection.Failure!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Without_a_pin_the_listener_host_must_appear_as_a_subject_alternative_name()
+    {
+        using X509Certificate2 matching = GatewayCertificates.Server(GatewayHost);
+        using X509Certificate2 unrelated = GatewayCertificates.Server("workbench.contoso.example");
+
+        GatewayCertificateSelection selection = GatewayServerCertificate.Select(
+            new GatewayTlsOptions(null, GatewayHost), DateTimeOffset.UtcNow, [unrelated, matching]);
+
+        Assert.Null(selection.Failure);
+        Assert.Equal(matching.Thumbprint, selection.Certificate!.Thumbprint);
+
+        GatewayCertificateSelection wrongHost = GatewayServerCertificate.Select(
+            new GatewayTlsOptions(null, "gateway.attacker.example"), DateTimeOffset.UtcNow, [unrelated, matching]);
+
+        Assert.Null(wrongHost.Certificate);
+        Assert.Contains("gateway.attacker.example", wrongHost.Failure!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_wildcard_certificate_is_not_accepted_for_this_listener()
+    {
+        using X509Certificate2 wildcard = GatewayCertificates.Server("*.ofm.source.internal");
+
+        GatewayCertificateSelection selection = GatewayServerCertificate.Select(
+            new GatewayTlsOptions(null, GatewayHost), DateTimeOffset.UtcNow, [wildcard]);
+
+        Assert.Null(selection.Certificate);
+    }
+
+    [Fact]
+    public void A_certificate_outside_its_validity_window_is_refused()
+    {
+        using X509Certificate2 expired = GatewayCertificates.Server(
+            GatewayHost, notBefore: DateTimeOffset.UtcNow.AddDays(-400), notAfter: DateTimeOffset.UtcNow.AddDays(-1));
+
+        GatewayCertificateSelection selection = GatewayServerCertificate.Select(
+            new GatewayTlsOptions(expired.Thumbprint, GatewayHost), DateTimeOffset.UtcNow, [expired]);
+
+        Assert.Null(selection.Certificate);
+        Assert.Contains("validity window", selection.Failure!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_certificate_with_no_server_authentication_usage_is_refused_rather_than_treated_as_unconstrained()
+    {
+        using X509Certificate2 clientOnly = GatewayCertificates.Server(GatewayHost, serverAuthentication: false);
+
+        GatewayCertificateSelection selection = GatewayServerCertificate.Select(
+            new GatewayTlsOptions(clientOnly.Thumbprint, GatewayHost), DateTimeOffset.UtcNow, [clientOnly]);
+
+        Assert.Null(selection.Certificate);
+        Assert.Contains("Server Authentication", selection.Failure!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_certificate_whose_private_key_this_account_cannot_use_is_refused()
+    {
+        using X509Certificate2 withKey = GatewayCertificates.Server(GatewayHost);
+        using X509Certificate2 publicOnly = X509CertificateLoader.LoadCertificate(withKey.Export(X509ContentType.Cert));
+
+        GatewayCertificateSelection selection = GatewayServerCertificate.Select(
+            new GatewayTlsOptions(publicOnly.Thumbprint, GatewayHost), DateTimeOffset.UtcNow, [publicOnly]);
+
+        Assert.Null(selection.Certificate);
+        Assert.Contains("private key", selection.Failure!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Two_usable_certificates_for_the_same_host_are_an_ambiguity_the_gateway_refuses_to_resolve()
+    {
+        using X509Certificate2 first = GatewayCertificates.Server(GatewayHost);
+        using X509Certificate2 second = GatewayCertificates.Server(GatewayHost);
+
+        GatewayCertificateSelection selection = GatewayServerCertificate.Select(
+            new GatewayTlsOptions(null, GatewayHost), DateTimeOffset.UtcNow, [first, second]);
+
+        Assert.Null(selection.Certificate);
+        Assert.Contains(GatewayTlsOptions.ThumbprintVariable, selection.Failure!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void An_https_host_whose_certificate_cannot_be_selected_refuses_to_build_rather_than_listening()
+    {
+        using GatewayWorkspace workspace = new();
+        GatewayOptions options = workspace.Options(values =>
+        {
+            values[GatewayOptions.UrlVariable] = $"https://{GatewayHost}/";
+            values.Remove(GatewayOptions.LoopbackHttpVariable);
+            values[GatewayTlsOptions.ThumbprintVariable] = new string('B', 64);
+        });
+
+        GatewayHostBuild build = WorkerGatewayHost.TryBuild(options);
+
+        Assert.Null(build.Application);
+        Assert.NotNull(build.Failure);
+    }
+
+    [Fact]
+    public async Task An_https_host_given_the_approved_certificate_builds()
+    {
+        using GatewayWorkspace workspace = new();
+        using X509Certificate2 approved = GatewayCertificates.Server(GatewayHost);
+
+        GatewayOptions options = workspace.Options(values =>
+        {
+            values[GatewayOptions.UrlVariable] = $"https://{GatewayHost}/";
+            values.Remove(GatewayOptions.LoopbackHttpVariable);
+            values[GatewayTlsOptions.ThumbprintVariable] = approved.Thumbprint;
+        });
+
+        GatewayHostBuild build = WorkerGatewayHost.TryBuild(options, new GatewayHostDependencies(Certificate: approved));
+
+        Assert.Null(build.Failure);
+        Assert.NotNull(build.Application);
+        await build.Application!.DisposeAsync();
+    }
 
     [Fact]
     public async Task An_anonymous_request_is_refused()

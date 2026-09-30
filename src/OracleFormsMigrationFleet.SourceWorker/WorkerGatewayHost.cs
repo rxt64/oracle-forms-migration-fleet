@@ -1,3 +1,5 @@
+using System.Security.Authentication;
+using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
@@ -5,25 +7,36 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Microsoft.AspNetCore.Server.Kestrel.Https;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Hosting.WindowsServices;
 using Microsoft.IdentityModel.Tokens;
 using OracleFormsMigrationFleet.SourceWorker.Gateway;
 
 namespace OracleFormsMigrationFleet.SourceWorker;
 
+/// <summary>A built host, or the reason the gateway refused to listen. Exactly one of the two is set.</summary>
+public sealed record GatewayHostBuild(WebApplication? Application, string? Failure)
+{
+    public static GatewayHostBuild Refused(string failure) => new(null, failure);
+}
+
 /// <summary>
 /// Overrides a deployment never sets. The runner is replaced only so orchestration can be tested without
-/// spawning a native worker, and <see cref="TestSigningKeys"/> exists so authentication can be tested
-/// against real token validation without reaching Entra. Both are null in every production path, and when
-/// they are null the host uses the standard JWT bearer handler pointed at the configured tenant.
+/// spawning a native worker, <see cref="TestSigningKeys"/> exists so authentication can be tested
+/// against real token validation without reaching Entra, and <see cref="Certificate"/> lets the https
+/// path be exercised without installing anything in a machine store. All are null in every production
+/// path, and when they are null the host uses the standard JWT bearer handler pointed at the configured
+/// tenant and the certificate the machine store selector approved.
 /// </summary>
 public sealed record GatewayHostDependencies(
     IGatewayExtractionRunner? Runner = null,
     Func<DateTimeOffset>? Clock = null,
     IReadOnlyList<SecurityKey>? TestSigningKeys = null,
     IReadOnlyList<string>? TestValidIssuers = null,
-    IGatewaySchemaExtractionRunner? SchemaRunner = null);
+    IGatewaySchemaExtractionRunner? SchemaRunner = null,
+    X509Certificate2? Certificate = null);
 
 /// <summary>
 /// The source gateway server.
@@ -48,11 +61,57 @@ public static class WorkerGatewayHost
 {
     public const string CallerPolicy = "ofm-source-gateway-caller";
 
-    public static WebApplication Build(GatewayOptions options, GatewayHostDependencies? dependencies = null)
+    /// <summary>
+    /// Builds the host, or refuses with the reason it will not listen.
+    ///
+    /// Refusal is a first-class result rather than an exception because every reason here is an operator
+    /// mistake — a certificate that is not in the store, a pin nothing matches, a store this account
+    /// cannot read — and the service has to report it as a startup message, not a stack trace.
+    /// </summary>
+    public static GatewayHostBuild TryBuild(GatewayOptions options, GatewayHostDependencies? dependencies = null)
     {
         ArgumentNullException.ThrowIfNull(options);
 
-        WebApplicationBuilder builder = WebApplication.CreateBuilder();
+        X509Certificate2? certificate = null;
+        if (options.Tls is { } tls)
+        {
+            GatewayCertificateSelection selection = dependencies?.Certificate is { } supplied
+                ? new GatewayCertificateSelection(supplied, null)
+                : GatewayServerCertificate.SelectFromLocalMachineStore(tls, (dependencies?.Clock ?? (() => DateTimeOffset.UtcNow))());
+
+            if (selection.Certificate is null)
+            {
+                return GatewayHostBuild.Refused(selection.Failure!);
+            }
+
+            certificate = selection.Certificate;
+        }
+
+        return new GatewayHostBuild(Build(options, dependencies, certificate), null);
+    }
+
+    public static WebApplication Build(GatewayOptions options, GatewayHostDependencies? dependencies = null) =>
+        Build(options, dependencies, certificate: null);
+
+    private static WebApplication Build(
+        GatewayOptions options,
+        GatewayHostDependencies? dependencies,
+        X509Certificate2? certificate)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        // The Service Control Manager starts a service with the system directory as its working directory,
+        // so the content root is pinned to the directory the approved binary was installed into. Without
+        // this the host would resolve configuration and static content relative to System32.
+        WebApplicationBuilder builder = WebApplication.CreateBuilder(new WebApplicationOptions
+        {
+            ContentRootPath = AppContext.BaseDirectory,
+            ApplicationName = typeof(WorkerGatewayHost).Assembly.GetName().Name,
+        });
+
+        // Harmless when the process is a console: the lifetime only engages when the SCM started it.
+        builder.Services.AddWindowsService(service => service.ServiceName = GatewayOptions.ServiceName);
+
         builder.WebHost.UseUrls(options.BindUrl.ToString());
         builder.WebHost.ConfigureKestrel(kestrel =>
         {
@@ -64,6 +123,18 @@ public static class WorkerGatewayHost
             kestrel.Limits.MaxConcurrentConnections = 64;
             kestrel.Limits.RequestHeadersTimeout = TimeSpan.FromSeconds(15);
             kestrel.AddServerHeader = false;
+
+            if (certificate is not null)
+            {
+                // The one certificate the selector approved. No developer certificate, no file fallback,
+                // and no SNI callback that could answer for a name an operator never approved.
+                kestrel.ConfigureHttpsDefaults(https =>
+                {
+                    https.ServerCertificate = certificate;
+                    https.SslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13;
+                    https.ClientCertificateMode = ClientCertificateMode.NoCertificate;
+                });
+            }
         });
 
         IGatewayExtractionRunner runner = dependencies?.Runner ?? new ChildProcessExtractionRunner(options);

@@ -75,6 +75,35 @@ jobs:
             throw 'The host-to-worker integration test did not execute its real process path.'
           }
 
+      # The gateway's protected credentials are DPAPI, so the Ubuntu leg can only ever exercise the
+      # off-Windows refusal branch. This is the only leg where Protect and Unprotect actually run, so
+      # the round trip is confirmed by name in the report rather than inferred from a green total.
+      - name: Verify protected credential DPAPI round trip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $results = "$env:RUNNER_TEMP/source-worker-tests"
+          dotnet test tests/OracleFormsMigrationFleet.SourceWorker.Tests/OracleFormsMigrationFleet.SourceWorker.Tests.csproj `
+            -c Release `
+            --results-directory $results `
+            --logger 'trx;LogFileName=source-worker.trx'
+          if ($LASTEXITCODE -ne 0) { throw 'The native source worker test suite failed on Windows.' }
+
+          $report = [xml] (Get-Content "$results/source-worker.trx" -Raw)
+          foreach ($name in @(
+            'A_credential_protected_on_this_Windows_host_round_trips_and_is_bound_to_its_variable_name',
+            'Provisioning_refuses_a_multiline_or_control_shaped_credential',
+            'Provisioning_refuses_a_credential_larger_than_the_reader_accepts')) {
+            $executed = @($report.TestRun.Results.UnitTestResult | Where-Object testName -like "*$name*")
+            if ($executed.Count -eq 0) {
+              throw "The Windows-only protected credential test $name did not execute on this runner."
+            }
+            $failed = @($executed | Where-Object outcome -ne 'Passed')
+            if ($failed.Count -gt 0) {
+              throw "The Windows-only protected credential test $name did not pass on this runner."
+            }
+          }
+
       - name: Record worker artifact provenance
         shell: pwsh
         run: |
@@ -187,7 +216,9 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $templates = @(
             'infra/workbench/main.bicep',
-            'infra/dotnet-pilot/main.bicep'
+            'infra/dotnet-pilot/main.bicep',
+            'infra/source-gateway/main.bicep',
+            'infra/source-gateway/application.bicep'
           )
           foreach ($template in $templates) {
             $output = Join-Path $env:RUNNER_TEMP "$([IO.Path]::GetFileNameWithoutExtension($template))-$([Guid]::NewGuid().ToString('N')).json"
@@ -208,7 +239,12 @@ jobs:
           $scripts = @(
             'infra/workbench/Deploy-Workbench.ps1',
             'infra/workbench/Preview-WorkbenchInfrastructure.ps1',
-            'infra/dotnet-pilot/Setup-DotNetPilot.ps1'
+            'infra/dotnet-pilot/Setup-DotNetPilot.ps1',
+            'infra/source-gateway/Preview-SourceGateway.ps1',
+            'infra/source-gateway/Install-SourceGateway.ps1',
+            'infra/source-gateway/New-SourceGatewayCredentialTransferKey.ps1',
+            'infra/source-gateway/Protect-SourceGatewayCredentialForTransfer.ps1',
+            'infra/source-gateway/Complete-SourceGatewayCredentialTransfer.ps1'
           )
           foreach ($script in $scripts) {
             $tokens = $null
@@ -219,6 +255,21 @@ jobs:
               throw "PowerShell parsing failed for $script`: $($errors.Message -join '; ')"
             }
           }
+
+          pwsh -NoLogo -NoProfile -File 'infra/source-gateway/Test-SourceGatewayScripts.ps1'
+
+          $registry = Get-Content 'infra/source-gateway/source-registry.json' -Raw | ConvertFrom-Json
+          if ($registry.schemaVersion -ne 1 -or $registry.sources.Count -ne 1 -or
+              $registry.sources[0].sourceEnvironmentId -cne 'meridian-native-6i' -or
+              $registry.sources[0].authorizedProjectIds.Count -ne 1 -or
+              $registry.sources[0].authorizedProjectIds[0] -cne 'prj-d616e6e807e14b6bb5a468a33da3d744') {
+            throw 'The source-gateway registry drifted from its approved single-source project binding.'
+          }
+
+      - name: Scan source-gateway infrastructure security
+        run: |
+          python3 -m pip install --disable-pip-version-check checkov==3.3.19
+          checkov -d infra/source-gateway --framework bicep --quiet
 
       - name: Prime trusted generated-app dependency caches
         shell: bash
