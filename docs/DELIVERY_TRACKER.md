@@ -228,6 +228,23 @@ The retry requires a new trusted CI/release and bundle. Separately, Graph authen
 for the existing workbench sign-in app failed with AADSTS90072 for the current CLI
 identity. Its private callback was not added; no registration deletion is inferred.
 
+PR42 hotfix `f8ad9ce8fd327087c162be61fb6d7e5ef0fbefcf` passed exact CI
+`36935886530`, independent PowerShell 5.1 runtime checks, and Azure Validate for the
+bounded retry. It merged as `47118508a3c9ba3417a819299a2845483bb4db8a`;
+main release `36936606541` passed all CI and deployment gates. Authorized installation
+retry `36938165047` was dispatched once with that main SHA and CI run. Its service
+installation and certificate results remain pending at this checkpoint.
+
+The private-workbench preview/apply workflow is implemented but not deployed. It binds
+current-main CI, the trusted overlay-image provenance and public-root digest, requires
+a reviewed preview before apply, and rechecks the exact create-only resource allowlist.
+It passes the existing authentication secret through restricted secure parameters without
+displaying or rotating it. Independent QA repaired a false CI job-count restriction;
+Astra identified and closed native-verifier exit propagation and strict-mode empty
+comparison defects. Actual PowerShell regressions and 43 focused workflow tests pass.
+Final scoped CODE PUBLICATION PASS does not mark Stage 2 validated or solve the existing
+Graph identity/callback access blocker.
+
 ### Gateway Publication Review, 2026-09-30
 
 The unattended gateway and private-network installation artifacts are implemented but

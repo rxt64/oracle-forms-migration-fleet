@@ -223,6 +223,74 @@ public sealed class GeneratedTargetWorkflowTests
             "Managed Run Command cleanup must be armed before creation can partially succeed.");
     }
 
+    [Fact]
+    public void Private_workbench_stage2_is_preview_first_and_apply_requires_exact_retained_evidence()
+    {
+        YamlNode workflow = YamlNode.Parse(RepositoryText(".github/workflows/deploy-private-workbench.yml"));
+        Assert.Equal(["workflow_dispatch"], workflow["on"]!.Keys);
+        Assert.Empty(workflow["permissions"]!.Keys);
+
+        YamlNode inputs = workflow["on"]!["workflow_dispatch"]!["inputs"]!;
+        Assert.Equal("preview", inputs["mode"]!["default"]!.Text);
+        Assert.Equal(["preview", "apply"], inputs["mode"]!["options"]!.Sequence.Select(value => value.Text));
+        Assert.Equal("false", inputs["preview_run_id"]!["required"]!.Text);
+
+        YamlNode job = workflow["jobs"]!["stage2"]!;
+        Assert.Equal("windows-latest", job["runs-on"]!.Text);
+        Assert.Equal(
+            new Dictionary<string, string>
+            {
+                ["actions"] = "read",
+                ["contents"] = "read",
+                ["id-token"] = "write",
+            },
+            job["permissions"]!.ScalarFields);
+
+        IReadOnlyList<string> ciCommands = CommandsFor(job, "Verify exact current main commit and required CI");
+        IReadOnlyList<string> imageCommands = CommandsFor(job, "Download and verify trusted overlay manifest");
+        IReadOnlyList<string> commands = CommandsFor(job, "Verify bindings, preview, and optionally apply");
+        int firstPreview = commands.ToList().FindIndex(line =>
+            line.Contains("Preview-SourceGateway.ps1 @arguments", StringComparison.Ordinal) &&
+            !line.Contains("-Apply", StringComparison.Ordinal));
+        int retainedPreviewCheck = commands.ToList().FindIndex(line =>
+            line.Contains("$prior.dispatchMode -cne 'preview'", StringComparison.Ordinal));
+        int apply = commands.ToList().FindIndex(line =>
+            line.Contains("Preview-SourceGateway.ps1 @arguments -Apply -Confirm:$false", StringComparison.Ordinal));
+        Assert.True(firstPreview >= 0 && firstPreview < retainedPreviewCheck && retainedPreviewCheck < apply);
+        Assert.Contains(commands, line => line.Contains("templateSha256 -cne $evidence.templateSha256", StringComparison.Ordinal));
+        Assert.Contains(commands, line => line.Contains("publicBindingSha256 -cne $evidence.publicBindingSha256", StringComparison.Ordinal));
+        Assert.Contains(commands, line => line.Contains("az rest --method post --uri $secretUri", StringComparison.Ordinal));
+        Assert.Contains(ciCommands, line => line.Contains("verify_required_ci.py", StringComparison.Ordinal));
+        Assert.DoesNotContain(ciCommands, line => line.Contains("$actualJobs.Count", StringComparison.Ordinal));
+        Assert.Contains(imageCommands, line => line.Contains("$run.head_sha -cne $env:REQUESTED_SHA", StringComparison.Ordinal));
+        Assert.Contains(imageCommands, line => line.Contains("$manifest.workflowCommit -cne $env:REQUESTED_SHA", StringComparison.Ordinal));
+        Assert.Contains(commands, line => line.Contains("$previewRun.head_branch -cne 'main'", StringComparison.Ordinal));
+        Assert.Contains(commands, line => line.Contains("Add-Stage2EvidenceProvenance -Path $evidencePath -DispatchMode 'apply'", StringComparison.Ordinal));
+        Assert.DoesNotContain(commands, line => line.Contains("GITHUB_ENV", StringComparison.Ordinal));
+        Assert.DoesNotContain(commands, line => line.Contains("GITHUB_OUTPUT", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Source_gateway_wrapper_keeps_create_behind_apply_and_uses_no_output()
+    {
+        string wrapper = RepositoryText("infra/source-gateway/Preview-SourceGateway.ps1");
+        int applyGuard = wrapper.IndexOf("if ($Apply) {", StringComparison.Ordinal);
+        int shouldProcess = wrapper.IndexOf("$PSCmdlet.ShouldProcess", applyGuard, StringComparison.Ordinal);
+        int create = wrapper.IndexOf("'deployment', 'group', 'create'", shouldProcess, StringComparison.Ordinal);
+        int noOutput = wrapper.IndexOf("'--output', 'none'", create, StringComparison.Ordinal);
+
+        Assert.Contains("CmdletBinding(SupportsShouldProcess", wrapper, StringComparison.Ordinal);
+        Assert.True(applyGuard >= 0 && applyGuard < shouldProcess && shouldProcess < create && create < noOutput);
+        Assert.Equal(create, wrapper.LastIndexOf("'deployment', 'group', 'create'", StringComparison.Ordinal));
+        Assert.Contains("$null -ne $unexpectedChange", wrapper, StringComparison.Ordinal);
+        Assert.Contains("/setowner \"*$currentSid\" /inheritance:r /grant:r", wrapper, StringComparison.Ordinal);
+        Assert.Contains("--query 'properties.changes[].{resourceId:resourceId,changeType:changeType,resourceType:after.type}'", wrapper, StringComparison.Ordinal);
+        Assert.Contains("resourceType = $_.resourceType", wrapper, StringComparison.Ordinal);
+        Assert.DoesNotContain("$whatIfJson", wrapper, StringComparison.Ordinal);
+        Assert.Contains("throw 'The temporary secure parameter file could not be removed.'", wrapper, StringComparison.Ordinal);
+        Assert.DoesNotContain("Remove-Item -LiteralPath $parameterPath -Force -ErrorAction SilentlyContinue", wrapper, StringComparison.Ordinal);
+    }
+
     private static IReadOnlyList<string> CommandsFor(YamlNode job, string stepName) =>
         CommandLines(job["steps"]!.Sequence.Single(step => step["name"]?.Text == stepName)["run"]!.Text);
 

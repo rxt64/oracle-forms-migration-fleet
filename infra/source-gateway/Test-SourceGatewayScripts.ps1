@@ -250,6 +250,66 @@ if ($ciWorkflow -notmatch 'checkov==3\.3\.19' -or
     throw 'CI must enforce the pinned source-gateway Checkov gate.'
 }
 
+$repositoryRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+$deployWorkflow = Get-Content -LiteralPath (Join-Path $repositoryRoot '.github/workflows/deploy-private-workbench.yml') -Raw
+$ciExitGuardMatch = [regex]::Match(
+    $deployWorkflow,
+    '(?ms)^          if \(\$LASTEXITCODE -ne 0\) \{\r?\n              throw "Required CI verification failed with exit code \$LASTEXITCODE\."\r?\n          \}')
+if (-not $ciExitGuardMatch.Success) {
+    throw 'The private workbench workflow is missing the required-CI native exit guard.'
+}
+$ciExitGuard = [scriptblock]::Create($ciExitGuardMatch.Value.Trim())
+$continuedAfterCiRejection = $false
+$ciRejection = try {
+    $PSNativeCommandUseErrorActionPreference = $false
+    & (Get-Process -Id $PID).Path -NoProfile -Command 'exit 23'
+    & $ciExitGuard
+    $continuedAfterCiRejection = $true
+    $null
+} catch { $_ }
+if ($null -eq $ciRejection -or $continuedAfterCiRejection -or
+    $ciRejection.Exception.Message -ne 'Required CI verification failed with exit code 23.') {
+    throw 'A nonzero required-CI verifier exit was allowed to continue to the next workflow command.'
+}
+
+$previewPath = Join-Path $PSScriptRoot 'Preview-SourceGateway.ps1'
+$previewTokens = $null
+$previewErrors = $null
+$previewAst = [System.Management.Automation.Language.Parser]::ParseFile(
+    $previewPath, [ref]$previewTokens, [ref]$previewErrors)
+if ($previewErrors.Count -ne 0) {
+    throw "Preview script parsing failed: $($previewErrors.Message -join '; ')"
+}
+$resourceDifferenceAssignment = $previewAst.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Left.Extent.Text -ceq '$resourceIdDifferences'
+}, $true)
+$resourceScopeGuard = $previewAst.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.IfStatementAst] -and
+        $node.Clauses[0].Item1.Extent.Text -match '\$resourceIdDifferences\.Count'
+}, $true)
+if ($null -eq $resourceDifferenceAssignment -or $null -eq $resourceScopeGuard) {
+    throw 'The preview resource-scope comparison could not be loaded for runtime verification.'
+}
+$resourceScopeCheck = [scriptblock]::Create(
+    "$($resourceDifferenceAssignment.Extent.Text)`n$($resourceScopeGuard.Extent.Text)")
+$expectedResourceIds = @('/resource/a', '/resource/b')
+$actualResourceIds = @('/resource/a', '/resource/b')
+$resourceChanges = @(
+    [pscustomobject]@{ resourceId = '/resource/a'; changeType = 'Create' }
+    [pscustomobject]@{ resourceId = '/resource/b'; changeType = 'Create' }
+)
+$unexpectedChange = $null
+& $resourceScopeCheck
+$actualResourceIds = @('/resource/a', '/resource/c')
+$scopeRejection = try { & $resourceScopeCheck; $null } catch { $_ }
+if ($null -eq $scopeRejection -or
+    $scopeRejection.Exception.Message -notmatch 'exceeded the approved create-only scope') {
+    throw 'The preview resource-scope comparison accepted differing resource IDs.'
+}
+
 $installWorkflow = Get-Content -LiteralPath (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) '.github/workflows/install-source-gateway.yml') -Raw
 $bootstrap = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Invoke-SourceGatewayInstall.ps1') -Raw
 $bootstrapTokens = $null

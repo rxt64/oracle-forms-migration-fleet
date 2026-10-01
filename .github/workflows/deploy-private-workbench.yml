@@ -1,0 +1,282 @@
+name: Preview or deploy private source-gateway workbench
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Preview retains evidence; apply requires a matching successful preview run'
+        required: true
+        default: preview
+        type: choice
+        options:
+          - preview
+          - apply
+      commit_sha:
+        description: 'Full current main SHA with successful required CI'
+        required: true
+        type: string
+      ci_run_id:
+        description: 'Successful main-push CI run for commit_sha'
+        required: true
+        type: string
+      image_build_run_id:
+        description: 'Successful source-gateway-image workflow run for commit_sha'
+        required: true
+        type: string
+      preview_run_id:
+        description: 'Required only for apply: successful retained preview run with exact bindings'
+        required: false
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: oracle-forms-migration-fleet-private-workbench
+  cancel-in-progress: false
+
+env:
+  EXPECTED_REPOSITORY: rxt64/oracle-forms-migration-fleet
+  EXPECTED_SUBSCRIPTION_ID: d4394e57-c076-4c92-a870-5de6bf44f255
+  EXPECTED_TENANT_ID: 1984d248-06ca-4d04-a3b8-4c0c1577ab86
+  RESOURCE_GROUP: rg-oracle-forms-migration-fleet-dev-b9f0e875
+  FOUNDATION_DEPLOYMENT: ofm-source-gateway-foundation
+  PUBLIC_WORKBENCH: ca-ofmfleet-dev-ykbpnrpd
+  WORKBENCH_IDENTITY: id-ofmfleet-web-dev-ykbpnrpd
+  POSTGRES_SERVER: pg-ofmfleet-dev-ykbpnrpd
+  REGISTRY: acrofmfleedevykbpnrpd
+  GATEWAY_APPLICATION_CLIENT_ID: b16b4127-9ef6-44a1-9f07-bbfe92053baf
+  OPERATOR_PRINCIPAL_OBJECT_ID: dd84da40-177f-47b9-9c4d-4b657ee4de36
+  FOUNDRY_AGENT_ENDPOINT: https://cog-czusrhcg4gpm2.services.ai.azure.com/api/projects/oracle-forms-migration-fleet-dev/agents/oracle-forms-migration-fleet/endpoint/protocols/openai/responses?api-version=v1
+  EXPECTED_DEFAULT_DOMAIN: bravesky-bbd4eb91.eastus2.azurecontainerapps.io
+  EXPECTED_STATIC_IP: 10.246.0.75
+  EXPECTED_PRIVATE_ENDPOINT_SUBNET_ID: /subscriptions/d4394e57-c076-4c92-a870-5de6bf44f255/resourceGroups/rg-oracle-forms-migration-fleet-dev-b9f0e875/providers/Microsoft.Network/virtualNetworks/vnet-ofm-forms6i-j6mrrerz/subnets/snet-ofmfleet-private-endpoints
+
+jobs:
+  stage2:
+    name: Trusted Stage 2 preview or apply
+    runs-on: windows-latest
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact current main commit and required CI
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_SHA: ${{ inputs.commit_sha }}
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_REPOSITORY -cne $env:EXPECTED_REPOSITORY -or $env:GITHUB_REF -cne 'refs/heads/main' -or
+              $env:REQUESTED_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:CI_RUN_ID -cnotmatch '^[0-9]+$') {
+              throw 'Dispatch repository, ref, commit_sha, or ci_run_id is not canonical.'
+          }
+          git fetch --no-tags origin main $env:REQUESTED_SHA
+          if ((git rev-parse origin/main) -cne $env:REQUESTED_SHA) {
+              throw 'commit_sha must be the current origin/main commit.'
+          }
+          gh api "repos/$env:EXPECTED_REPOSITORY/actions/runs/$env:CI_RUN_ID" | Set-Content "$env:RUNNER_TEMP/ci-run.json"
+          gh api "repos/$env:EXPECTED_REPOSITORY/actions/runs/$env:CI_RUN_ID/jobs?filter=latest&per_page=100" | Set-Content "$env:RUNNER_TEMP/ci-jobs.json"
+          python .github/scripts/verify_required_ci.py `
+            $env:EXPECTED_REPOSITORY $env:REQUESTED_SHA manual `
+            "$env:RUNNER_TEMP/ci-run.json" "$env:RUNNER_TEMP/ci-jobs.json"
+          if ($LASTEXITCODE -ne 0) {
+              throw "Required CI verification failed with exit code $LASTEXITCODE."
+          }
+          git checkout --detach $env:REQUESTED_SHA
+
+      - name: Download and verify trusted overlay manifest
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_SHA: ${{ inputs.commit_sha }}
+          IMAGE_BUILD_RUN_ID: ${{ inputs.image_build_run_id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:IMAGE_BUILD_RUN_ID -cnotmatch '^[0-9]+$') {
+              throw 'image_build_run_id must be canonical.'
+          }
+          $run = gh api "repos/$env:EXPECTED_REPOSITORY/actions/runs/$env:IMAGE_BUILD_RUN_ID" | ConvertFrom-Json
+          if ($run.path -cne '.github/workflows/source-gateway-image.yml' -or $run.event -cne 'workflow_dispatch' -or
+              $run.status -cne 'completed' -or $run.conclusion -cne 'success' -or
+              $run.head_repository.full_name -cne $env:EXPECTED_REPOSITORY -or
+              $run.head_branch -cne 'main' -or $run.head_sha -cne $env:REQUESTED_SHA) {
+              throw 'The overlay manifest did not come from a successful trusted image workflow run.'
+          }
+          $manifestRoot = "$env:RUNNER_TEMP/source-gateway-image"
+          New-Item -ItemType Directory -Path $manifestRoot | Out-Null
+          gh run download $env:IMAGE_BUILD_RUN_ID --repo $env:EXPECTED_REPOSITORY `
+            --name "source-gateway-image-$env:REQUESTED_SHA" --dir $manifestRoot
+          $files = @(Get-ChildItem -LiteralPath $manifestRoot -File)
+          if ($files.Count -ne 1 -or $files[0].Name -cne 'manifest.json') {
+              throw 'The image artifact must contain exactly manifest.json.'
+          }
+          $manifest = Get-Content -LiteralPath $files[0].FullName -Raw | ConvertFrom-Json
+          $rootCertificate = 'infra/source-gateway/trust/ofm-source-gateway-dev-root-2026.cer'
+          $rootSha256 = (Get-FileHash -LiteralPath $rootCertificate -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($manifest.schemaVersion -ne 1 -or $manifest.repository -cne $env:EXPECTED_REPOSITORY -or
+              $manifest.sourceCommit -cne $env:REQUESTED_SHA -or
+              $manifest.workflowCommit -cne $env:REQUESTED_SHA -or
+              [string]$manifest.buildRunId -cne $env:IMAGE_BUILD_RUN_ID -or
+              [string]$manifest.buildRunAttempt -cne [string]$run.run_attempt -or
+              $manifest.rootCertificateSha256 -cne $rootSha256 -or
+              $manifest.image -cnotmatch '^acrofmfleedevykbpnrpd\.azurecr\.io/migration-fleet-workbench-source-gateway@sha256:[0-9a-f]{64}$' -or
+              $manifest.baseImage -cnotmatch '^acrofmfleedevykbpnrpd\.azurecr\.io/migration-fleet-workbench@sha256:[0-9a-f]{64}$') {
+              throw 'The overlay manifest is not bound to current main, the reviewed root, and approved repositories.'
+          }
+          $manifest | ConvertTo-Json -Compress | Set-Content -LiteralPath "$env:RUNNER_TEMP/verified-image-manifest.json"
+
+      - name: Sign in to pinned Azure tenant and subscription
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Verify bindings, preview, and optionally apply
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_SHA: ${{ inputs.commit_sha }}
+          IMAGE_BUILD_RUN_ID: ${{ inputs.image_build_run_id }}
+          MODE: ${{ inputs.mode }}
+          PREVIEW_RUN_ID: ${{ inputs.preview_run_id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:MODE -cnotin @('preview', 'apply')) {
+              throw 'mode must be preview or apply.'
+          }
+          $account = az account show --subscription $env:EXPECTED_SUBSCRIPTION_ID --output json --only-show-errors | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $account.id -cne $env:EXPECTED_SUBSCRIPTION_ID -or $account.tenantId -cne $env:EXPECTED_TENANT_ID) {
+              throw 'Azure OIDC selected an unexpected tenant or subscription.'
+          }
+
+          $foundation = az deployment group show --subscription $env:EXPECTED_SUBSCRIPTION_ID `
+            --resource-group $env:RESOURCE_GROUP --name $env:FOUNDATION_DEPLOYMENT `
+            --query properties.outputs --output json --only-show-errors | ConvertFrom-Json
+          $domain = [string]$foundation.managedEnvironmentDefaultDomain.value
+          $staticIp = [string]$foundation.managedEnvironmentInboundStaticIp.value
+          $privateEndpointSubnetId = [string]$foundation.privateEndpointSubnetId.value
+          if ($domain -cne $env:EXPECTED_DEFAULT_DOMAIN -or $staticIp -cne $env:EXPECTED_STATIC_IP -or
+              $privateEndpointSubnetId -cne $env:EXPECTED_PRIVATE_ENDPOINT_SUBNET_ID) {
+              throw 'The retained Stage 1 deployment outputs do not match the approved Stage 2 bindings.'
+          }
+
+          $identity = az identity show --subscription $env:EXPECTED_SUBSCRIPTION_ID `
+            --resource-group $env:RESOURCE_GROUP --name $env:WORKBENCH_IDENTITY `
+            --query '{name:name,clientId:clientId,principalId:principalId}' --output json --only-show-errors | ConvertFrom-Json
+          $postgresName = az postgres flexible-server show --subscription $env:EXPECTED_SUBSCRIPTION_ID `
+            --resource-group $env:RESOURCE_GROUP --name $env:POSTGRES_SERVER `
+            --query name --output tsv --only-show-errors
+          if ($identity.name -cne $env:WORKBENCH_IDENTITY -or
+              $identity.clientId -cne 'f4492b02-ee64-4295-a1db-7c7677134e42' -or
+              $identity.principalId -cne '595d3a27-a2a8-4ac4-b33d-98715cbcd684' -or
+              $postgresName -cne $env:POSTGRES_SERVER) {
+              throw 'The approved existing identity or PostgreSQL resource binding changed.'
+          }
+
+          $manifest = Get-Content -LiteralPath "$env:RUNNER_TEMP/verified-image-manifest.json" -Raw | ConvertFrom-Json
+          $publicImage = az containerapp show --subscription $env:EXPECTED_SUBSCRIPTION_ID `
+            --resource-group $env:RESOURCE_GROUP --name $env:PUBLIC_WORKBENCH `
+            --query properties.template.containers[0].image --output tsv --only-show-errors
+          if ($publicImage -cne $manifest.baseImage) {
+              throw 'The overlay base image is not the currently approved public workbench image.'
+          }
+          $digest = ($manifest.image -split '@', 2)[1]
+          $acrDigest = az acr manifest show-metadata --registry $env:REGISTRY `
+            --name $manifest.image.Replace("$env:REGISTRY.azurecr.io/", '') `
+            --query digest --output tsv --only-show-errors
+          if ($acrDigest -cne $digest) {
+              throw 'ACR metadata does not contain the exact immutable overlay digest.'
+          }
+
+          $secretUri = "https://management.azure.com/subscriptions/$env:EXPECTED_SUBSCRIPTION_ID/resourceGroups/$env:RESOURCE_GROUP/providers/Microsoft.App/containerApps/$env:PUBLIC_WORKBENCH/listSecrets?api-version=2025-01-01"
+          $secret = az rest --method post --uri $secretUri `
+            --query "value[?name=='microsoft-provider-authentication-secret'].value | [0]" `
+            --output tsv --only-show-errors
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($secret)) {
+              throw 'The named public workbench authentication secret was unavailable.'
+          }
+          $env:OFM_WORKBENCH_AUTH_CLIENT_SECRET = $secret
+          $secret = $null
+
+            try {
+              $evidenceRoot = "$env:RUNNER_TEMP/stage2-evidence"
+              New-Item -ItemType Directory -Path $evidenceRoot | Out-Null
+              $evidencePath = Join-Path $evidenceRoot 'preview.json'
+              function Add-Stage2EvidenceProvenance {
+                param([string] $Path, [string] $DispatchMode)
+
+                $value = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+                $value | Add-Member -NotePropertyName repository -NotePropertyValue $env:EXPECTED_REPOSITORY
+                $value | Add-Member -NotePropertyName commitSha -NotePropertyValue $env:REQUESTED_SHA
+                $value | Add-Member -NotePropertyName imageBuildRunId -NotePropertyValue ([long]$env:IMAGE_BUILD_RUN_ID)
+                $value | Add-Member -NotePropertyName dispatchMode -NotePropertyValue $DispatchMode
+                $value | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $Path -Encoding utf8NoBOM
+                return $value
+              }
+              $arguments = @{
+                Stage = 'Application'
+                ManagedEnvironmentDefaultDomain = $domain
+                ManagedEnvironmentInboundStaticIp = $staticIp
+                PrivateEndpointSubnetId = $privateEndpointSubnetId
+                ContainerImage = $manifest.image
+                SourceGatewayApplicationClientId = $env:GATEWAY_APPLICATION_CLIENT_ID
+                FoundryAgentEndpoint = $env:FOUNDRY_AGENT_ENDPOINT
+                OperatorPrincipalObjectIds = @($env:OPERATOR_PRINCIPAL_OBJECT_ID)
+                EvidencePath = $evidencePath
+              }
+              & ./infra/source-gateway/Preview-SourceGateway.ps1 @arguments
+
+              $evidence = Add-Stage2EvidenceProvenance -Path $evidencePath -DispatchMode $env:MODE
+
+              if ($env:MODE -ceq 'apply') {
+                if ($env:PREVIEW_RUN_ID -cnotmatch '^[0-9]+$') {
+                  throw 'apply requires a canonical preview_run_id.'
+                }
+                $previewRun = gh api "repos/$env:EXPECTED_REPOSITORY/actions/runs/$env:PREVIEW_RUN_ID" | ConvertFrom-Json
+                if ($previewRun.path -cne '.github/workflows/deploy-private-workbench.yml' -or
+                  $previewRun.event -cne 'workflow_dispatch' -or $previewRun.status -cne 'completed' -or
+                  $previewRun.conclusion -cne 'success' -or
+                  $previewRun.head_repository.full_name -cne $env:EXPECTED_REPOSITORY -or
+                  $previewRun.head_branch -cne 'main' -or $previewRun.head_sha -cne $env:REQUESTED_SHA) {
+                  throw 'The retained preview run is not a successful trusted Stage 2 run for current main.'
+                }
+                $priorRoot = "$env:RUNNER_TEMP/prior-preview"
+                New-Item -ItemType Directory -Path $priorRoot | Out-Null
+                gh run download $env:PREVIEW_RUN_ID --repo $env:EXPECTED_REPOSITORY `
+                --name "private-workbench-preview-$env:REQUESTED_SHA-$env:PREVIEW_RUN_ID" --dir $priorRoot
+                $priorFiles = @(Get-ChildItem -LiteralPath $priorRoot -File)
+                if ($priorFiles.Count -ne 1 -or $priorFiles[0].Name -cne 'preview.json') {
+                  throw 'The prior preview artifact must contain exactly preview.json.'
+                }
+                $prior = Get-Content -LiteralPath $priorFiles[0].FullName -Raw | ConvertFrom-Json
+                if ($prior.whatIfSucceeded -ne $true -or $prior.repository -cne $env:EXPECTED_REPOSITORY -or
+                  $prior.commitSha -cne $env:REQUESTED_SHA -or $prior.dispatchMode -cne 'preview' -or
+                  $prior.templateSha256 -cne $evidence.templateSha256 -or
+                  $prior.publicBindingSha256 -cne $evidence.publicBindingSha256 -or
+                  [string]$prior.imageBuildRunId -cne $env:IMAGE_BUILD_RUN_ID) {
+                  throw 'The retained successful preview does not exactly match the current template and public bindings.'
+                }
+                & ./infra/source-gateway/Preview-SourceGateway.ps1 @arguments -Apply -Confirm:$false
+                $evidence = Add-Stage2EvidenceProvenance -Path $evidencePath -DispatchMode 'apply'
+              }
+            }
+            finally {
+              Remove-Item Env:OFM_WORKBENCH_AUTH_CLIENT_SECRET -ErrorAction SilentlyContinue
+          }
+
+      - name: Retain redacted Stage 2 preview evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: private-workbench-preview-${{ inputs.commit_sha }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/stage2-evidence/preview.json
+          if-no-files-found: error
+          retention-days: 30

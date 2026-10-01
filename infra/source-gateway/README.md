@@ -8,7 +8,9 @@ objects, create an Oracle account, extract a source, or deploy a migration.
 
 - `main.bicep`: stage 1, adding the `.64/27` delegated ACA subnet, the `.96/27` private-endpoint subnet, and internal workload-profiles ACA environment.
 - `application.bicep`: stage 2, adding the private app, source/ACA private DNS, one exact NSG rule, and a PostgreSQL private endpoint with its DNS zone group and VNet link.
-- `Preview-SourceGateway.ps1`: pinned-subscription compilation and non-applying group what-if wrapper.
+- `Preview-SourceGateway.ps1`: pinned-subscription full group what-if wrapper. Application apply is optional,
+  remains behind `SupportsShouldProcess`, and is unreachable unless the same invocation first proves the exact
+  reviewed create-only resource allowlist.
 - `Configure-SourceGatewayEntra.ps1`: pinned-tenant preflight and idempotent creation/verification of the
    gateway API, its application-only `SourceGateway.Invoke` role, service principal, and exact workbench
    UAMI assignment. It creates no credential, redirect, Graph permission, or Azure RBAC assignment.
@@ -75,6 +77,20 @@ pwsh infra/source-gateway/Preview-SourceGateway.ps1 -Stage Application `
     -OperatorPrincipalObjectIds '<operator-object-id>'
 Remove-Item Env:OFM_WORKBENCH_AUTH_CLIENT_SECRET
 ```
+
+The manual `deploy-private-workbench.yml` workflow is the trusted Stage 2 entry point. `preview` is the
+default and retains a redacted, typed ARM change list plus template and public-binding digests for 30 days.
+`apply` requires the run ID of a successful retained `preview` for the exact current `main` commit, image
+manifest, template, and public bindings; it then performs a fresh full what-if before the
+`SupportsShouldProcess`-gated create. The workflow reads Stage 1 outputs from the named ARM deployment,
+verifies the existing UAMI/PostgreSQL/public-workbench bindings, and obtains only
+`microsoft-provider-authentication-secret` into process memory. The value is not written to retained
+evidence, workflow output, a command argument, or `GITHUB_ENV`; the wrapper writes it only to its
+owner-restricted temporary parameter file and fails if `finally` cannot remove that file.
+
+Stage 2 does not update Entra redirect URIs. After ARM confirms the actual private app domain, the parent
+delivery must separately review and add only the emitted `requiredWorkbenchRedirectUri` to the existing
+workbench registration before interactive sign-in can succeed.
 
 ## Required External Outputs
 
