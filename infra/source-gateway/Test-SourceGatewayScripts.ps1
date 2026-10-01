@@ -56,6 +56,26 @@ if ($null -eq $extraJobFailure -or $extraJobFailure.Exception.Message -notmatch 
 }
 
 if ($IsWindows) {
+    foreach ($guardScript in @('Install-SourceGateway.ps1', 'New-SourceGatewayCredentialTransferKey.ps1',
+            'Complete-SourceGatewayCredentialTransfer.ps1')) {
+        $guardTokens = $null
+        $guardErrors = $null
+        $guardAst = [System.Management.Automation.Language.Parser]::ParseFile(
+            (Join-Path $PSScriptRoot $guardScript), [ref]$guardTokens, [ref]$guardErrors)
+        $adminGuard = $guardAst.Find({
+            param($node)
+            $node -is [System.Management.Automation.Language.IfStatementAst] -and
+                $node.Clauses[0].Item1.Extent.Text -match 'WindowsPrincipal.*IsInRole'
+        }, $true)
+        if ($null -eq $adminGuard) { throw "The administrator guard is missing from $guardScript." }
+        $guardResult = & ([scriptblock]::Create($adminGuard.Clauses[0].Item1.Extent.Text))
+        $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+        $expectedGuard = -not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        if ($guardResult -isnot [bool] -or $guardResult -ne $expectedGuard) {
+            throw "The actual administrator guard returned an invalid decision in $guardScript."
+        }
+    }
+
     $aclTestRoot = Join-Path ([IO.Path]::GetTempPath()) "ofm-source-gateway-acl-$([guid]::NewGuid().ToString('N'))"
     try {
         New-Item -ItemType Directory -Path $aclTestRoot | Out-Null
