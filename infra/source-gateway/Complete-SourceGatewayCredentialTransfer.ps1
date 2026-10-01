@@ -110,7 +110,7 @@ if ($AsService) {
     return
 }
 
-if (-not [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent().IsInRole(
+if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'Run the scheduling leg elevated on the approved Forms VM.'
 }

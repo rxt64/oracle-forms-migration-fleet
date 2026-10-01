@@ -49,7 +49,7 @@ $certificateStatePath = Join-Path $publicTrustRoot 'certificate-state.json'
 $rootCerPath = Join-Path $publicTrustRoot 'ofm-source-gateway-dev-root-2026.cer'
 . (Join-Path $PSScriptRoot 'SourceGatewayInstaller.Common.ps1')
 
-if (-not [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent().IsInRole(
+if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'Run this bootstrap from an elevated PowerShell session on the approved Forms VM.'
 }

@@ -213,6 +213,21 @@ that failed under Windows PowerShell; it was fixed and the actual length guard p
 5.1 runtime tests for absent, valid and oversized headers. Astra's scoped code-release
 PASS permits publication and trusted CI, not a claim that service installation has run.
 
+PR41 merged as `d8ea746ea71eb3d3649f3656cab7f84bbe8a56d5`; main release
+`36926345611` passed all gates. Authorized installation run `36929115699` verified
+and published the code-only bundle and proved unauthenticated download, but the guest
+failed before installation. Windows PowerShell invoked `IsInRole` on WindowsIdentity
+before applying the cast. Read-only guest diagnostics confirmed no service, installed
+worker, or gateway certificates existed after that attempt; transport cleanup ran.
+
+The administrator guard was corrected in the installer and both credential helpers.
+The regression executes each actual AST-extracted guard rather than merely parsing
+the script. Independent Sol and Astra checks passed; Windows PowerShell 5.1 returned
+the correct Boolean for all three, while the old expression reproduced MethodNotFound.
+The retry requires a new trusted CI/release and bundle. Separately, Graph authentication
+for the existing workbench sign-in app failed with AADSTS90072 for the current CLI
+identity. Its private callback was not added; no registration deletion is inferred.
+
 ### Gateway Publication Review, 2026-09-30
 
 The unattended gateway and private-network installation artifacts are implemented but
