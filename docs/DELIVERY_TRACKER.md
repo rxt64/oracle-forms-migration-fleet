@@ -233,7 +233,22 @@ PR42 hotfix `f8ad9ce8fd327087c162be61fb6d7e5ef0fbefcf` passed exact CI
 bounded retry. It merged as `47118508a3c9ba3417a819299a2845483bb4db8a`;
 main release `36936606541` passed all CI and deployment gates. Authorized installation
 retry `36938165047` was dispatched once with that main SHA and CI run. Its service
-installation and certificate results remain pending at this checkpoint.
+creation failed with `sc.exe` exit 1639 because option/value pairs were passed as
+single native arguments. Guest diagnostics confirmed no service or installed worker
+remained after rollback, and managed command cleanup succeeded. Certificate preparation
+did persist: root thumbprint `888992B079A2C57503C3EC38BF68C4BB4FCDB069`, leaf
+`99FF9A6B60B35F2A1F74D65B079BE7AE5D531CD9` for `gateway.ofm.source.internal`,
+and public root SHA-256
+`f285dc714a836a0c3b34855e4eb7c17009c5ac48421b7ca4092252aee1f2a327`.
+These certificates are retained for the retry, not rotated.
+
+The next scoped installer fix separates SCM option/value tokens, preserves the quoted
+executable path under Windows PowerShell 5.1 native marshalling, and restores previous
+service configuration before restarting during upgrade rollback. A non-mutating native
+argv-capture check verified all eight creation arguments; PowerShell behavior tests and
+parser checks passed. Independent Sol QA and Astra code-publication closure passed.
+No real service mutation was used for local tests. A read-only public-certificate retrieval
+is pending; it is not installation or extraction evidence.
 
 The private-workbench preview/apply workflow is implemented but not deployed. It binds
 current-main CI, the trusted overlay-image provenance and public-root digest, requires
