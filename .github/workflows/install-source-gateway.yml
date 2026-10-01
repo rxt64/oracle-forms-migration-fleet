@@ -1,0 +1,359 @@
+name: Install source gateway on approved Forms VM
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: 'Full current main SHA whose successful CI produced the source worker'
+        required: true
+        type: string
+      ci_run_id:
+        description: 'Successful main-push CI run for commit_sha'
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: oracle-forms-migration-fleet-source-gateway-install
+  cancel-in-progress: false
+
+env:
+  EXPECTED_REPOSITORY: rxt64/oracle-forms-migration-fleet
+  EXPECTED_SUBSCRIPTION_ID: d4394e57-c076-4c92-a870-5de6bf44f255
+  EXPECTED_TENANT_ID: 1984d248-06ca-4d04-a3b8-4c0c1577ab86
+  RESOURCE_GROUP: rg-oracle-forms-migration-fleet-dev-b9f0e875
+  FORMS_VM: vm-ofm-forms6i-j6mrrerz
+  GATEWAY_APPLICATION_CLIENT_ID: b16b4127-9ef6-44a1-9f07-bbfe92053baf
+  GATEWAY_CALLER_CLIENT_ID: f4492b02-ee64-4295-a1db-7c7677134e42
+  GATEWAY_PRIVATE_IP: 10.246.0.4
+
+jobs:
+  package:
+    name: Verify CI and package reviewed installer
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      bundle_sha256: ${{ steps.bundle.outputs.bundle_sha256 }}
+      release_tag: ${{ steps.bundle.outputs.release_tag }}
+      asset_name: ${{ steps.bundle.outputs.asset_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact current main commit and trusted CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_SHA: ${{ inputs.commit_sha }}
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REPOSITORY" != "$EXPECTED_REPOSITORY" || "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo 'This workflow must be dispatched from the pinned public repository and main ref.' >&2
+            exit 1
+          fi
+          if [[ ! "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ || ! "$CI_RUN_ID" =~ ^[0-9]+$ ]]; then
+            echo 'commit_sha and ci_run_id must be full canonical identifiers.' >&2
+            exit 1
+          fi
+          git fetch --no-tags origin main "$REQUESTED_SHA"
+          if [[ "$(git rev-parse origin/main)" != "$REQUESTED_SHA" ]]; then
+            echo 'commit_sha must be the current origin/main commit.' >&2
+            exit 1
+          fi
+          gh api "repos/$EXPECTED_REPOSITORY/actions/runs/$CI_RUN_ID" > "$RUNNER_TEMP/ci-run.json"
+          gh api "repos/$EXPECTED_REPOSITORY/actions/runs/$CI_RUN_ID/jobs?filter=latest&per_page=100" > "$RUNNER_TEMP/ci-jobs.json"
+          python3 .github/scripts/verify_required_ci.py \
+            "$EXPECTED_REPOSITORY" "$REQUESTED_SHA" manual \
+            "$RUNNER_TEMP/ci-run.json" "$RUNNER_TEMP/ci-jobs.json"
+          git checkout --detach "$REQUESTED_SHA"
+
+      - name: Download exact trusted worker artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_SHA: ${{ inputs.commit_sha }}
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/worker"
+          gh run download "$CI_RUN_ID" --repo "$EXPECTED_REPOSITORY" \
+            --name "source-worker-win-x86-$REQUESTED_SHA" --dir "$RUNNER_TEMP/worker"
+
+      - name: Verify payload and create transport bundle
+        id: bundle
+        env:
+          REQUESTED_SHA: ${{ inputs.commit_sha }}
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+        run: |
+          set -euo pipefail
+          export BUNDLE_ROOT="$RUNNER_TEMP/source-gateway-bundle"
+          export WORKER_ROOT="$RUNNER_TEMP/worker"
+          export CI_RUN_JSON="$RUNNER_TEMP/ci-run.json"
+          export CI_JOBS_JSON="$RUNNER_TEMP/ci-jobs.json"
+          export RELEASE_TAG="source-gateway-install-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$REQUESTED_SHA"
+          export ASSET_NAME="$RELEASE_TAG.zip"
+          mkdir -p "$BUNDLE_ROOT"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import shutil
+          import zipfile
+
+          repository = os.environ["EXPECTED_REPOSITORY"]
+          commit = os.environ["REQUESTED_SHA"]
+          ci_run_id = int(os.environ["CI_RUN_ID"])
+          worker_root = pathlib.Path(os.environ["WORKER_ROOT"])
+          bundle_root = pathlib.Path(os.environ["BUNDLE_ROOT"])
+          repo_root = pathlib.Path.cwd()
+          worker_name = "OracleFormsMigrationFleet.SourceWorker.exe"
+          artifact_names = sorted(path.name for path in worker_root.iterdir())
+          if artifact_names != [worker_name, "manifest.json"] or not all(path.is_file() for path in worker_root.iterdir()):
+              raise SystemExit("The downloaded worker artifact must contain exactly the worker and manifest.")
+
+          worker = worker_root / worker_name
+          manifest_path = worker_root / "manifest.json"
+          manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+          worker_sha = hashlib.sha256(worker.read_bytes()).hexdigest()
+          expected_manifest = {
+              "schemaVersion": 1,
+              "repository": repository,
+              "commit": commit,
+              "ref": "refs/heads/main",
+              "event": "push",
+              "workflow": "CI",
+              "runId": str(ci_run_id),
+              "runtimeIdentifier": "win-x86",
+              "fileName": worker_name,
+              "length": worker.stat().st_size,
+              "sha256": worker_sha,
+          }
+          for field, expected in expected_manifest.items():
+              actual = str(manifest.get(field)) if field == "runId" else manifest.get(field)
+              if actual != expected:
+                  raise SystemExit(f"Worker manifest field {field!r} did not match trusted evidence.")
+
+          run = json.loads(pathlib.Path(os.environ["CI_RUN_JSON"]).read_text(encoding="utf-8"))
+          jobs_response = json.loads(pathlib.Path(os.environ["CI_JOBS_JSON"]).read_text(encoding="utf-8"))
+          required_names = [
+              "Native source worker contract",
+              "build-and-test",
+              "Container image builds",
+              "Guided UI browser checks",
+          ]
+          jobs = [job for name in required_names for job in jobs_response["jobs"] if job.get("name") == name]
+          if len(jobs) != len(required_names):
+              raise SystemExit("The trusted CI proof did not reduce to exactly the required jobs.")
+          proof = {
+              "schemaVersion": 1,
+              "repository": repository,
+              "commit": commit,
+              "ciRunId": ci_run_id,
+              "run": {
+                  "id": run.get("id"),
+                  "name": run.get("name"),
+                  "path": run.get("path"),
+                  "event": run.get("event"),
+                  "head_branch": run.get("head_branch"),
+                  "head_sha": run.get("head_sha"),
+                  "status": run.get("status"),
+                  "conclusion": run.get("conclusion"),
+                  "repository": (run.get("head_repository") or {}).get("full_name"),
+              },
+              "jobs": [
+                  {"name": job.get("name"), "status": job.get("status"), "conclusion": job.get("conclusion")}
+                  for job in jobs
+              ],
+              "workerSha256": worker_sha,
+              "manifestSha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+          }
+          (bundle_root / "ci-proof.json").write_text(
+              json.dumps(proof, separators=(",", ":"), sort_keys=True) + "\n", encoding="utf-8"
+          )
+          shutil.copy2(worker, bundle_root / worker_name)
+          shutil.copy2(manifest_path, bundle_root / "manifest.json")
+          for name in ["Install-SourceGateway.ps1", "SourceGatewayInstaller.Common.ps1", "source-registry.json"]:
+              shutil.copy2(repo_root / "infra" / "source-gateway" / name, bundle_root / name)
+
+          asset = pathlib.Path(os.environ["RUNNER_TEMP"]) / os.environ["ASSET_NAME"]
+          names = sorted(path.name for path in bundle_root.iterdir())
+          with zipfile.ZipFile(asset, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+              for name in names:
+                  info = zipfile.ZipInfo(name, date_time=(2026, 1, 1, 0, 0, 0))
+                  info.compress_type = zipfile.ZIP_DEFLATED
+                  info.external_attr = 0o600 << 16
+                  archive.writestr(info, (bundle_root / name).read_bytes())
+          print(hashlib.sha256(asset.read_bytes()).hexdigest())
+          PY
+          BUNDLE_SHA256=$(sha256sum "$RUNNER_TEMP/$ASSET_NAME" | cut -d' ' -f1)
+          echo "bundle_sha256=$BUNDLE_SHA256" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "asset_name=$ASSET_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Transfer verified bundle to publishing job
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-gateway-install-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/${{ steps.bundle.outputs.asset_name }}
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish unique non-latest public release
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    outputs:
+      asset_url: ${{ steps.release.outputs.asset_url }}
+      bundle_sha256: ${{ needs.package.outputs.bundle_sha256 }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: source-gateway-install-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release
+
+      - name: Publish immutable installation asset
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.package.outputs.release_tag }}
+          ASSET_NAME: ${{ needs.package.outputs.asset_name }}
+          REQUESTED_SHA: ${{ inputs.commit_sha }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$EXPECTED_REPOSITORY" >/dev/null 2>&1; then
+            echo 'The unique source-gateway release tag already exists.' >&2
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" "$RUNNER_TEMP/release/$ASSET_NAME#Reviewed source-gateway installer" \
+            --repo "$EXPECTED_REPOSITORY" --target "$REQUESTED_SHA" \
+            --title "$RELEASE_TAG" --notes "Code-only source-gateway installer for $REQUESTED_SHA. Contains no Oracle binaries, source, or credentials." \
+            --latest=false
+          ASSET_URL="https://github.com/$EXPECTED_REPOSITORY/releases/download/$RELEASE_TAG/$ASSET_NAME"
+          echo "asset_url=$ASSET_URL" >> "$GITHUB_OUTPUT"
+
+  reachability:
+    name: Verify public release reachability without credentials
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Download as an unauthenticated public client
+        env:
+          ASSET_URL: ${{ needs.publish.outputs.asset_url }}
+          EXPECTED_SHA256: ${{ needs.publish.outputs.bundle_sha256 }}
+        run: |
+          set -euo pipefail
+          env -u GH_TOKEN -u GITHUB_TOKEN curl --fail --silent --show-error --location \
+            --proto '=https' --proto-redir '=https' --max-filesize 157286400 \
+            --output "$RUNNER_TEMP/public-source-gateway.zip" "$ASSET_URL"
+          ACTUAL_SHA256=$(sha256sum "$RUNNER_TEMP/public-source-gateway.zip" | cut -d' ' -f1)
+          if [[ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]]; then
+            echo 'The unauthenticated public release download changed digest.' >&2
+            exit 1
+          fi
+
+  install:
+    name: Install on pinned Forms VM
+    needs: [package, publish, reachability]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit_sha }}
+          persist-credentials: false
+
+      - name: Sign in to pinned Azure tenant and subscription
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Run reviewed guest bootstrap and remove managed command
+        env:
+          ASSET_URL: ${{ needs.publish.outputs.asset_url }}
+          BUNDLE_SHA256: ${{ needs.publish.outputs.bundle_sha256 }}
+          REQUESTED_SHA: ${{ inputs.commit_sha }}
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+        run: |
+          set -euo pipefail
+          if [[ "$(az account show --query id --output tsv)" != "$EXPECTED_SUBSCRIPTION_ID" || \
+                "$(az account show --query tenantId --output tsv)" != "$EXPECTED_TENANT_ID" ]]; then
+            echo 'Azure OIDC selected an unexpected tenant or subscription.' >&2
+            exit 1
+          fi
+          COMMAND_NAME="ofm-source-gateway-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          command_created=false
+          cleanup() {
+            status=$?
+            if [[ "$command_created" == true ]]; then
+              if ! az vm run-command delete --subscription "$EXPECTED_SUBSCRIPTION_ID" \
+                    --resource-group "$RESOURCE_GROUP" --vm-name "$FORMS_VM" \
+                    --name "$COMMAND_NAME" --yes --output none; then
+                echo 'The managed Run Command could not be removed.' >&2
+                status=1
+              fi
+            fi
+            exit "$status"
+          }
+          trap cleanup EXIT
+
+          command_created=true
+          az vm run-command create --subscription "$EXPECTED_SUBSCRIPTION_ID" \
+            --resource-group "$RESOURCE_GROUP" --vm-name "$FORMS_VM" --name "$COMMAND_NAME" \
+            --script @infra/source-gateway/Invoke-SourceGatewayInstall.ps1 \
+            --parameters "BundleUrl=$ASSET_URL" "BundleSha256=$BUNDLE_SHA256" \
+              "ExpectedMainCommitSha=$REQUESTED_SHA" "TrustedCiRunId=$CI_RUN_ID" \
+            --timeout-in-seconds 1800 --async-execution false --output none
+          RUN_RESULT=$(az vm run-command show --subscription "$EXPECTED_SUBSCRIPTION_ID" \
+            --resource-group "$RESOURCE_GROUP" --vm-name "$FORMS_VM" --name "$COMMAND_NAME" \
+            --expand instanceView --output json)
+          export RUN_RESULT REQUESTED_SHA CI_RUN_ID BUNDLE_SHA256
+          python3 - <<'PY'
+          import base64
+          import hashlib
+          import json
+          import os
+
+          result = json.loads(os.environ["RUN_RESULT"])
+          view = result.get("instanceView") or {}
+          if view.get("executionState") != "Succeeded" or view.get("exitCode") != 0:
+              raise SystemExit("The managed source-gateway installation command failed.")
+          lines = [line for line in (view.get("output") or "").splitlines() if line.strip()]
+          if len(lines) != 1:
+              raise SystemExit("The guest bootstrap emitted output outside the allowlisted JSON result.")
+          evidence = json.loads(lines[0])
+          expected_keys = {
+              "status", "commit", "ciRunId", "bundleSha256", "serviceName", "serviceStatus",
+              "publicRootCertificateBase64", "publicRootCertificateSha256",
+          }
+          if set(evidence) != expected_keys:
+              raise SystemExit("The guest bootstrap result contains non-allowlisted fields.")
+          if (
+              evidence["status"] != "installed"
+              or evidence["commit"] != os.environ["REQUESTED_SHA"]
+              or str(evidence["ciRunId"]) != os.environ["CI_RUN_ID"]
+              or evidence["bundleSha256"] != os.environ["BUNDLE_SHA256"]
+              or evidence["serviceName"] != "OFMSourceGateway"
+              or evidence["serviceStatus"] != "Running"
+          ):
+              raise SystemExit("The guest bootstrap result does not match the requested installation.")
+          certificate = base64.b64decode(evidence["publicRootCertificateBase64"], validate=True)
+          if hashlib.sha256(certificate).hexdigest() != evidence["publicRootCertificateSha256"]:
+              raise SystemExit("The returned public root certificate does not match its SHA-256.")
+          print(json.dumps(evidence, separators=(",", ":"), sort_keys=True))
+          PY

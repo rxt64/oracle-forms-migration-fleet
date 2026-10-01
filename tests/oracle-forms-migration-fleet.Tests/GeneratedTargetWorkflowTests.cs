@@ -170,6 +170,63 @@ public sealed class GeneratedTargetWorkflowTests
     }
 
     [Fact]
+    public void Source_gateway_install_uses_public_digest_pinned_transport_and_narrow_job_permissions()
+    {
+        YamlNode workflow = YamlNode.Parse(RepositoryText(".github/workflows/install-source-gateway.yml"));
+        YamlNode jobs = workflow["jobs"]!;
+
+        Assert.Equal(["workflow_dispatch"], workflow["on"]!.Keys);
+        Assert.Empty(workflow["permissions"]!.Keys);
+        Assert.Equal(["package", "publish", "reachability", "install"], jobs.Keys);
+        Assert.Equal(
+            new Dictionary<string, string> { ["actions"] = "read", ["contents"] = "read" },
+            jobs["package"]!["permissions"]!.ScalarFields);
+        Assert.Equal(
+            new Dictionary<string, string> { ["actions"] = "read", ["contents"] = "write" },
+            jobs["publish"]!["permissions"]!.ScalarFields);
+        Assert.Equal(
+            new Dictionary<string, string> { ["contents"] = "read" },
+            jobs["reachability"]!["permissions"]!.ScalarFields);
+        Assert.Equal(
+            new Dictionary<string, string>
+            {
+                ["actions"] = "read",
+                ["contents"] = "read",
+                ["id-token"] = "write",
+            },
+            jobs["install"]!["permissions"]!.ScalarFields);
+        Assert.Null(jobs["install"]!["environment"]);
+
+        IReadOnlyList<string> packageCommands = CommandLines(
+            jobs["package"]!["steps"]!.Sequence.Single(step =>
+                step["name"]?.Text == "Verify exact current main commit and trusted CI")["run"]!.Text);
+        Assert.Contains(packageCommands, line => line.Contains("verify_required_ci.py", StringComparison.Ordinal));
+        Assert.Contains(packageCommands, line => line.Contains("git checkout --detach", StringComparison.Ordinal));
+        Assert.Contains(
+            CommandsFor(jobs["package"]!, "Download exact trusted worker artifact"),
+            line => line.Contains("gh run download", StringComparison.Ordinal));
+        Assert.Contains(
+            CommandsFor(jobs["publish"]!, "Publish immutable installation asset"),
+            line => line.Contains("gh release create", StringComparison.Ordinal));
+        Assert.Contains(
+            CommandsFor(jobs["reachability"]!, "Download as an unauthenticated public client"),
+            line => line.Contains("env -u GH_TOKEN -u GITHUB_TOKEN curl", StringComparison.Ordinal));
+
+        IReadOnlyList<string> installCommands = CommandsFor(
+            jobs["install"]!, "Run reviewed guest bootstrap and remove managed command");
+        Assert.Contains(installCommands, line => line.Contains("az vm run-command create", StringComparison.Ordinal));
+        Assert.Contains(installCommands, line => line.Contains("az vm run-command delete", StringComparison.Ordinal));
+        Assert.DoesNotContain(installCommands, line => line.Contains("GITHUB_TOKEN", StringComparison.Ordinal));
+        Assert.True(
+            installCommands.ToList().FindIndex(line => line.Trim() == "command_created=true") <
+            installCommands.ToList().FindIndex(line => line.Contains("az vm run-command create", StringComparison.Ordinal)),
+            "Managed Run Command cleanup must be armed before creation can partially succeed.");
+    }
+
+    private static IReadOnlyList<string> CommandsFor(YamlNode job, string stepName) =>
+        CommandLines(job["steps"]!.Sequence.Single(step => step["name"]?.Text == stepName)["run"]!.Text);
+
+    [Fact]
     public void Workbench_release_configuration_targets_the_dedicated_dotnet_sandbox()
     {
         Assert.Equal("AspNetCore", ParameterValue(s_workbenchParameters, "targetBackendStack"));

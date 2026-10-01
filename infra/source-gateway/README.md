@@ -9,6 +9,9 @@ objects, create an Oracle account, extract a source, or deploy a migration.
 - `main.bicep`: stage 1, adding the `.64/27` delegated ACA subnet, the `.96/27` private-endpoint subnet, and internal workload-profiles ACA environment.
 - `application.bicep`: stage 2, adding the private app, source/ACA private DNS, one exact NSG rule, and a PostgreSQL private endpoint with its DNS zone group and VNet link.
 - `Preview-SourceGateway.ps1`: pinned-subscription compilation and non-applying group what-if wrapper.
+- `Configure-SourceGatewayEntra.ps1`: pinned-tenant preflight and idempotent creation/verification of the
+   gateway API, its application-only `SourceGateway.Invoke` role, service principal, and exact workbench
+   UAMI assignment. It creates no credential, redirect, Graph permission, or Azure RBAC assignment.
 - `Install-SourceGateway.ps1`: trusted main-push x86 artifact verification plus LocalService/TLS/service bootstrap.
 - `New-*`, `Protect-*`, `Complete-*`: one-time public-key transfer and LocalService DPAPI CurrentUser provisioning.
 - `source-registry.json`: nonsecret single-source binding for `meridian-native-6i` and project `prj-d616e6e807e14b6bb5a468a33da3d744`.
@@ -36,6 +39,17 @@ if ($errors.Count) { throw ($errors.Message -join '; ') }
 
 CI runs the same Bicep/parser/behavior checks and Checkov 3.3.19 gate. The PowerShell regression uses
 mocked native-command exits; it does not install a service, create a certificate, or handle a credential.
+
+The Entra configurator is read-only unless `-Apply` is supplied. It verifies the pinned subscription,
+tenant, exact managed-identity object/client pair, unique application name, owners, object types, and
+configuration before any write. Both modes retain only public IDs and verification flags under the
+Git-ignored `artifacts/source-gateway-entra/identity.json` path.
+
+```powershell
+pwsh infra/source-gateway/Configure-SourceGatewayEntra.ps1
+pwsh infra/source-gateway/Configure-SourceGatewayEntra.ps1 -Apply
+pwsh infra/source-gateway/Configure-SourceGatewayEntra.ps1
+```
 
 Stage 1 what-if is read-only and never changes the Azure CLI default subscription:
 

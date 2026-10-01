@@ -172,6 +172,47 @@ The exact repaired SHA still requires fresh runner CI and Astra review; neither 
 
 ## Current Operational Evidence
 
+### Authorized Gateway Installation, 2026-10-01
+
+The operator replied `keep going ill authirize` to the explicit reviewed lab gateway
+deployment and Forms VM installation request. This authorizes that infrastructure,
+identity and service-installation scope within the existing USD 70/month planning
+ceiling, not Oracle writes or approval of a migration run.
+
+Stage-one Azure Validate completed before apply. Deployment
+`ofm-source-gateway-foundation` succeeded at `2026-10-01T19:38:59Z`, creating
+the `.64/27` ACA subnet, `.96/27` private-endpoint subnet, and internal environment
+`cae-ofmfleet-private-dev`. Its domain is
+`bravesky-bbd4eb91.eastus2.azurecontainerapps.io`; `10.246.0.75` is its inbound
+address, not a PostgreSQL firewall egress address. Stage two remains unvalidated.
+
+Gateway Entra application `b16b4127-9ef6-44a1-9f07-bbfe92053baf` is single-tenant
+with v2 tokens. Service principal `c7f29be4-bffe-44e9-8108-1449571a031c` requires
+app-role assignment; its sole `SourceGateway.Invoke` assignment is the approved
+workbench UAMI. The existing Forms VM was started for installation, and its agent
+and installed extension report Ready/Succeeded. The native DLL hash matches its pin.
+No Oracle operation or gateway extraction was performed.
+
+Installation preflight found no guest GitHub CLI or authentication. The new manual-only
+trusted-main workflow therefore publishes a hash-bound public bundle containing only
+our worker, installer, registry and CI proof, then installs through a pinned managed
+Run Command. No repository token, Oracle binary/source, or credential is sent in that
+bundle. Guest code verifies the outer hash before path-safe, size-limited extraction;
+temporary command and staging cleanup are checked. Only service status and public root
+certificate evidence are returned.
+
+Actual v2 audience testing exposed a separate 401 defect: the API scope uses an
+`api://` identifier URI while v2 tokens carry the API GUID as audience. The worker now
+accepts only that exact corresponding pair for a strictly parsed GUID configuration.
+Issuer, signature, lifetime, caller and project restrictions are unchanged. Opus
+reproduced the failure and repaired it; Sol independently passed 60 focused checks.
+
+Installation transport QA passed PowerShell behavior tests, nine Windows PowerShell
+5.1 parser checks, and 41 workflow tests. Astra found a nullable header property access
+that failed under Windows PowerShell; it was fixed and the actual length guard passed
+5.1 runtime tests for absent, valid and oversized headers. Astra's scoped code-release
+PASS permits publication and trusted CI, not a claim that service installation has run.
+
 ### Gateway Publication Review, 2026-09-30
 
 The unattended gateway and private-network installation artifacts are implemented but
@@ -197,7 +238,16 @@ Gateway commit `0c5154f437b3a34e45817cc32844f2796ca41ba3` passed all four
 required CI jobs in `36748627097`, including Ubuntu worker execution and Windows
 worker checks. Exact-candidate code-release validation completed; PR39 merged as
 `c2595857471fc5a39e5b509dfd4d834acf2c1952`. Trusted main CI/release
-`36757666326` is in progress; no main worker installation is claimed yet.
+`36757666326` succeeded, including authenticated smoke and cleanup. Independent
+verification observed healthy, active revision `ca-ofmfleet-dev-ykbpnrpd--0000103`
+at 100 percent traffic on digest
+`bb66f30a14ee34ba164a884b7519f0f83f1e4eaf43ddccb9f89007a6a2d4d1ee`,
+matching commit-tagged ACR image `c2595857471f`. No temporary smoke ACI remained.
+
+Trusted worker artifact `11116782905` was downloaded and verified without execution:
+main commit/ref/event/run/attempt, x86 PE32 headers, length 99,413,830 bytes and
+SHA-256 `dfb6d61d6ffc3aabc0c1b08bd5509cc6a7ce5bad9c57849b7170a7245f7f44ee`.
+The package is ready for installation; the gateway is not installed or qualified.
 
 ### Private PostgreSQL Route, 2026-09-30
 
@@ -220,6 +270,24 @@ not the controlling evidence. The application-stage what-if still requires real
 foundation outputs and the trusted image/auth inputs. This is artifact-generation
 and validation evidence only; infrastructure apply, Entra changes, Forms VM service
 installation and Oracle credential provisioning have not been authorized or performed.
+
+Exact candidate `4dc0a34c589e629cddcd711480123d7c949e6f70` passed bounded
+CODE PUBLICATION validation for PR40. CI `36758169984` completed successfully for that
+exact SHA: all four required jobs succeeded, including infrastructure syntax and the
+pinned Checkov scan, while deployment was skipped. The candidate changes only the four
+private-route artifacts and this tracker; public `deploy.yml` is unchanged. This does
+not advance the private-route proposal beyond Draft/HOLD. Application-stage what-if and
+any apply still require real foundation outputs, trusted image/auth inputs, and separate
+explicit authority. No infrastructure, identity, host, credential or runtime change is
+claimed.
+
+PR40 merged as `29ebfa2ae4b12c75a7ebeb0302798d94cdc77ab0`; trusted main run
+`36760953527` completed successfully, including all four CI jobs, the exact-commit
+gate, deployment, and authenticated smoke. A specific infrastructure/host apply
+question received no selected authorization, only an unavailable-user delegation response.
+That is not treated as the explicit risk-acknowledged apply gate. No apply or Forms VM
+service installation was attempted. Entra administrator actions and the Oracle DBA's
+read-only credential provisioning remain outstanding and must not be fabricated.
 
 ### Gateway Unattended-Host Prerequisite, 2026-09-29
 

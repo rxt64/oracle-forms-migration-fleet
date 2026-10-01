@@ -523,6 +523,25 @@ public sealed record GatewayOptions(
         $"https://sts.windows.net/{TenantId}/",
     ];
 
+    /// <summary>
+    /// The audiences a token for this gateway may carry. A v1 access token names the App ID URI the client
+    /// asked for; a v2 token — which is what an app registration with requestedAccessTokenVersion 2 always
+    /// mints — names the resource application's own client identifier instead. A gateway configured with
+    /// <c>api://{clientId}</c> therefore has to accept that one identifier as well, or it refuses every
+    /// token Entra issues for it.
+    ///
+    /// The second audience is derived from the configured one and from nothing else: only the exact
+    /// <c>api://</c> form of a GUID yields it, so no other identifier URI, tenant or wildcard is admitted,
+    /// and an operator still states a single audience.
+    /// </summary>
+    public IReadOnlyList<string> ValidAudiences =>
+        Audience.StartsWith(ApplicationIdUriPrefix, StringComparison.Ordinal) &&
+        GatewayText.IsGuid(Audience[ApplicationIdUriPrefix.Length..])
+            ? [Audience, Audience[ApplicationIdUriPrefix.Length..]]
+            : [Audience];
+
+    private const string ApplicationIdUriPrefix = "api://";
+
     public string Authority => $"https://login.microsoftonline.com/{TenantId}/v2.0";
 
     public static bool TryRead(

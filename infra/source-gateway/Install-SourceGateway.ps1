@@ -1,4 +1,4 @@
-[CmdletBinding(SupportsShouldProcess)]
+[CmdletBinding(SupportsShouldProcess, DefaultParameterSetName = 'Online')]
 param(
     [Parameter(Mandatory)]
     [ValidatePattern('^[0-9a-f]{40}$')]
@@ -11,6 +11,11 @@ param(
     [Parameter(Mandatory)]
     [guid] $GatewayApplicationClientId,
 
+    [Parameter(Mandatory, ParameterSetName = 'Offline')]
+    [ValidateNotNullOrEmpty()]
+    [string] $OfflineBundleRoot,
+
+    [Parameter(ParameterSetName = 'Online')]
     [string] $Repository = 'rxt64/oracle-forms-migration-fleet',
     [string] $RegistrySourcePath = (Join-Path $PSScriptRoot 'source-registry.json'),
     [string] $InstallRoot = 'C:\Program Files\OracleFormsMigrationFleet\SourceGateway',
@@ -51,6 +56,9 @@ if (-not [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentit
 if ($Repository -cne $expectedRepository -or $TenantId -ne $expectedTenant -or $AllowedCallerClientId -ne $expectedCaller) {
     throw 'Repository, tenant, and caller identity are pinned to the delegated private-gateway scope.'
 }
+if ($PSCmdlet.ParameterSetName -eq 'Offline') {
+    $RegistrySourcePath = Join-Path $OfflineBundleRoot 'source-registry.json'
+}
 if (-not (Test-Path -LiteralPath $RegistrySourcePath -PathType Leaf)) {
     throw "Source registry not found: $RegistrySourcePath"
 }
@@ -64,42 +72,68 @@ if ($registry.schemaVersion -ne 1 -or $registry.sources.Count -ne 1 -or
     throw 'The source registry is not the approved single-source tenant/project binding.'
 }
 
-$gh = Get-Command gh -ErrorAction Stop
-$run = & $gh.Source api "repos/$Repository/actions/runs/$TrustedCiRunId" | ConvertFrom-Json
-if ($LASTEXITCODE -ne 0 -or $run.name -cne 'CI' -or $run.path -cne '.github/workflows/ci.yml' -or
-    $run.event -cne 'push' -or $run.head_branch -cne 'main' -or
-    $run.head_sha -cne $ExpectedMainCommitSha -or $run.status -cne 'completed' -or $run.conclusion -cne 'success') {
-    throw 'The named GitHub Actions run is not a successful main-push CI run for the expected commit.'
+$downloadRoot = if ($PSCmdlet.ParameterSetName -eq 'Offline') {
+    $OfflineBundleRoot
+} else {
+    Join-Path ([IO.Path]::GetTempPath()) "ofm-source-worker-$([guid]::NewGuid().ToString('N'))"
 }
-$jobs = & $gh.Source api "repos/$Repository/actions/runs/$TrustedCiRunId/jobs?filter=latest&per_page=100" | ConvertFrom-Json
-if ($LASTEXITCODE -ne 0 -or $null -eq $jobs.jobs) {
-    throw 'The required job evidence for the named CI run could not be read.'
-}
-$requiredJobs = @('Native source worker contract', 'build-and-test', 'Container image builds', 'Guided UI browser checks')
-foreach ($requiredJob in $requiredJobs) {
-    $matches = @($jobs.jobs | Where-Object name -CEQ $requiredJob)
-    if ($matches.Count -ne 1 -or $matches[0].status -cne 'completed' -or $matches[0].conclusion -cne 'success') {
-        throw "Required CI job '$requiredJob' must appear exactly once and complete successfully."
-    }
-}
-
-$downloadRoot = Join-Path ([IO.Path]::GetTempPath()) "ofm-source-worker-$([guid]::NewGuid().ToString('N'))"
 try {
-    New-Item -ItemType Directory -Path $downloadRoot | Out-Null
-    & $gh.Source run download $TrustedCiRunId --repo $Repository --name $artifactName --dir $downloadRoot
-    if ($LASTEXITCODE -ne 0) {
-        throw 'The trusted worker artifact could not be downloaded.'
+    if ($PSCmdlet.ParameterSetName -eq 'Online') {
+        $gh = Get-Command gh -ErrorAction Stop
+        $run = & $gh.Source api "repos/$Repository/actions/runs/$TrustedCiRunId" | ConvertFrom-Json
+        if ($LASTEXITCODE -ne 0) {
+            throw 'The required CI run evidence could not be read.'
+        }
+        $jobsResponse = & $gh.Source api "repos/$Repository/actions/runs/$TrustedCiRunId/jobs?filter=latest&per_page=100" | ConvertFrom-Json
+        if ($LASTEXITCODE -ne 0 -or $null -eq $jobsResponse.jobs) {
+            throw 'The required job evidence for the named CI run could not be read.'
+        }
+        Assert-SourceGatewayCiEvidence -Run $run -Jobs @($jobsResponse.jobs) -ExpectedRepository $expectedRepository `
+            -ExpectedCommitSha $ExpectedMainCommitSha -ExpectedRunId $TrustedCiRunId
+
+        New-Item -ItemType Directory -Path $downloadRoot | Out-Null
+        & $gh.Source run download $TrustedCiRunId --repo $Repository --name $artifactName --dir $downloadRoot
+        if ($LASTEXITCODE -ne 0) {
+            throw 'The trusted worker artifact could not be downloaded.'
+        }
+    } else {
+        $bundlePayload = @(Get-ChildItem -LiteralPath $downloadRoot -Force)
+        $expectedBundleNames = @(
+            'OracleFormsMigrationFleet.SourceWorker.exe',
+            'manifest.json',
+            'ci-proof.json',
+            'Install-SourceGateway.ps1',
+            'SourceGatewayInstaller.Common.ps1',
+            'source-registry.json'
+        )
+        $unexpectedBundleNames = @($bundlePayload | Where-Object { $_.PSIsContainer -or $expectedBundleNames -cnotcontains $_.Name })
+        if ($bundlePayload.Count -ne $expectedBundleNames.Count -or $unexpectedBundleNames.Count -ne 0) {
+            throw 'The offline bundle does not contain exactly the reviewed source-gateway installation files.'
+        }
+
+        $proofPath = Join-Path $downloadRoot 'ci-proof.json'
+        $proof = Get-Content -LiteralPath $proofPath -Raw | ConvertFrom-Json
+        if ($proof.schemaVersion -ne 1 -or $proof.repository -cne $expectedRepository -or
+            $proof.commit -cne $ExpectedMainCommitSha -or [long]$proof.ciRunId -ne $TrustedCiRunId) {
+            throw 'The bundled CI proof does not identify the expected repository, commit, and run.'
+        }
+        Assert-SourceGatewayCiEvidence -Run $proof.run -Jobs @($proof.jobs) -ExpectedRepository $expectedRepository `
+            -ExpectedCommitSha $ExpectedMainCommitSha -ExpectedRunId $TrustedCiRunId -ExactRequiredJobs
     }
 
     $manifestPath = Join-Path $downloadRoot 'manifest.json'
     $workerPath = Join-Path $downloadRoot $workerName
-    $payload = @(Get-ChildItem -LiteralPath $downloadRoot -Force)
-    $payloadNames = @($payload | ForEach-Object Name)
-    if ($payload.Count -ne 2 -or @($payload | Where-Object { -not $_.PSIsContainer }).Count -ne 2 -or
-        $payloadNames -cnotcontains 'manifest.json' -or $payloadNames -cnotcontains $workerName -or
-        -not (Test-Path -LiteralPath $manifestPath -PathType Leaf) -or
+    if ($PSCmdlet.ParameterSetName -eq 'Online') {
+        $payload = @(Get-ChildItem -LiteralPath $downloadRoot -Force)
+        $payloadNames = @($payload | ForEach-Object Name)
+        if ($payload.Count -ne 2 -or @($payload | Where-Object { -not $_.PSIsContainer }).Count -ne 2 -or
+            $payloadNames -cnotcontains 'manifest.json' -or $payloadNames -cnotcontains $workerName) {
+            throw 'The artifact does not contain exactly the required worker and provenance manifest.'
+        }
+    }
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf) -or
         -not (Test-Path -LiteralPath $workerPath -PathType Leaf)) {
-        throw 'The artifact does not contain exactly the required worker and provenance manifest.'
+        throw 'The worker or provenance manifest is missing.'
     }
 
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
@@ -112,6 +146,12 @@ try {
         $manifest.runtimeIdentifier -cne 'win-x86' -or $manifest.fileName -cne $workerName -or
         [long]$manifest.length -ne $worker.Length -or $manifest.sha256 -cne $workerSha) {
         throw 'Worker provenance, runtime, length, or SHA-256 does not match the trusted main artifact.'
+    }
+    if ($PSCmdlet.ParameterSetName -eq 'Offline') {
+        $manifestSha = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($proof.workerSha256 -cne $workerSha -or $proof.manifestSha256 -cne $manifestSha) {
+            throw 'The bundled CI proof is not digest-bound to the worker artifact and provenance manifest.'
+        }
     }
 
     if (-not $PSCmdlet.ShouldProcess($env:COMPUTERNAME, "Install $serviceName from trusted main commit $ExpectedMainCommitSha")) {
@@ -314,5 +354,7 @@ try {
     Write-Output 'No Oracle credential was requested, read, logged, or stored by this installer.'
 }
 finally {
-    Remove-Item -LiteralPath $downloadRoot -Recurse -Force -ErrorAction SilentlyContinue
+    if ($PSCmdlet.ParameterSetName -eq 'Online') {
+        Remove-Item -LiteralPath $downloadRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }

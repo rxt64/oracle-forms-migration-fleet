@@ -24,6 +24,37 @@ $script:mockExitCode = 0
 Invoke-ScChecked -Arguments @('query', 'mock') -FailureMessage 'unexpected mock sc failure'
 Invoke-IcaclsChecked -Arguments @('mock') -FailureMessage 'unexpected mock ACL failure'
 
+$trustedRun = [pscustomobject]@{
+    id = 42
+    name = 'CI'
+    path = '.github/workflows/ci.yml'
+    event = 'push'
+    head_branch = 'main'
+    head_sha = '0123456789abcdef0123456789abcdef01234567'
+    status = 'completed'
+    conclusion = 'success'
+    repository = 'rxt64/oracle-forms-migration-fleet'
+}
+$trustedJobs = @(
+    [pscustomobject]@{ name = 'Native source worker contract'; status = 'completed'; conclusion = 'success' },
+    [pscustomobject]@{ name = 'build-and-test'; status = 'completed'; conclusion = 'success' },
+    [pscustomobject]@{ name = 'Container image builds'; status = 'completed'; conclusion = 'success' },
+    [pscustomobject]@{ name = 'Guided UI browser checks'; status = 'completed'; conclusion = 'success' }
+)
+Assert-SourceGatewayCiEvidence -Run $trustedRun -Jobs $trustedJobs `
+    -ExpectedRepository 'rxt64/oracle-forms-migration-fleet' `
+    -ExpectedCommitSha '0123456789abcdef0123456789abcdef01234567' -ExpectedRunId 42 -ExactRequiredJobs
+$extraJobFailure = try {
+    Assert-SourceGatewayCiEvidence -Run $trustedRun -Jobs @($trustedJobs + [pscustomobject]@{
+            name = 'unexpected'; status = 'completed'; conclusion = 'success'
+        }) -ExpectedRepository 'rxt64/oracle-forms-migration-fleet' `
+        -ExpectedCommitSha '0123456789abcdef0123456789abcdef01234567' -ExpectedRunId 42 -ExactRequiredJobs
+    $null
+} catch { $_ }
+if ($null -eq $extraJobFailure -or $extraJobFailure.Exception.Message -notmatch 'exactly the required job evidence') {
+    throw 'Bundled CI evidence accepted a job outside the exact required allowlist.'
+}
+
 if ($IsWindows) {
     $aclTestRoot = Join-Path ([IO.Path]::GetTempPath()) "ofm-source-gateway-acl-$([guid]::NewGuid().ToString('N'))"
     try {
@@ -127,14 +158,22 @@ if (($installer | Select-String -Pattern 'New-SelfSignedCertificate' -AllMatches
     throw 'The certificate rerun binding is incomplete.'
 }
 foreach ($requiredJob in @('Native source worker contract', 'build-and-test', 'Container image builds', 'Guided UI browser checks')) {
-    if ($installer -notmatch [regex]::Escape($requiredJob)) {
-        throw "The installer does not require CI job '$requiredJob'."
+    $commonText = Get-Content -LiteralPath $common -Raw
+    if ($commonText -notmatch [regex]::Escape($requiredJob)) {
+        throw "The shared installer evidence gate does not require CI job '$requiredJob'."
     }
 }
 if ($installer -notmatch 'payload\.Count -ne 2' -or
     $installer -notmatch "payloadNames -cnotcontains 'manifest\.json'" -or
     $installer -notmatch 'payloadNames -cnotcontains \$workerName') {
     throw 'The installer must reject extra or renamed trusted artifact payload files.'
+}
+if ($installer -notmatch "ParameterSetName = 'Offline'" -or
+    $installer -notmatch 'Assert-SourceGatewayCiEvidence' -or
+    $installer -notmatch '-ExpectedRunId \$TrustedCiRunId -ExactRequiredJobs' -or
+    $installer -notmatch 'proof\.workerSha256 -cne \$workerSha' -or
+    $installer -notmatch 'proof\.manifestSha256 -cne \$manifestSha') {
+    throw 'The offline installer must reuse the exact CI gate and bind proof to both worker and manifest digests.'
 }
 if ($installer -match 'SHA256\]::HashData|Convert\]::ToHexString|Path\]::GetRelativePath') {
     throw 'The installer uses an API unavailable to Windows PowerShell 5.1 on the approved host.'
@@ -189,6 +228,287 @@ $ciWorkflow = Get-Content -LiteralPath (Join-Path (Split-Path (Split-Path $PSScr
 if ($ciWorkflow -notmatch 'checkov==3\.3\.19' -or
     $ciWorkflow -notmatch 'checkov -d infra/source-gateway --framework bicep --quiet') {
     throw 'CI must enforce the pinned source-gateway Checkov gate.'
+}
+
+$installWorkflow = Get-Content -LiteralPath (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) '.github/workflows/install-source-gateway.yml') -Raw
+$bootstrap = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Invoke-SourceGatewayInstall.ps1') -Raw
+$bootstrapTokens = $null
+$bootstrapErrors = $null
+$bootstrapAst = [System.Management.Automation.Language.Parser]::ParseInput(
+    $bootstrap, [ref]$bootstrapTokens, [ref]$bootstrapErrors)
+$lengthGuard = $bootstrapAst.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.IfStatementAst] -and
+        $node.Clauses[0].Item1.Extent.Text -match 'ContentLength'
+}, $true)
+if ($null -eq $lengthGuard) { throw 'The guest download must check its Content-Length limit.' }
+$lengthCheck = [scriptblock]::Create($lengthGuard.Extent.Text)
+foreach ($testCase in @(
+        @{ Length = $null; Refused = $false },
+        @{ Length = [long]0; Refused = $false },
+        @{ Length = [long]100; Refused = $false },
+        @{ Length = [long]101; Refused = $true })) {
+    $response = [pscustomobject]@{ Content = [pscustomobject]@{
+        Headers = [pscustomobject]@{ ContentLength = $testCase.Length }
+    } }
+    $maximumBundleBytes = 100
+    $lengthError = $null
+    try { & $lengthCheck } catch { $lengthError = $_ }
+    if (($null -ne $lengthError) -ne $testCase.Refused -or
+        ($null -ne $lengthError -and $lengthError.Exception.Message -ne
+            'The public release asset exceeds the transport size limit.')) {
+        throw 'The guest Content-Length check mishandled an absent, unwrapped, or excessive header.'
+    }
+}
+foreach ($binding in @(
+        'd4394e57-c076-4c92-a870-5de6bf44f255',
+        '1984d248-06ca-4d04-a3b8-4c0c1577ab86',
+        'rg-oracle-forms-migration-fleet-dev-b9f0e875',
+        'vm-ofm-forms6i-j6mrrerz',
+        'b16b4127-9ef6-44a1-9f07-bbfe92053baf',
+        'f4492b02-ee64-4295-a1db-7c7677134e42',
+        '10.246.0.4')) {
+    if ($installWorkflow -notmatch [regex]::Escape($binding)) {
+        throw "The installation workflow is missing pinned scope binding '$binding'."
+    }
+}
+if ($installWorkflow -notmatch '(?ms)^  publish:.*?permissions:\s*\n      actions: read\s*\n      contents: write' -or
+    $installWorkflow -notmatch '(?ms)^  install:.*?permissions:\s*\n      actions: read\s*\n      contents: read\s*\n      id-token: write' -or
+    $installWorkflow -notmatch 'gh release create' -or $installWorkflow -notmatch '--latest=false' -or
+    $installWorkflow -notmatch 'env -u GH_TOKEN -u GITHUB_TOKEN curl' -or
+    $installWorkflow -notmatch 'az vm run-command create' -or
+    $installWorkflow -notmatch 'az vm run-command delete') {
+    throw 'The installation workflow does not preserve its publish/install permission split and public managed-command transport.'
+}
+if ($bootstrap -match '\bgh\b|GITHUB_TOKEN|GH_TOKEN' -or
+    $bootstrap -notmatch 'AllowAutoRedirect = \$false' -or
+    $bootstrap -notmatch 'release-assets\.githubusercontent\.com' -or
+    $bootstrap.IndexOf('Get-FileHash -LiteralPath $bundlePath') -gt $bootstrap.IndexOf('[IO.Compression.ZipFile]::OpenRead') -or
+    $bootstrap -notmatch 'expectedNames = @\(' -or
+    $bootstrap -notmatch 'Remove-Item -LiteralPath \$stagingRoot -Recurse -Force' -or
+    $bootstrap -notmatch 'if \(Test-Path -LiteralPath \$stagingRoot\)' -or
+    $bootstrap -notmatch '\$result\.status = ''failed''\s+\$result\.serviceStatus = \$null' -or
+    $bootstrap -notmatch '\$exitCode = 1\s+}\s+Write-Output \(\$result \| ConvertTo-Json -Compress\)') {
+    throw 'The guest bootstrap must use a credential-free, hash-before-extract, host-allowlisted, exact-entry transport with cleanup.'
+}
+
+$entraConfiguration = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Configure-SourceGatewayEntra.ps1') -Raw
+foreach ($requiredBinding in @(
+        'd4394e57-c076-4c92-a870-5de6bf44f255',
+        '1984d248-06ca-4d04-a3b8-4c0c1577ab86',
+        'api-ofmfleet-source-gateway-dev',
+        '595d3a27-a2a8-4ac4-b33d-98715cbcd684',
+        'f4492b02-ee64-4295-a1db-7c7677134e42',
+        'SourceGateway.Invoke',
+        "allowedMemberTypes = @('Application')",
+        '/appRoleAssignedTo',
+        'artifacts/source-gateway-entra/identity.json')) {
+    if ($entraConfiguration -notmatch [regex]::Escape($requiredBinding)) {
+        throw "The Entra configurator is missing reviewed binding '$requiredBinding'."
+    }
+}
+foreach ($forbiddenOperation in @(
+        'az account set',
+        'credential reset',
+        'permission add',
+        'admin-consent',
+        'az role assignment',
+        'password=')) {
+    if ($entraConfiguration -match [regex]::Escape($forbiddenOperation)) {
+        throw "The Entra configurator contains forbidden operation '$forbiddenOperation'."
+    }
+}
+if ($entraConfiguration -notmatch '\& az @Arguments --subscription \$SubscriptionId' -or
+    $entraConfiguration -notmatch 'az account get-access-token' -or
+    $entraConfiguration -notmatch '--resource-type ms-graph' -or
+    $entraConfiguration -notmatch 'Invoke-RestMethod @request' -or
+    $entraConfiguration -notmatch 'AppRoleAssignment\.ReadWrite\.All' -or
+    $entraConfiguration -notmatch 'Application\.ReadWrite\.All' -or
+    $entraConfiguration -notmatch 'servicePrincipalType -ne ''ManagedIdentity''' -or
+    $entraConfiguration -notmatch '\$null -ne \$caller\.appOwnerOrganizationId' -or
+    $entraConfiguration -notmatch '\$caller\.appOwnerOrganizationId -ne \$expectedTenantId' -or
+    $entraConfiguration -notmatch 'assignment\.principalId -eq \$callerPrincipalId' -or
+    $entraConfiguration -notmatch 'assignment\.resourceId -eq \$resourceServicePrincipal\.id' -or
+    $entraConfiguration -notmatch 'assignment\.appRoleId -eq \$role\.id' -or
+    $entraConfiguration -notmatch '\$assignments\.Count -ne \$exactAssignments\.Count') {
+    throw 'The Entra configurator does not enforce explicit subscription use, exact identity type, 403 guidance, and assignment tuple verification.'
+}
+
+function Invoke-MockedEntraConfiguration {
+    param(
+        [switch] $Apply,
+        [bool] $InitialAppRoleAssignmentRequired = $false,
+        [string] $ApplicationObjectId = '1841ae69-9889-48fc-aa56-f1cfdf2c7203'
+    )
+
+    $entraPath = Join-Path $PSScriptRoot 'Configure-SourceGatewayEntra.ps1'
+    $evidencePath = Join-Path ([IO.Path]::GetTempPath()) "ofm-entra-evidence-$([guid]::NewGuid().ToString('N')).json"
+    $requests = [Collections.Generic.List[object]]::new()
+    $global:ofmEntraMockGuardEnabled = $InitialAppRoleAssignmentRequired
+    try {
+        $output = & {
+            function az {
+                param([Parameter(ValueFromRemainingArguments)] [object[]] $Arguments)
+
+                $global:LASTEXITCODE = 0
+                if ($Arguments -contains 'show') {
+                    return '{"id":"d4394e57-c076-4c92-a870-5de6bf44f255","tenantId":"1984d248-06ca-4d04-a3b8-4c0c1577ab86"}'
+                }
+                if ($Arguments -contains 'get-access-token') {
+                    return 'mock-graph-token'
+                }
+                throw "Unexpected mocked az arguments: $($Arguments -join ' ')"
+            }
+
+            function Invoke-RestMethod {
+                param(
+                    [string] $Method,
+                    [string] $Uri,
+                    [hashtable] $Headers,
+                    [string] $ContentType,
+                    [string] $Body,
+                    [object] $ErrorAction
+                )
+
+                $requests.Add([pscustomobject]@{ Method = $Method; Uri = $Uri; Body = $Body })
+                if ($Method -eq 'PATCH' -and $Uri -eq 'https://graph.microsoft.com/v1.0/servicePrincipals/c7f29be4-bffe-44e9-8108-1449571a031c') {
+                    $patch = $Body | ConvertFrom-Json
+                    if (@($patch.psobject.Properties).Count -ne 1 -or $patch.appRoleAssignmentRequired -ne $true) {
+                        throw 'The mocked reconciliation PATCH changed more than appRoleAssignmentRequired=true.'
+                    }
+                    $global:ofmEntraMockGuardEnabled = $true
+                    return $null
+                }
+                if ($Method -ne 'GET') {
+                    throw "Unexpected mocked Graph mutation: $Method $Uri"
+                }
+                if ($Uri -like '*/servicePrincipals/595d3a27-a2a8-4ac4-b33d-98715cbcd684*') {
+                    return [pscustomobject]@{
+                        id = '595d3a27-a2a8-4ac4-b33d-98715cbcd684'
+                        appId = 'f4492b02-ee64-4295-a1db-7c7677134e42'
+                        servicePrincipalType = 'ManagedIdentity'
+                        appOwnerOrganizationId = '1984d248-06ca-4d04-a3b8-4c0c1577ab86'
+                        alternativeNames = @('/subscriptions/d4394e57-c076-4c92-a870-5de6bf44f255/resourceGroups/mock/providers/Microsoft.ManagedIdentity/userAssignedIdentities/mock')
+                    }
+                }
+                if ($Uri.StartsWith('https://graph.microsoft.com/v1.0/applications?')) {
+                    return [pscustomobject]@{ value = @([pscustomobject]@{
+                                id = $ApplicationObjectId
+                                appId = 'b16b4127-9ef6-44a1-9f07-bbfe92053baf'
+                                displayName = 'api-ofmfleet-source-gateway-dev'
+                            }) }
+                }
+                if ($Uri -like '*/applications/1841ae69-9889-48fc-aa56-f1cfdf2c7203/owners*') {
+                    return [pscustomobject]@{ value = @([pscustomobject]@{ id = 'mock-owner' }) }
+                }
+                if ($Uri -like '*/applications/1841ae69-9889-48fc-aa56-f1cfdf2c7203*') {
+                    return [pscustomobject]@{
+                        id = '1841ae69-9889-48fc-aa56-f1cfdf2c7203'
+                        appId = 'b16b4127-9ef6-44a1-9f07-bbfe92053baf'
+                        displayName = 'api-ofmfleet-source-gateway-dev'
+                        signInAudience = 'AzureADMyOrg'
+                        identifierUris = @('api://b16b4127-9ef6-44a1-9f07-bbfe92053baf')
+                        requiredResourceAccess = @()
+                        passwordCredentials = @()
+                        keyCredentials = @()
+                        web = [pscustomobject]@{ redirectUris = @() }
+                        spa = [pscustomobject]@{ redirectUris = @() }
+                        publicClient = [pscustomobject]@{ redirectUris = @() }
+                        api = [pscustomobject]@{
+                            requestedAccessTokenVersion = 2
+                            oauth2PermissionScopes = @()
+                            preAuthorizedApplications = @()
+                            knownClientApplications = @()
+                        }
+                        appRoles = @([pscustomobject]@{
+                                allowedMemberTypes = @('Application')
+                                description = 'Invoke the private Oracle Forms source gateway.'
+                                displayName = 'SourceGateway.Invoke'
+                                id = 'b03da987-2091-4443-86bc-5c3e9569a91a'
+                                isEnabled = $true
+                                value = 'SourceGateway.Invoke'
+                            })
+                    }
+                }
+                if ($Uri.StartsWith('https://graph.microsoft.com/v1.0/servicePrincipals?')) {
+                    return [pscustomobject]@{ value = @([pscustomobject]@{
+                                id = 'c7f29be4-bffe-44e9-8108-1449571a031c'
+                                appId = 'b16b4127-9ef6-44a1-9f07-bbfe92053baf'
+                                servicePrincipalType = 'Application'
+                                appOwnerOrganizationId = '1984d248-06ca-4d04-a3b8-4c0c1577ab86'
+                                appRoleAssignmentRequired = $global:ofmEntraMockGuardEnabled
+                            }) }
+                }
+                if ($Uri -like '*/servicePrincipals/c7f29be4-bffe-44e9-8108-1449571a031c/appRoleAssignedTo') {
+                    return [pscustomobject]@{ value = @([pscustomobject]@{
+                                id = 'mock-assignment'
+                                principalId = '595d3a27-a2a8-4ac4-b33d-98715cbcd684'
+                                resourceId = 'c7f29be4-bffe-44e9-8108-1449571a031c'
+                                appRoleId = 'b03da987-2091-4443-86bc-5c3e9569a91a'
+                            }) }
+                }
+                if ($Uri -like '*/servicePrincipals/c7f29be4-bffe-44e9-8108-1449571a031c*') {
+                    return [pscustomobject]@{
+                        id = 'c7f29be4-bffe-44e9-8108-1449571a031c'
+                        appId = 'b16b4127-9ef6-44a1-9f07-bbfe92053baf'
+                        servicePrincipalType = 'Application'
+                        appOwnerOrganizationId = '1984d248-06ca-4d04-a3b8-4c0c1577ab86'
+                        appRoleAssignmentRequired = $global:ofmEntraMockGuardEnabled
+                        appRoles = @([pscustomobject]@{
+                                allowedMemberTypes = @('Application')
+                                displayName = 'SourceGateway.Invoke'
+                                id = 'b03da987-2091-4443-86bc-5c3e9569a91a'
+                                isEnabled = $true
+                                value = 'SourceGateway.Invoke'
+                            })
+                    }
+                }
+                throw "Unexpected mocked Graph read: $Uri"
+            }
+
+            $arguments = @{ OutputPath = $evidencePath }
+            if ($Apply) { $arguments.Apply = $true }
+            & $entraPath @arguments
+        }
+        return [pscustomobject]@{
+            Output = @($output)
+            Error = $null
+            Requests = @($requests)
+            Evidence = if (Test-Path -LiteralPath $evidencePath) {
+                Get-Content -LiteralPath $evidencePath -Raw | ConvertFrom-Json
+            } else { $null }
+        }
+    } catch {
+        return [pscustomobject]@{ Output = @(); Error = $_; Stack = $_.ScriptStackTrace; Requests = @($requests); Evidence = $null }
+    } finally {
+        Remove-Item -LiteralPath $evidencePath -Force -ErrorAction SilentlyContinue
+        Remove-Variable -Name ofmEntraMockGuardEnabled -Scope Global -ErrorAction SilentlyContinue
+    }
+}
+
+$guardPreflight = Invoke-MockedEntraConfiguration
+if ($null -eq $guardPreflight.Error -or $guardPreflight.Error.Exception.Message -notmatch 'does not require app-role assignment' -or
+    @($guardPreflight.Requests | Where-Object Method -eq 'PATCH').Count -ne 0) {
+    $detail = if ($null -ne $guardPreflight.Error) { $guardPreflight.Error.Exception.Message } else { 'no error' }
+    $patchCount = @($guardPreflight.Requests | Where-Object Method -eq 'PATCH').Count
+    throw "Entra verify-only mode must reject appRoleAssignmentRequired=false without mutation. Error: $detail; Stack: $($guardPreflight.Stack); PATCH count: $patchCount"
+}
+
+$guardApply = Invoke-MockedEntraConfiguration -Apply
+$guardPatches = @($guardApply.Requests | Where-Object Method -eq 'PATCH')
+if ($null -ne $guardApply.Error -or $guardPatches.Count -ne 1 -or
+    $guardPatches[0].Uri -cne 'https://graph.microsoft.com/v1.0/servicePrincipals/c7f29be4-bffe-44e9-8108-1449571a031c' -or
+    $null -eq $guardApply.Evidence -or $guardApply.Evidence.appRoleAssignmentRequired -ne $true -or
+    $guardApply.Evidence.appRoleAssignmentRequiredChanged -ne $true -or
+    $guardApply.Evidence.assignmentTupleVerified -ne $true) {
+    $detail = if ($null -ne $guardApply.Error) { $guardApply.Error.Exception.Message } else { 'mock output did not match' }
+    throw "Entra apply mode did not reconcile and evidence the exact service-principal guard: $detail"
+}
+
+$wrongApplication = Invoke-MockedEntraConfiguration -Apply -ApplicationObjectId '00000000-0000-0000-0000-000000000001'
+if ($null -eq $wrongApplication.Error -or $wrongApplication.Error.Exception.Message -notmatch 'does not match the authorized gateway application' -or
+    @($wrongApplication.Requests | Where-Object Method -eq 'PATCH').Count -ne 0) {
+    throw 'The Entra configurator must reject a same-name but non-authorized application before mutation.'
 }
 
 $parseErrors = @()
