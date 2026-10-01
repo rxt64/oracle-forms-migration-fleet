@@ -263,6 +263,57 @@ public sealed class GatewayServerTests
         Assert.Equal(0, fixture.Runner.Invocations);
     }
 
+    // Entra writes 'aud' differently per token version: a v1 access token carries the App ID URI the client
+    // asked for, a v2 token always carries the resource application's own client id. The gateway is configured
+    // with api://{clientId}, so these two pin that a real v2 token is served and that nothing else is.
+
+    private const string GatewayApplicationId = "b16b4127-9ef6-44a1-9f07-bbfe92053baf";
+
+    [Theory]
+    [InlineData("api://b16b4127-9ef6-44a1-9f07-bbfe92053baf", true)]
+    [InlineData("api://not-a-guid", false)]
+    [InlineData("https://gateway.ofm.source.internal", false)]
+    [InlineData("b16b4127-9ef6-44a1-9f07-bbfe92053baf", false)]
+    [InlineData("api://b16b4127-9ef6-44a1-9f07-bbfe92053baf/scope", false)]
+    public void Only_an_exact_application_id_uri_derives_the_bare_application_id_audience(
+        string audience,
+        bool derivesApplicationId)
+    {
+        using GatewayWorkspace workspace = new();
+        GatewayOptions options = workspace.Options(values => values[GatewayOptions.AudienceVariable] = audience);
+        IReadOnlyList<string> expected = derivesApplicationId ? [audience, GatewayApplicationId] : [audience];
+
+        Assert.Equal(expected, options.ValidAudiences);
+    }
+
+    [Fact]
+    public async Task A_v2_token_for_the_configured_application_id_uri_is_accepted()
+    {
+        await using Fixture fixture = await Fixture.StartAsync(
+            adjust: values => values[GatewayOptions.AudienceVariable] = $"api://{GatewayApplicationId}");
+        using HttpClient client = fixture.Server.Client();
+
+        using HttpResponseMessage response = await client.SendAsync(GatewayTestServer.Post(
+            GatewayProtocol.FormsModuleExtractPath, Request(), fixture.Server.Token(audience: GatewayApplicationId)));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(1, fixture.Runner.Invocations);
+    }
+
+    [Fact]
+    public async Task A_token_for_another_application_id_is_still_refused()
+    {
+        await using Fixture fixture = await Fixture.StartAsync(
+            adjust: values => values[GatewayOptions.AudienceVariable] = $"api://{GatewayApplicationId}");
+        using HttpClient client = fixture.Server.Client();
+
+        using HttpResponseMessage response = await client.SendAsync(GatewayTestServer.Post(
+            GatewayProtocol.FormsModuleExtractPath, Request(), fixture.Server.Token(audience: GatewayWorkspace.UnlistedAppId)));
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.Equal(0, fixture.Runner.Invocations);
+    }
+
     [Fact]
     public async Task A_token_from_another_issuer_is_refused()
     {
@@ -529,13 +580,15 @@ public sealed class GatewayServerTests
 
         public StubExtractionRunner Runner { get; }
 
-        public static async Task<Fixture> StartAsync(bool oracleConnection = true)
+        public static async Task<Fixture> StartAsync(
+            bool oracleConnection = true,
+            Action<Dictionary<string, string?>>? adjust = null)
         {
             GatewayWorkspace workspace = new(oracleConnection);
             StubExtractionRunner runner = new((entry, request) =>
                 new GatewayRunOutcome(StubExtractionRunner.Extracted(request, entry.OutputRoot), 0, null));
 
-            GatewayTestServer server = await GatewayTestServer.StartAsync(workspace.Options(), runner);
+            GatewayTestServer server = await GatewayTestServer.StartAsync(workspace.Options(adjust), runner);
             return new Fixture(workspace, server, runner);
         }
 

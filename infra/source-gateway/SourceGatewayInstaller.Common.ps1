@@ -1,5 +1,46 @@
 Set-StrictMode -Version Latest
 
+function Assert-SourceGatewayCiEvidence(
+    [object] $Run,
+    [object[]] $Jobs,
+    [string] $ExpectedRepository,
+    [string] $ExpectedCommitSha,
+    [long] $ExpectedRunId,
+    [switch] $ExactRequiredJobs
+) {
+    if ($null -eq $Run -or $null -eq $Jobs) {
+        throw 'The required CI run and job evidence is missing.'
+    }
+
+    $headRepositoryProperty = $Run.PSObject.Properties['head_repository']
+    $repositoryProperty = $Run.PSObject.Properties['repository']
+    $headRepository = if ($null -ne $headRepositoryProperty -and $null -ne $headRepositoryProperty.Value) {
+        $headRepositoryProperty.Value.full_name
+    } elseif ($null -ne $repositoryProperty) {
+        $repositoryProperty.Value
+    } else {
+        $null
+    }
+    if ([long]$Run.id -ne $ExpectedRunId -or $Run.name -cne 'CI' -or
+        $Run.path -cne '.github/workflows/ci.yml' -or $Run.event -cne 'push' -or
+        $Run.head_branch -cne 'main' -or $Run.head_sha -cne $ExpectedCommitSha -or
+        $headRepository -cne $ExpectedRepository -or $Run.status -cne 'completed' -or
+        $Run.conclusion -cne 'success') {
+        throw 'The named GitHub Actions run is not a successful main-push CI run for the expected repository and commit.'
+    }
+
+    $requiredJobs = @('Native source worker contract', 'build-and-test', 'Container image builds', 'Guided UI browser checks')
+    if ($ExactRequiredJobs -and $Jobs.Count -ne $requiredJobs.Count) {
+        throw 'Bundled CI proof must contain exactly the required job evidence.'
+    }
+    foreach ($requiredJob in $requiredJobs) {
+        $matches = @($Jobs | Where-Object name -CEQ $requiredJob)
+        if ($matches.Count -ne 1 -or $matches[0].status -cne 'completed' -or $matches[0].conclusion -cne 'success') {
+            throw "Required CI job '$requiredJob' must appear exactly once and complete successfully."
+        }
+    }
+}
+
 function Invoke-ScChecked([string[]] $Arguments, [string] $FailureMessage) {
     & sc.exe @Arguments | Out-Null
     if ($LASTEXITCODE -ne 0) {

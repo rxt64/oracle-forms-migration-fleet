@@ -178,7 +178,7 @@ public static class WorkerGatewayHost
             ValidateIssuer = true,
             ValidIssuers = dependencies?.TestValidIssuers ?? options.ValidIssuers,
             ValidateAudience = true,
-            ValidAudiences = [options.Audience],
+            ValidAudiences = options.ValidAudiences,
             ValidateLifetime = true,
             ValidateIssuerSigningKey = true,
             RequireSignedTokens = true,
