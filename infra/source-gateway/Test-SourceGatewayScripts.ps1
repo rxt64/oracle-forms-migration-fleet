@@ -8,7 +8,11 @@ $common = Join-Path $PSScriptRoot 'SourceGatewayInstaller.Common.ps1'
 . $common
 
 $script:mockExitCode = 0
-function sc.exe { $global:LASTEXITCODE = $script:mockExitCode }
+$script:scCalls = [Collections.Generic.List[object]]::new()
+function sc.exe {
+    $script:scCalls.Add(@($args))
+    $global:LASTEXITCODE = $script:mockExitCode
+}
 function icacls.exe { $global:LASTEXITCODE = $script:mockExitCode }
 
 $script:mockExitCode = 5
@@ -23,6 +27,23 @@ if (-not $threw) { throw 'Invoke-IcaclsChecked accepted a nonzero mocked exit co
 $script:mockExitCode = 0
 Invoke-ScChecked -Arguments @('query', 'mock') -FailureMessage 'unexpected mock sc failure'
 Invoke-IcaclsChecked -Arguments @('mock') -FailureMessage 'unexpected mock ACL failure'
+
+$expectedServiceArguments = @(
+    'create',
+    'OFM Source Gateway',
+    'binPath=',
+    '"C:\Program Files\OFM Source Gateway\OracleFormsMigrationFleet.SourceWorker.exe" --serve',
+    'start=',
+    'delayed-auto',
+    'obj=',
+    'NT AUTHORITY\LocalService'
+)
+Invoke-ScChecked -Arguments $expectedServiceArguments -FailureMessage 'unexpected service argument failure'
+$actualServiceArguments = @($script:scCalls[$script:scCalls.Count - 1])
+if ($actualServiceArguments.Count -ne $expectedServiceArguments.Count -or
+    (Compare-Object -ReferenceObject $expectedServiceArguments -DifferenceObject $actualServiceArguments -SyncWindow 0)) {
+    throw 'Invoke-ScChecked did not preserve the exact sc.exe service argument tokens.'
+}
 
 $trustedRun = [pscustomobject]@{
     id = 42
@@ -55,7 +76,7 @@ if ($null -eq $extraJobFailure -or $extraJobFailure.Exception.Message -notmatch 
     throw 'Bundled CI evidence accepted a job outside the exact required allowlist.'
 }
 
-if ($IsWindows) {
+if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
     foreach ($guardScript in @('Install-SourceGateway.ps1', 'New-SourceGatewayCredentialTransferKey.ps1',
             'Complete-SourceGatewayCredentialTransfer.ps1')) {
         $guardTokens = $null
@@ -167,6 +188,16 @@ if ($createCertificate -lt 0 -or $publishComplete -lt 0 -or $failedCreationClean
 
 $installerPath = Join-Path $PSScriptRoot 'Install-SourceGateway.ps1'
 $installer = Get-Content -LiteralPath $installerPath -Raw
+$serviceDefinitionCalls = @($installer | Select-String -Pattern "Invoke-ScChecked -Arguments @\('(create|config)'.+" -AllMatches).Matches.Value
+if ($serviceDefinitionCalls.Count -ne 2 -or
+    @($serviceDefinitionCalls | Where-Object { $_ -match '"(binPath=|obj=)\s' -or $_ -match "'start=\s" }).Count -ne 0 -or
+    @($serviceDefinitionCalls | Where-Object { $_ -notmatch "'binPath=',\s*\`$binaryPath" -or $_ -notmatch "'start=',\s*'delayed-auto'" -or $_ -notmatch "'obj=',\s*\`$serviceAccount" }).Count -ne 0) {
+    throw 'Service create/config calls must pass each sc.exe option name and value as separate argument tokens.'
+}
+$expectedBinaryPathConstruction = '$binaryPath = (''\"{0}\" --serve'' -f $workerDestination)'
+if ($installer -notmatch [regex]::Escape($expectedBinaryPathConstruction)) {
+    throw 'The service binary path must preserve its embedded executable quotes through Windows PowerShell 5.1 native argument marshalling.'
+}
 $stop = $installer.IndexOf('Stop-Service -Name $serviceName')
 $replace = $installer.IndexOf('Move-Item -LiteralPath $stagedWorker -Destination $workerDestination')
 if ($stop -lt 0 -or $replace -lt 0 -or $stop -gt $replace) {
@@ -208,9 +239,13 @@ if ($sidType -lt 0 -or $firstServiceSidAcl -lt 0 -or $sidType -gt $firstServiceS
     throw 'The virtual service SID must exist and be restricted before it is used in filesystem ACLs.'
 }
 $rollback = $installer.IndexOf('catch {')
+$restoreServiceConfiguration = $installer.IndexOf("'binPath=', `$previousServiceConfiguration.NativeBinaryPath")
+$restoreRunningService = $installer.LastIndexOf('if ($serviceWasRunning) { Start-Service -Name $serviceName -ErrorAction Stop }')
 if ($rollback -lt 0 -or $installer -notmatch 'Copy-Item -LiteralPath \$workerBackup -Destination \$workerDestination' -or
-    $installer -notmatch 'previousServiceEnvironment') {
-    throw 'The installer must restore prior service content and environment after a failed rerun.'
+    $installer -notmatch 'NativeBinaryPath = \$previousBinaryPath\.Replace\(''"'', ''\\"''\)' -or
+    $installer -notmatch 'previousServiceEnvironment' -or $restoreServiceConfiguration -lt $rollback -or
+    $restoreRunningService -lt $restoreServiceConfiguration) {
+    throw 'The installer must restore prior service content, SCM configuration, environment, and running state after a failed rerun.'
 }
 $completion = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Complete-SourceGatewayCredentialTransfer.ps1') -Raw
 if ($completion -notmatch "serviceAccount = 'NT AUTHORITY\\LocalService'" -or
@@ -248,6 +283,66 @@ $ciWorkflow = Get-Content -LiteralPath (Join-Path (Split-Path (Split-Path $PSScr
 if ($ciWorkflow -notmatch 'checkov==3\.3\.19' -or
     $ciWorkflow -notmatch 'checkov -d infra/source-gateway --framework bicep --quiet') {
     throw 'CI must enforce the pinned source-gateway Checkov gate.'
+}
+
+$repositoryRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+$deployWorkflow = Get-Content -LiteralPath (Join-Path $repositoryRoot '.github/workflows/deploy-private-workbench.yml') -Raw
+$ciExitGuardMatch = [regex]::Match(
+    $deployWorkflow,
+    '(?ms)^          if \(\$LASTEXITCODE -ne 0\) \{\r?\n              throw "Required CI verification failed with exit code \$LASTEXITCODE\."\r?\n          \}')
+if (-not $ciExitGuardMatch.Success) {
+    throw 'The private workbench workflow is missing the required-CI native exit guard.'
+}
+$ciExitGuard = [scriptblock]::Create($ciExitGuardMatch.Value.Trim())
+$continuedAfterCiRejection = $false
+$ciRejection = try {
+    $PSNativeCommandUseErrorActionPreference = $false
+    & (Get-Process -Id $PID).Path -NoProfile -Command 'exit 23'
+    & $ciExitGuard
+    $continuedAfterCiRejection = $true
+    $null
+} catch { $_ }
+if ($null -eq $ciRejection -or $continuedAfterCiRejection -or
+    $ciRejection.Exception.Message -ne 'Required CI verification failed with exit code 23.') {
+    throw 'A nonzero required-CI verifier exit was allowed to continue to the next workflow command.'
+}
+
+$previewPath = Join-Path $PSScriptRoot 'Preview-SourceGateway.ps1'
+$previewTokens = $null
+$previewErrors = $null
+$previewAst = [System.Management.Automation.Language.Parser]::ParseFile(
+    $previewPath, [ref]$previewTokens, [ref]$previewErrors)
+if ($previewErrors.Count -ne 0) {
+    throw "Preview script parsing failed: $($previewErrors.Message -join '; ')"
+}
+$resourceDifferenceAssignment = $previewAst.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Left.Extent.Text -ceq '$resourceIdDifferences'
+}, $true)
+$resourceScopeGuard = $previewAst.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.IfStatementAst] -and
+        $node.Clauses[0].Item1.Extent.Text -match '\$resourceIdDifferences\.Count'
+}, $true)
+if ($null -eq $resourceDifferenceAssignment -or $null -eq $resourceScopeGuard) {
+    throw 'The preview resource-scope comparison could not be loaded for runtime verification.'
+}
+$resourceScopeCheck = [scriptblock]::Create(
+    "$($resourceDifferenceAssignment.Extent.Text)`n$($resourceScopeGuard.Extent.Text)")
+$expectedResourceIds = @('/resource/a', '/resource/b')
+$actualResourceIds = @('/resource/a', '/resource/b')
+$resourceChanges = @(
+    [pscustomobject]@{ resourceId = '/resource/a'; changeType = 'Create' }
+    [pscustomobject]@{ resourceId = '/resource/b'; changeType = 'Create' }
+)
+$unexpectedChange = $null
+& $resourceScopeCheck
+$actualResourceIds = @('/resource/a', '/resource/c')
+$scopeRejection = try { & $resourceScopeCheck; $null } catch { $_ }
+if ($null -eq $scopeRejection -or
+    $scopeRejection.Exception.Message -notmatch 'exceeded the approved create-only scope') {
+    throw 'The preview resource-scope comparison accepted differing resource IDs.'
 }
 
 $installWorkflow = Get-Content -LiteralPath (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) '.github/workflows/install-source-gateway.yml') -Raw

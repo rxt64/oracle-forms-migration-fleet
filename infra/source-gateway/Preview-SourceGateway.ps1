@@ -1,4 +1,4 @@
-[CmdletBinding()]
+[CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
 param(
     [Parameter(Mandatory)]
     [ValidateSet('Foundation', 'Application')]
@@ -32,7 +32,11 @@ param(
 
     [string] $SandboxDatabaseHost = 'pg-ofmfleet-dev-ykbpnrpd.postgres.database.azure.com',
 
-    [string] $SandboxDatabaseName = 'ofm_dotnet_pilot'
+    [string] $SandboxDatabaseName = 'ofm_dotnet_pilot',
+
+    [string] $EvidencePath = '',
+
+    [switch] $Apply
 )
 
 Set-StrictMode -Version Latest
@@ -46,6 +50,10 @@ $template = if ($Stage -eq 'Foundation') {
     Join-Path $PSScriptRoot 'main.bicep'
 } else {
     Join-Path $PSScriptRoot 'application.bicep'
+}
+
+if ($Apply -and $Stage -ne 'Application') {
+    throw '-Apply is supported only for the separately reviewed Application stage.'
 }
 
 if ($SubscriptionId -ne $expectedSubscriptionId -or $SubscriptionId -eq $forbiddenDefaultSubscriptionId) {
@@ -84,15 +92,18 @@ $commonArguments = @(
     '--resource-group', $ResourceGroupName,
     '--subscription', $SubscriptionId,
     '--template-file', $template,
+    '--result-format', 'FullResourcePayloads',
+    '--output', 'json',
     '--no-pretty-print',
     '--only-show-errors'
 )
 
 if ($Stage -eq 'Foundation') {
-    & az @commonArguments
+    $foundationWhatIf = & az @commonArguments
     if ($LASTEXITCODE -ne 0) {
         throw 'Foundation what-if failed. Nothing was applied.'
     }
+    $foundationWhatIf
     return
 }
 
@@ -149,19 +160,126 @@ try {
         }
     }
     $parameters | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $parameterPath -Encoding utf8NoBOM
-    & icacls.exe $parameterPath /inheritance:r /grant:r "${env:USERNAME}:(R,W)" | Out-Null
+    $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    & icacls.exe $parameterPath /setowner "*$currentSid" /inheritance:r /grant:r "*$currentSid`:(R,W)" | Out-Null
     if ($LASTEXITCODE -ne 0) {
         throw 'Could not restrict the temporary secure parameter file.'
     }
 
-    & az @commonArguments --parameters "@$parameterPath"
+    $resourceChanges = @(& az @commonArguments `
+        --query 'properties.changes[].{resourceId:resourceId,changeType:changeType,resourceType:after.type}' `
+        --parameters "@$parameterPath" | ConvertFrom-Json)
     if ($LASTEXITCODE -ne 0) {
         throw 'Application what-if failed. Nothing was applied.'
     }
+
+    $expectedResourceIds = @(
+        "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.App/containerApps/ca-ofmfleet-private-dev"
+        "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.App/containerApps/ca-ofmfleet-private-dev/authConfigs/current"
+        "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Network/networkSecurityGroups/nsg-ofm-forms6i-j6mrrerz/securityRules/Allow-Private-Workbench-Source-Gateway"
+        "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Network/privateDnsZones/$ManagedEnvironmentDefaultDomain"
+        "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Network/privateDnsZones/$ManagedEnvironmentDefaultDomain/A/*"
+        "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Network/privateDnsZones/$ManagedEnvironmentDefaultDomain/virtualNetworkLinks/link-vnet-ofm-forms6i-j6mrrerz"
+        "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Network/privateDnsZones/ofm.source.internal"
+        "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Network/privateDnsZones/ofm.source.internal/A/gateway"
+        "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Network/privateDnsZones/ofm.source.internal/virtualNetworkLinks/link-vnet-ofm-forms6i-j6mrrerz"
+        "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Network/privateDnsZones/privatelink.postgres.database.azure.com"
+        "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Network/privateDnsZones/privatelink.postgres.database.azure.com/virtualNetworkLinks/link-vnet-ofm-forms6i-j6mrrerz"
+        "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Network/privateEndpoints/pe-ofmfleet-postgres-dev"
+        "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Network/privateEndpoints/pe-ofmfleet-postgres-dev/privateDnsZoneGroups/default"
+    ) | Sort-Object
+    $actualResourceIds = @($resourceChanges | ForEach-Object { $_.resourceId }) | Sort-Object
+    $unexpectedChange = $resourceChanges | Where-Object { $_.changeType -cne 'Create' } | Select-Object -First 1
+    $resourceIdDifferences = @(Compare-Object -CaseSensitive $expectedResourceIds $actualResourceIds)
+    if ($null -ne $unexpectedChange -or
+        $resourceIdDifferences.Count -ne 0) {
+        $counts = $resourceChanges | Group-Object changeType | Sort-Object Name | ForEach-Object { "$($_.Name)=$($_.Count)" }
+        throw "Application what-if exceeded the approved create-only scope. Change counts: $($counts -join ', '). Nothing was applied."
+    }
+
+    $publicBindings = [ordered]@{
+        managedEnvironmentDefaultDomain = $ManagedEnvironmentDefaultDomain
+        managedEnvironmentInboundStaticIp = $ManagedEnvironmentInboundStaticIp
+        privateEndpointSubnetId = $PrivateEndpointSubnetId
+        containerImage = $ContainerImage
+        operatorPrincipalObjectIds = @($OperatorPrincipalObjectIds.Guid | Sort-Object)
+        validationPrincipalObjectIds = @($ValidationPrincipalObjectIds.Guid | Sort-Object)
+        validationClientApplicationIds = @($ValidationClientApplicationIds.Guid | Sort-Object)
+        sourceGatewayApplicationClientId = $SourceGatewayApplicationClientId.Guid
+        foundryAgentEndpoint = $FoundryAgentEndpoint
+        platformDatabaseHost = $PlatformDatabaseHost
+        platformDatabaseName = $PlatformDatabaseName
+        sandboxDatabaseHost = $SandboxDatabaseHost
+        sandboxDatabaseName = $SandboxDatabaseName
+        secureParameterSource = 'ca-ofmfleet-dev-ykbpnrpd/microsoft-provider-authentication-secret'
+    }
+    $bindingJson = $publicBindings | ConvertTo-Json -Depth 8 -Compress
+    $bindingSha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
+        [Text.Encoding]::UTF8.GetBytes($bindingJson))).ToLowerInvariant()
+    $templateSha256 = (Get-FileHash -LiteralPath $template -Algorithm SHA256).Hash.ToLowerInvariant()
+    $changes = @($resourceChanges | Sort-Object resourceId | ForEach-Object {
+        [ordered]@{
+            resourceId = $_.resourceId
+            changeType = $_.changeType
+            resourceType = $_.resourceType
+        }
+    })
+    $evidence = [ordered]@{
+        schemaVersion = 1
+        stage = 'Application'
+        subscriptionId = $SubscriptionId
+        tenantId = $TenantId
+        resourceGroup = $ResourceGroupName
+        templateSha256 = $templateSha256
+        publicBindingSha256 = $bindingSha256
+        publicBindings = $publicBindings
+        changeCounts = [ordered]@{ Create = $resourceChanges.Count }
+        changes = $changes
+        whatIfSucceeded = $true
+    }
+    if (-not [string]::IsNullOrWhiteSpace($EvidencePath)) {
+        $evidenceDirectory = Split-Path $EvidencePath -Parent
+        if (-not [string]::IsNullOrWhiteSpace($evidenceDirectory)) {
+            New-Item -ItemType Directory -Path $evidenceDirectory -Force | Out-Null
+        }
+        $evidence | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $EvidencePath -Encoding utf8NoBOM
+    }
+    $evidence | ConvertTo-Json -Depth 10
+
+    if ($Apply) {
+        if (-not $PSCmdlet.ShouldProcess(
+                "$SubscriptionId/$ResourceGroupName",
+                'Create the approved private source-gateway workbench resources after the successful full what-if')) {
+            throw 'Application apply was not confirmed. Nothing was applied.'
+        }
+        $applyArguments = @(
+            'deployment', 'group', 'create',
+            '--name', 'ofm-source-gateway-application',
+            '--resource-group', $ResourceGroupName,
+            '--subscription', $SubscriptionId,
+            '--template-file', $template,
+            '--parameters', "@$parameterPath",
+            '--output', 'none',
+            '--only-show-errors'
+        )
+        & az @applyArguments
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Application deployment failed after the successful what-if.'
+        }
+    }
 }
 finally {
-    Remove-Item -LiteralPath $parameterPath -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $parameterPath -PathType Leaf) {
+        Remove-Item -LiteralPath $parameterPath -Force -ErrorAction Stop
+    }
+    if (Test-Path -LiteralPath $parameterPath) {
+        throw 'The temporary secure parameter file could not be removed.'
+    }
 }
 
-Write-Output 'What-if completed without apply. Review the diff for creates only, the single approved NSG rule addition, and no PostgreSQL server modification.'
+if ($Apply) {
+    Write-Output 'Application deployment completed after the successful create-only what-if.'
+} else {
+    Write-Output 'What-if completed without apply. The exact create-only resource allowlist was verified.'
+}
 Write-Output "Repository root: $repositoryRoot"

@@ -220,8 +220,36 @@ try {
     $existingService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
     $serviceWasRunning = $null -ne $existingService -and $existingService.Status -ne 'Stopped'
     $serviceRegistryPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
-    $previousServiceEnvironment = if ($null -ne $existingService) {
-        (Get-ItemProperty -Path $serviceRegistryPath -Name Environment -ErrorAction SilentlyContinue).Environment
+    $previousServiceConfiguration = if ($null -ne $existingService) {
+        $serviceProperties = Get-ItemProperty -Path $serviceRegistryPath
+        $delayedAutoStartProperty = $serviceProperties.PSObject.Properties['DelayedAutoStart']
+        $startMode = switch ([int]$serviceProperties.Start) {
+            0 { 'boot' }
+            1 { 'system' }
+            2 {
+                if ($null -ne $delayedAutoStartProperty -and [int]$delayedAutoStartProperty.Value -eq 1) {
+                    'delayed-auto'
+                } else {
+                    'auto'
+                }
+            }
+            3 { 'demand' }
+            4 { 'disabled' }
+            default { throw "The existing $serviceName start mode is unsupported." }
+        }
+        $previousBinaryPath = [string]$serviceProperties.ImagePath
+        [pscustomobject]@{
+            BinaryPath = $previousBinaryPath
+            NativeBinaryPath = $previousBinaryPath.Replace('"', '\"')
+            StartMode = $startMode
+            Account = [string]$serviceProperties.ObjectName
+            Environment = if ($null -ne $serviceProperties.PSObject.Properties['Environment']) {
+                $serviceProperties.Environment
+            } else { $null }
+        }
+    } else { $null }
+    $previousServiceEnvironment = if ($null -ne $previousServiceConfiguration) {
+        $previousServiceConfiguration.Environment
     } else { $null }
     $workerBackup = Join-Path $InstallRoot "$workerName.previous-$([guid]::NewGuid().ToString('N'))"
     $registryBackup = Join-Path $InstallRoot "source-registry.previous-$([guid]::NewGuid().ToString('N')).json"
@@ -244,13 +272,13 @@ try {
         Move-Item -LiteralPath $stagedWorker -Destination $workerDestination -Force
         Copy-Item -LiteralPath $RegistrySourcePath -Destination $registryDestination -Force
 
-        $binaryPath = ('"{0}" --serve' -f $workerDestination)
+        $binaryPath = ('\"{0}\" --serve' -f $workerDestination)
         if ($null -eq $existingService) {
-            Invoke-ScChecked -Arguments @('create', $serviceName, "binPath= $binaryPath", 'start= delayed-auto', "obj= $serviceAccount") `
+            Invoke-ScChecked -Arguments @('create', $serviceName, 'binPath=', $binaryPath, 'start=', 'delayed-auto', 'obj=', $serviceAccount) `
                 -FailureMessage "Service Control Manager could not create $serviceName"
             $serviceCreated = $true
         } else {
-            Invoke-ScChecked -Arguments @('config', $serviceName, "binPath= $binaryPath", 'start= delayed-auto', "obj= $serviceAccount") `
+            Invoke-ScChecked -Arguments @('config', $serviceName, 'binPath=', $binaryPath, 'start=', 'delayed-auto', 'obj=', $serviceAccount) `
                 -FailureMessage "Service Control Manager could not configure $serviceName"
         }
         Invoke-ScChecked -Arguments @('sidtype', $serviceName, 'restricted') -FailureMessage "Could not restrict the service SID for $serviceName"
@@ -327,6 +355,12 @@ try {
         if ($hadRegistry) { Copy-Item -LiteralPath $registryBackup -Destination $registryDestination -Force }
         else { Remove-Item -LiteralPath $registryDestination -Force -ErrorAction SilentlyContinue }
         if ($null -ne $existingService) {
+            Invoke-ScChecked -Arguments @(
+                'config', $serviceName,
+                'binPath=', $previousServiceConfiguration.NativeBinaryPath,
+                'start=', $previousServiceConfiguration.StartMode,
+                'obj=', $previousServiceConfiguration.Account
+            ) -FailureMessage "Could not restore the prior service configuration for $serviceName"
             if ($null -eq $previousServiceEnvironment) {
                 Remove-ItemProperty -Path $serviceRegistryPath -Name Environment -ErrorAction SilentlyContinue
             } else {
