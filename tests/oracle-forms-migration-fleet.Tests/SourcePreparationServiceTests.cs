@@ -729,6 +729,12 @@ public sealed class SourcePreparationServiceTests : IDisposable
                 null);
         }
 
+        /// <summary>Preparation never probes; a stub that answered one would be asserting nothing.</summary>
+        public Task<SourceGatewayProbeCall> ProbeSourceEnvironmentAsync(
+            SourceGatewayProbeRequest request,
+            CancellationToken cancellationToken) =>
+            Task.FromResult(new SourceGatewayProbeCall(null, "This stub gateway answers no probe."));
+
         /// <summary>Blocks the call until a test releases it, so "while the gateway was working" is real.</summary>
         private async Task PauseAsync(CancellationToken cancellationToken)
         {

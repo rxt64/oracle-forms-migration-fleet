@@ -118,8 +118,11 @@ if (FoundryAgentClient.TryParseEndpoint(
 var builder = AgentHost.CreateBuilder(args);
 builder.Services.AddSingleton<IApplicationBuildGateway, ProcessApplicationBuildGateway>();
 builder.Services.AddSingleton<IApplicationTestGateway, ProcessApplicationTestGateway>();
-// Native workers run behind a separately deployed source gateway. The web process never starts one.
-builder.Services.AddSingleton<ISourceEnvironmentProbe, UnavailableSourceEnvironmentProbe>();
+// Native workers run behind a separately deployed source gateway. The web process never starts one, so
+// the probe is the gateway-backed one when a gateway is configured and the honest "nothing was tried"
+// one when it is not.
+builder.Services.AddSingleton<ISourceEnvironmentProbe>(provider =>
+    SourceEnvironmentProbeSelection.Create(provider.GetService<ISourceGatewayClient>()));
 builder.Services.AddSingleton<IFormsModuleExtractor, UnavailableFormsModuleExtractor>();
 builder.Services.AddSingleton<IOracleSchemaExtractor, UnavailableOracleSchemaExtractor>();
 
@@ -355,7 +358,9 @@ builder.Services.AddSingleton(provider => new DispositionLedgerService(
 // never through this process. Without a configured authority and token audience there is no gateway, so
 // the service is registered unconfigured: the GUI operation then answers 503 and writes nothing, which
 // leaves the extraction capabilities blocked exactly as the probe already reports them.
-ISourceGatewayClient? sourceGateway = null;
+string sourceGatewayAuthorityHost = "none";
+string sourceGatewayConfigurationCode = SourceGatewayDiagnosticCode.NotConfigured;
+IReadOnlyList<string> sourceGatewayMissingKeys = [];
 if (SourceGatewayOptions.TryRead(
         builder.Configuration,
         out SourceGatewayOptions? sourceGatewayOptions,
@@ -374,20 +379,33 @@ if (SourceGatewayOptions.TryRead(
         Timeout = sourceGatewayOptions!.RequestTimeout,
     };
 
-    sourceGateway = new HttpSourceGatewayClient(sourceGatewayHttp, sourceGatewayCredential, sourceGatewayOptions);
+    // Resolved from the container rather than constructed eagerly, so the client carries a logger. It is
+    // the only place a gateway fault is observed, and until it could log one, every transport failure
+    // left this process as a sentence in an HTTP response body and nowhere else.
+    builder.Services.AddSingleton<ISourceGatewayClient>(provider => new HttpSourceGatewayClient(
+        sourceGatewayHttp,
+        sourceGatewayCredential,
+        sourceGatewayOptions,
+        clock: null,
+        logger: provider.GetRequiredService<ILogger<HttpSourceGatewayClient>>()));
+
+    sourceGatewayAuthorityHost = sourceGatewayOptions.Authority.IdnHost;
+    sourceGatewayConfigurationCode = SourceGatewayDiagnosticCode.Configured;
     Console.WriteLine($"[INFO] Source gateway: {sourceGatewayOptions.Authority.IdnHost} (managed-identity authentication).");
 }
 else
 {
+    sourceGatewayMissingKeys = sourceGatewayGaps;
     Console.Error.WriteLine(
         "[WARNING] No authorized source gateway is configured, so Forms module extraction will refuse and write " +
         "nothing. Unset: " + string.Join(", ", sourceGatewayGaps));
 }
 
-if (sourceGateway is not null)
-{
-    builder.Services.AddSingleton(sourceGateway);
-}
+builder.Services.AddSingleton<IHostedService>(provider => new SourceGatewayStartupDiagnostics(
+    provider.GetRequiredService<ILogger<SourceGatewayStartupDiagnostics>>(),
+    sourceGatewayConfigurationCode,
+    sourceGatewayAuthorityHost,
+    sourceGatewayMissingKeys));
 
 builder.Services.AddSingleton(provider => new SourcePreparationService(
     provider.GetRequiredService<PlatformAccessService>(),

@@ -259,6 +259,12 @@ if ($completion -notmatch 'certificateCleanupRequired = \$true' -or
 }
 $workflow = Get-Content -LiteralPath (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) '.github/workflows/source-gateway-image.yml') -Raw
 $dockerfile = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Dockerfile.private-workbench') -Raw
+$applicationTemplate = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'application.bicep') -Raw
+if ($applicationTemplate -notmatch "param existingApplicationInsightsName string = 'appi-ofmfleet-web-dev-ykbpnrpd'" -or
+    $applicationTemplate -notmatch "resource existingApplicationInsights 'Microsoft\.Insights/components@2020-02-02' existing" -or
+    $applicationTemplate -notmatch "name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: existingApplicationInsights\.properties\.ConnectionString") {
+    throw 'The private workbench must reuse the approved existing Application Insights component.'
+}
 if ($workflow -notmatch '(?m)^permissions:\s*$' -or
     $workflow -notmatch '(?m)^  actions: read\s*$' -or
     $workflow -notmatch '(?m)^  contents: read\s*$' -or

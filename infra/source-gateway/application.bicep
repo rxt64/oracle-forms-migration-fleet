@@ -33,6 +33,9 @@ param existingWorkbenchIdentityName string = 'id-ofmfleet-web-dev-ykbpnrpd'
 @description('Existing trusted Azure Container Registry.')
 param existingRegistryName string = 'acrofmfleedevykbpnrpd'
 
+@description('Existing Application Insights component shared with the public workbench.')
+param existingApplicationInsightsName string = 'appi-ofmfleet-web-dev-ykbpnrpd'
+
 @description('Immutable workbench image from the trusted main release, including @sha256:<digest>.')
 @minLength(80)
 param containerImage string
@@ -138,6 +141,10 @@ resource existingWorkbenchIdentity 'Microsoft.ManagedIdentity/userAssignedIdenti
 
 resource existingRegistry 'Microsoft.ContainerRegistry/registries@2023-07-01' existing = {
   name: existingRegistryName
+}
+
+resource existingApplicationInsights 'Microsoft.Insights/components@2020-02-02' existing = {
+  name: existingApplicationInsightsName
 }
 
 resource existingPostgresServer 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' existing = {
@@ -324,6 +331,7 @@ resource privateWorkbench 'Microsoft.App/containerApps@2025-01-01' = {
             { name: 'PORT', value: '8088' }
             { name: 'AZURE_CLIENT_ID', value: existingWorkbenchIdentity.properties.clientId }
             { name: 'FOUNDRY_AGENT_ENDPOINT', value: foundryAgentEndpoint }
+            { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: existingApplicationInsights.properties.ConnectionString }
             { name: 'WORKBENCH_AUTH_MODE', value: 'ContainerApps' }
             { name: 'WORKBENCH_AUTH_TENANT_ID', value: tenant().tenantId }
             { name: 'WORKBENCH_AUTH_CLIENT_ID', value: workbenchAuthClientId }

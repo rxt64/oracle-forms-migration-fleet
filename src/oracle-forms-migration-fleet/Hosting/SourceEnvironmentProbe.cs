@@ -18,6 +18,13 @@ public enum SourcePrerequisite
     OperatorSuppliedExport,
     WorkerHostArchitecture,
     SourceWorkerExecutable,
+
+    // Admission prerequisites a source gateway names when it refuses a request before inspecting
+    // anything. They are declared here so a refusal arrives as the actionable code the gateway chose
+    // rather than collapsing into "a capability this build does not recognize".
+    RegisteredSourceEnvironment,
+    AuthorizedSourceEnvironmentScope,
+    ApprovedSourceProfileVersion,
 }
 
 public sealed record SourceExpectedVersions(string Forms, string Database);
