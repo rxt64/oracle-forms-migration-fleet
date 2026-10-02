@@ -168,10 +168,10 @@ try {
             privateEndpointSubnetId = @{ value = $PrivateEndpointSubnetId }
             containerImage = @{ value = $ContainerImage }
             workbenchAuthClientSecret = @{ value = $env:OFM_WORKBENCH_AUTH_CLIENT_SECRET }
-            operatorPrincipalObjectIds = @{ value = @($OperatorPrincipalObjectIds.Guid) }
-            validationPrincipalObjectIds = @{ value = @($ValidationPrincipalObjectIds.Guid) }
-            validationClientApplicationIds = @{ value = @($ValidationClientApplicationIds.Guid) }
-            sourceGatewayApplicationClientId = @{ value = $SourceGatewayApplicationClientId.Guid }
+            operatorPrincipalObjectIds = @{ value = @($OperatorPrincipalObjectIds | ForEach-Object { $_.ToString() }) }
+            validationPrincipalObjectIds = @{ value = @($ValidationPrincipalObjectIds | ForEach-Object { $_.ToString() }) }
+            validationClientApplicationIds = @{ value = @($ValidationClientApplicationIds | ForEach-Object { $_.ToString() }) }
+            sourceGatewayApplicationClientId = @{ value = $SourceGatewayApplicationClientId.ToString() }
             foundryAgentEndpoint = @{ value = $FoundryAgentEndpoint }
             platformDatabaseHost = @{ value = $PlatformDatabaseHost }
             platformDatabaseName = @{ value = $PlatformDatabaseName }
@@ -222,10 +222,10 @@ try {
         managedEnvironmentInboundStaticIp = $ManagedEnvironmentInboundStaticIp
         privateEndpointSubnetId = $PrivateEndpointSubnetId
         containerImage = $ContainerImage
-        operatorPrincipalObjectIds = @($OperatorPrincipalObjectIds.Guid | Sort-Object)
-        validationPrincipalObjectIds = @($ValidationPrincipalObjectIds.Guid | Sort-Object)
-        validationClientApplicationIds = @($ValidationClientApplicationIds.Guid | Sort-Object)
-        sourceGatewayApplicationClientId = $SourceGatewayApplicationClientId.Guid
+        operatorPrincipalObjectIds = @($OperatorPrincipalObjectIds | ForEach-Object { $_.ToString() } | Sort-Object)
+        validationPrincipalObjectIds = @($ValidationPrincipalObjectIds | ForEach-Object { $_.ToString() } | Sort-Object)
+        validationClientApplicationIds = @($ValidationClientApplicationIds | ForEach-Object { $_.ToString() } | Sort-Object)
+        sourceGatewayApplicationClientId = $SourceGatewayApplicationClientId.ToString()
         foundryAgentEndpoint = $FoundryAgentEndpoint
         platformDatabaseHost = $PlatformDatabaseHost
         platformDatabaseName = $PlatformDatabaseName
