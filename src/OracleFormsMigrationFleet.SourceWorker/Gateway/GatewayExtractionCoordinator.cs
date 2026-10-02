@@ -9,6 +9,8 @@ public sealed record GatewayFormsModuleOutcome(int StatusCode, GatewayFormsModul
 
 public sealed record GatewayOracleSchemaOutcome(int StatusCode, GatewayOracleSchemaResponse? Response);
 
+public sealed record GatewayProbeOutcome(int StatusCode, GatewayProbeResponse? Response);
+
 /// <summary>
 /// Everything that happens between an authorized request and a response document.
 ///
@@ -23,10 +25,177 @@ public sealed class GatewayExtractionCoordinator(
     GatewayOptions options,
     IGatewayExtractionRunner runner,
     Func<DateTimeOffset>? clock = null,
-    IGatewaySchemaExtractionRunner? schemaRunner = null) : IDisposable
+    IGatewaySchemaExtractionRunner? schemaRunner = null,
+    IGatewayProbeRunner? probeRunner = null) : IDisposable
 {
     private readonly SemaphoreSlim _slots = new(options.MaxConcurrentExtractions, options.MaxConcurrentExtractions);
     private readonly Func<DateTimeOffset> _clock = clock ?? (() => DateTimeOffset.UtcNow);
+
+    /// <summary>
+    /// Reports what this host can do for one registered source environment, without opening anything.
+    ///
+    /// The whole point of the call is that it can be made before an operator has approved any module or
+    /// schema: it runs the worker's own <c>--probe</c>, which loads the configured native library and
+    /// reports what it resolved, and it adds this gateway's truthful answer about the Oracle side. That
+    /// answer is always a blocked prerequisite, because a probe opens no connection: a registered connect
+    /// string is a configuration fact, not evidence that a database answered, and reporting it as
+    /// verified would be inventing exactly the evidence the caller asked for.
+    /// </summary>
+    public async Task<GatewayProbeOutcome> ProbeSourceEnvironmentAsync(
+        GatewayCallerIdentity caller,
+        GatewayProbeRequest request,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(caller);
+        ArgumentNullException.ThrowIfNull(request);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        GatewaySourceEntry? entry = options.Registry.Find(request.SourceEnvironmentId);
+
+        if (request.SchemaVersion != GatewayProtocol.SchemaVersion ||
+            !GatewayText.IsIdentifier(request.SourceEnvironmentId, 63) ||
+            !GatewayText.IsIdentifier(request.ExpectedFormsRelease, 40) ||
+            !GatewayText.IsIdentifier(request.ExpectedDatabaseRelease, 40) ||
+            request.ProfileVersion <= 0 ||
+            !ContentHash.IsSha256(request.ProfileHash) ||
+            entry is null)
+        {
+            return RefuseProbe(request, "RegisteredSourceEnvironment", "operator.register.source.environment.on.gateway",
+                "The probe named no registered source environment, or was malformed, so nothing was inspected.");
+        }
+
+        // Whose source this is, before anything about it. The identifier is not a secret and the token
+        // proves only the calling application and its tenant.
+        if (entry.Refuses(request.Scope, caller.TenantId) is { } unauthorized)
+        {
+            return RefuseProbe(request, "AuthorizedSourceEnvironmentScope",
+                "operator.register.authorized.tenant.and.project.on.gateway", unauthorized);
+        }
+
+        if (entry.RefusesProfile(request.ProfileVersion, request.ProfileHash) is { } unapproved)
+        {
+            return RefuseProbe(request, "ApprovedSourceProfileVersion",
+                "operator.approve.the.current.source.profile.on.gateway", unapproved);
+        }
+
+        if (!string.Equals(entry.SupportedFormsRelease, request.ExpectedFormsRelease, StringComparison.OrdinalIgnoreCase))
+        {
+            return RefuseProbe(request, "OracleFormsInstallation", "operator.register.the.actual.installed.forms.release",
+                $"This gateway serves that source environment at Forms release {entry.SupportedFormsRelease}; the probe expects a different one.");
+        }
+
+        if (probeRunner is null)
+        {
+            return Probe(request, GatewayProbeStatus.BlockedPrerequisite,
+                [Capability("forms.installation", GatewayProbeStatus.BlockedPrerequisite, "OracleFormsInstallation",
+                    request.ExpectedFormsRelease, "operator.install.forms.6i.worker", null),
+                 OracleCapability(entry)],
+                ["This gateway was built without a probe runner, so no native library was loaded."]);
+        }
+
+        if (!await _slots.WaitAsync(TimeSpan.Zero, cancellationToken).ConfigureAwait(false))
+        {
+            return new GatewayProbeOutcome(503, null);
+        }
+
+        GatewayProbeRunOutcome run;
+        try
+        {
+            run = await probeRunner
+                .RunAsync(entry, new WorkerProbeRequest(
+                    WorkerProtocol.SchemaVersion, request.SourceEnvironmentId, request.ExpectedFormsRelease), cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            _slots.Release();
+        }
+
+        return InterpretProbe(request, entry, run);
+    }
+
+    private GatewayProbeOutcome InterpretProbe(
+        GatewayProbeRequest request,
+        GatewaySourceEntry entry,
+        GatewayProbeRunOutcome run)
+    {
+        if (run.Result is null)
+        {
+            return Probe(request, GatewayProbeStatus.Rejected,
+                [Capability("forms.installation", GatewayProbeStatus.Rejected, "OracleFormsInstallation",
+                    request.ExpectedFormsRelease, "operator.review.gateway.worker.installation", null)],
+                [GatewayText.Safe(run.Failure ?? "The probe worker produced no result.", GatewayProtocol.MaxFindingCharacters)]);
+        }
+
+        WorkerProbeResult result = run.Result;
+
+        // The worker echoes its own correlation fields. A result that does not name the request it was
+        // given is a defect on this machine, not a fact about the source, so it never becomes a status.
+        if (result.SchemaVersion != WorkerProtocol.SchemaVersion ||
+            !string.Equals(result.SourceEnvironmentId, request.SourceEnvironmentId, StringComparison.Ordinal) ||
+            !string.Equals(result.ExpectedFormsRelease, request.ExpectedFormsRelease, StringComparison.Ordinal) ||
+            result.Capabilities is not { Count: > 0 })
+        {
+            return Probe(request, GatewayProbeStatus.Rejected,
+                [Capability("forms.installation", GatewayProbeStatus.Rejected, "OracleFormsInstallation",
+                    request.ExpectedFormsRelease, "operator.review.gateway.worker.installation", null)],
+                ["The probe worker returned a result that is not correlated with the request it was given."]);
+        }
+
+        List<GatewayCapability> capabilities = [.. Map(result.Capabilities), OracleCapability(entry)];
+
+        // The Oracle half is always unmet here, so a probe this gateway answers is always blocked. That is
+        // the honest ceiling of a call that opens nothing, and it is stated rather than worked around.
+        return Probe(request, GatewayProbeStatus.BlockedPrerequisite, capabilities, []);
+    }
+
+    /// <summary>
+    /// What this gateway can say about the Oracle side without opening a connection, which is only
+    /// whether an operator registered one. The state is never <c>Verified</c>: no catalog was read, no
+    /// credential was decrypted, and nothing proved a database would answer.
+    /// </summary>
+    private static GatewayCapability OracleCapability(GatewaySourceEntry entry) =>
+        new("oracle.schema.extract",
+            GatewayProbeStatus.BlockedPrerequisite,
+            "OracleClientConnectivity",
+            null,
+            null,
+            "SourceGateway",
+            entry.OracleCredential is null
+                ? "operator.configure.oracle.source.connection.on.gateway"
+                : "operator.verify.oracle.source.connection.on.gateway",
+            $"registeredSchemas={entry.SchemaAllowlist.Count};oracleConnectionRegistered={entry.OracleCredential is not null}");
+
+    private GatewayProbeOutcome RefuseProbe(
+        GatewayProbeRequest request,
+        string prerequisite,
+        string remediation,
+        string detail) =>
+        Probe(request, GatewayProbeStatus.Rejected,
+            [Capability("source.environment.probe", GatewayProbeStatus.Rejected, prerequisite,
+                request.ExpectedFormsRelease, remediation, null)],
+            [GatewayText.Safe(detail, GatewayProtocol.MaxFindingCharacters)]);
+
+    private GatewayProbeOutcome Probe(
+        GatewayProbeRequest request,
+        string status,
+        IReadOnlyList<GatewayCapability> capabilities,
+        IReadOnlyList<string> findings) =>
+        new(200, new GatewayProbeResponse(
+            GatewayProtocol.SchemaVersion,
+            status,
+            request.SourceEnvironmentId,
+            request.ExpectedFormsRelease,
+            request.ExpectedDatabaseRelease,
+            request.ProfileVersion,
+            request.ProfileHash,
+            _clock(),
+            null,
+            null,
+            null,
+            capabilities,
+            findings,
+            request.Scope));
 
     public async Task<GatewayFormsModuleOutcome> ExtractFormsModuleAsync(
         GatewayCallerIdentity caller,

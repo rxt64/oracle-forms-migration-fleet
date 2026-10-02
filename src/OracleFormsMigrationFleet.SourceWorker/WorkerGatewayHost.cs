@@ -36,7 +36,8 @@ public sealed record GatewayHostDependencies(
     IReadOnlyList<SecurityKey>? TestSigningKeys = null,
     IReadOnlyList<string>? TestValidIssuers = null,
     IGatewaySchemaExtractionRunner? SchemaRunner = null,
-    X509Certificate2? Certificate = null);
+    X509Certificate2? Certificate = null,
+    IGatewayProbeRunner? ProbeRunner = null);
 
 /// <summary>
 /// The source gateway server.
@@ -140,8 +141,10 @@ public static class WorkerGatewayHost
         IGatewayExtractionRunner runner = dependencies?.Runner ?? new ChildProcessExtractionRunner(options);
         IGatewaySchemaExtractionRunner schemaRunner =
             dependencies?.SchemaRunner ?? new ChildProcessSchemaExtractionRunner(options);
+        IGatewayProbeRunner probeRunner = dependencies?.ProbeRunner ?? new ChildProcessProbeRunner(options);
         builder.Services.AddSingleton(options);
-        builder.Services.AddSingleton(new GatewayExtractionCoordinator(options, runner, dependencies?.Clock, schemaRunner));
+        builder.Services.AddSingleton(
+            new GatewayExtractionCoordinator(options, runner, dependencies?.Clock, schemaRunner, probeRunner));
 
         builder.Services
             .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
@@ -160,6 +163,7 @@ public static class WorkerGatewayHost
 
         app.MapPost(GatewayProtocol.FormsModuleExtractPath, ExtractFormsModuleAsync).RequireAuthorization(CallerPolicy);
         app.MapPost(GatewayProtocol.OracleSchemaExtractPath, ExtractOracleSchemaAsync).RequireAuthorization(CallerPolicy);
+        app.MapPost(GatewayProtocol.SourceEnvironmentProbePath, ProbeSourceEnvironmentAsync).RequireAuthorization(CallerPolicy);
 
         return app;
     }
@@ -227,6 +231,42 @@ public static class WorkerGatewayHost
 
         GatewayFormsModuleOutcome outcome = await coordinator
             .ExtractFormsModuleAsync(Caller(context), request, context.RequestAborted)
+            .ConfigureAwait(false);
+
+        return outcome.Response is null
+            ? Results.StatusCode(outcome.StatusCode)
+            : Results.Json(outcome.Response, GatewayProtocol.Json, statusCode: outcome.StatusCode);
+    }
+
+    private static async Task<IResult> ProbeSourceEnvironmentAsync(HttpContext context, GatewayExtractionCoordinator coordinator)
+    {
+        (byte[]? body, IResult? failure) = await ReadBodyAsync(context).ConfigureAwait(false);
+        if (body is null)
+        {
+            return failure!;
+        }
+
+        GatewayProbeRequest? request;
+        try
+        {
+            request = JsonSerializer.Deserialize<GatewayProbeRequest>(body, GatewayProtocol.Json);
+        }
+        catch (JsonException)
+        {
+            return Results.StatusCode(StatusCodes.Status400BadRequest);
+        }
+
+        if (request is null ||
+            request.SourceEnvironmentId is null ||
+            request.ExpectedFormsRelease is null ||
+            request.ExpectedDatabaseRelease is null ||
+            request.ProfileHash is null)
+        {
+            return Results.StatusCode(StatusCodes.Status400BadRequest);
+        }
+
+        GatewayProbeOutcome outcome = await coordinator
+            .ProbeSourceEnvironmentAsync(Caller(context), request, context.RequestAborted)
             .ConfigureAwait(false);
 
         return outcome.Response is null

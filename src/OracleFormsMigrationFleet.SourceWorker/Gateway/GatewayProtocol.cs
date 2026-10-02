@@ -24,6 +24,12 @@ public static class GatewayProtocol
 
     public const string OracleSchemaExtractPath = "/source/oracle-schema/extract";
 
+    /// <summary>
+    /// Reports what this gateway's own host can do for one registered source environment. It opens no
+    /// module and no database connection, which is what makes it safe to call before anything is approved.
+    /// </summary>
+    public const string SourceEnvironmentProbePath = "/source/environment/probe";
+
     public const string FormsIrMediaType = "application/vnd.oracle-forms-migration-fleet.forms-ir+json";
 
     public const string OracleSchemaMediaType = "application/vnd.oracle-forms-migration-fleet.oracle-schema+json";
@@ -165,6 +171,56 @@ public sealed record GatewayOracleSchemaResponse(
     DateTimeOffset ExtractedUtc,
     string? SnapshotHash,
     GatewayInlineArtifact? SchemaArtifact,
+    IReadOnlyList<GatewayCapability> Capabilities,
+    IReadOnlyList<string> Findings,
+    GatewayAuthorizationScope? Scope = null);
+
+/// <summary>Terminal states a probe may report. A probe carries no bytes, so there is no extracted state.</summary>
+public static class GatewayProbeStatus
+{
+    public const string Verified = "Verified";
+    public const string BlockedPrerequisite = "BlockedPrerequisite";
+    public const string Rejected = "Rejected";
+}
+
+/// <summary>
+/// A request to report what this gateway's host can do for one registered source environment.
+///
+/// It carries no schema list and no path. The caller's own source profile is operator-declared context on
+/// a different machine, and letting it widen or redirect what is inspected here would make the registry
+/// advisory; everything inspected comes from the registry entry the identifier names.
+/// </summary>
+public sealed record GatewayProbeRequest(
+    int SchemaVersion,
+    string SourceEnvironmentId,
+    string ExpectedFormsRelease,
+    string ExpectedDatabaseRelease,
+    int ProfileVersion,
+    string ProfileHash,
+    GatewayAuthorizationScope? Scope = null);
+
+/// <summary>
+/// What this host observed.
+///
+/// <paramref name="ObservedFormsRelease"/> and <paramref name="ObservedDatabaseRelease"/> are null in
+/// every path this build can take, and that is deliberate rather than unfinished. The worker observes a
+/// library file version and an export table, not a release family, and turning one into the other is
+/// adjudication; the database release cannot be observed at all without opening a connection, which a
+/// probe never does. Reporting the registered release as an observation would be inventing the evidence
+/// the caller is asking for, so the fields stay empty and the capabilities carry what was actually seen.
+/// </summary>
+public sealed record GatewayProbeResponse(
+    int SchemaVersion,
+    string Status,
+    string SourceEnvironmentId,
+    string ExpectedFormsRelease,
+    string ExpectedDatabaseRelease,
+    int ProfileVersion,
+    string ProfileHash,
+    DateTimeOffset ProbedUtc,
+    string? ObservedFormsRelease,
+    string? ObservedDatabaseRelease,
+    GatewayNativeEvidence? Native,
     IReadOnlyList<GatewayCapability> Capabilities,
     IReadOnlyList<string> Findings,
     GatewayAuthorizationScope? Scope = null);

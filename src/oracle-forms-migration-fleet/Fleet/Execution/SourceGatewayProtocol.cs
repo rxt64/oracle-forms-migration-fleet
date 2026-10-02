@@ -50,6 +50,13 @@ public static class SourceGatewayProtocol
 
     public const string OracleSchemaExtractPath = "source/oracle-schema/extract";
 
+    /// <summary>
+    /// Asks the gateway what its own host can actually do for one registered source environment. It opens
+    /// no module and no database connection, so it is the only call that is safe to make before an
+    /// operator has approved anything to extract.
+    /// </summary>
+    public const string SourceEnvironmentProbePath = "source/environment/probe";
+
     /// <summary>Media type of an inlined Forms intermediate representation.</summary>
     public const string FormsIrMediaType = "application/vnd.oracle-forms-migration-fleet.forms-ir+json";
 
@@ -268,9 +275,62 @@ public sealed record SourceGatewayOracleSchemaResponse(
     SourceGatewayAuthorizationScope? Scope = null);
 
 /// <summary>
-/// What admitting a gateway response produced. <paramref name="Artifact"/> is set only when
-/// <paramref name="Admitted"/> is true, and is the exact bytes whose digest was verified.
+/// Terminal states a source-environment probe may report. There is deliberately no <c>Extracted</c>: a
+/// probe carries no bytes, and there is no <c>Contradicted</c> either, because contradicting a declared
+/// release against an observed one is adjudication and belongs to this host rather than to the gateway.
 /// </summary>
+public static class SourceGatewayProbeStatus
+{
+    /// <summary>Every capability the gateway reports was actually exercised and succeeded.</summary>
+    public const string Verified = "Verified";
+
+    /// <summary>The gateway answered and named at least one prerequisite nobody has met yet.</summary>
+    public const string BlockedPrerequisite = "BlockedPrerequisite";
+
+    /// <summary>The request was refused before anything was inspected.</summary>
+    public const string Rejected = "Rejected";
+
+    public static bool IsKnown(string? status) =>
+        status is Verified or BlockedPrerequisite or Rejected;
+}
+
+/// <summary>
+/// A bounded question about one registered source environment: what can the gateway's own host do for it.
+///
+/// It carries no path, no schema list, no library name and no credential. The schema allowlist in
+/// particular is deliberately absent: the profile this host stores is operator-declared context and must
+/// never be able to widen or redirect what the gateway reads, so the gateway answers from its own
+/// registry entry and nothing else.
+/// </summary>
+public sealed record SourceGatewayProbeRequest(
+    int SchemaVersion,
+    string SourceEnvironmentId,
+    string ExpectedFormsRelease,
+    string ExpectedDatabaseRelease,
+    int ProfileVersion,
+    string ProfileHash,
+    SourceGatewayAuthorizationScope Scope);
+
+/// <summary>
+/// What the gateway observed. Every correlation field is echoed so a response cannot be replayed against
+/// a different source environment or a different immutable profile version, and the observations are
+/// nullable because a capability that was never exercised has nothing to report.
+/// </summary>
+public sealed record SourceGatewayProbeResponse(
+    int SchemaVersion,
+    string Status,
+    string SourceEnvironmentId,
+    string ExpectedFormsRelease,
+    string ExpectedDatabaseRelease,
+    int ProfileVersion,
+    string ProfileHash,
+    DateTimeOffset ProbedUtc,
+    string? ObservedFormsRelease,
+    string? ObservedDatabaseRelease,
+    SourceGatewayNativeEvidence? Native,
+    IReadOnlyList<SourceGatewayCapability> Capabilities,
+    IReadOnlyList<string> Findings,
+    SourceGatewayAuthorizationScope? Scope = null);
 /// <param name="Reported">
 /// The status the gateway reported, as this host is willing to repeat it. A malformed response reports
 /// <see cref="SourceGatewayStatus.Rejected"/> rather than the string it claimed, because a claim that

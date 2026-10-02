@@ -140,6 +140,25 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
+      - name: Install pinned Bicep compiler
+        shell: pwsh
+        env:
+          BICEP_VERSION: v0.37.4
+        run: |
+          $ErrorActionPreference = 'Stop'
+          az bicep install --version $env:BICEP_VERSION
+          if ($LASTEXITCODE -ne 0) {
+              throw "Pinned Bicep installation failed with exit code $LASTEXITCODE."
+          }
+          $actualVersion = az bicep version
+          if ($LASTEXITCODE -ne 0) {
+              throw "Bicep version verification failed with exit code $LASTEXITCODE."
+          }
+          $expectedVersion = $env:BICEP_VERSION.TrimStart('v')
+          if ($actualVersion -notmatch "(?<![0-9.])$([regex]::Escape($expectedVersion))(?![0-9.])") {
+              throw "Bicep version verification did not report pinned version $expectedVersion."
+          }
+
       - name: Verify bindings, preview, and optionally apply
         shell: pwsh
         env:

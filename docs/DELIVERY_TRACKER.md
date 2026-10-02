@@ -3,6 +3,27 @@
 This is the controlling delivery record. Small specs are implementation slices, not completion criteria.
 Export/fixture pilot and genuine native Forms 6i qualification are separate outcomes. Neither is complete.
 
+## Gateway Probe And Telemetry Repair: Reviewed Release Candidate
+
+The reviewed repair adds an authenticated, tenant/project-bound `source/environment/probe` gateway
+operation; canonical host validation for required Forms and Oracle capability coverage; structured,
+redacted `ILogger` source-operation outcomes and correlation identifiers; startup diagnostics; and reuse
+of the existing Application Insights connection for the private workbench template. The worker probe is
+bounded and fail-closed: it reports observed tool/runtime facts but does not open an Oracle connection,
+does not infer release families it cannot observe, and cannot accept operator-declared source paths.
+
+Local release evidence includes 39/39 independent focused checks, 2,547/2,547 full solution tests,
+focused real OpenTelemetry correlation and payload-redaction tests, pinned official Bicep 0.37.4
+compilation of the source-gateway templates, and the source-gateway PowerShell harness. Independent
+review closed the required Forms/Oracle coverage and safe host-refusal findings. These results establish
+code behavior only: Application Insights ingestion could not be queried because the caller lacked access,
+so live ingestion, runtime exception counts, gateway upgrade, and private-workbench telemetry remain
+unverified until the exact candidate passes trusted CI and the approved release workflows run.
+
+No Oracle credential was provisioned, no source connection or extraction ran, no migration DDL executed,
+no rows moved, and no migrated application was built or verified. Named migration execution approval and
+all existing trust gates remain required.
+
 ## Gateway Installation Retry: Succeeded
 
 Trusted main CI `36943306853` completed successfully for

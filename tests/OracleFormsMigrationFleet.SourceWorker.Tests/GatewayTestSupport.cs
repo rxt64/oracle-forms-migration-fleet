@@ -275,7 +275,10 @@ public sealed class GatewayTestServer : IAsyncDisposable
 
     public string BaseAddress { get; }
 
-    public static async Task<GatewayTestServer> StartAsync(GatewayOptions options, IGatewayExtractionRunner runner)
+    public static async Task<GatewayTestServer> StartAsync(
+        GatewayOptions options,
+        IGatewayExtractionRunner runner,
+        IGatewayProbeRunner? probeRunner = null)
     {
         RSA rsa = RSA.Create(2048);
         RSA otherRsa = RSA.Create(2048);
@@ -283,7 +286,8 @@ public sealed class GatewayTestServer : IAsyncDisposable
         WebApplication app = WorkerGatewayHost.Build(options, new GatewayHostDependencies(
             Runner: runner,
             TestSigningKeys: [new RsaSecurityKey(rsa) { KeyId = "gateway-test" }],
-            TestValidIssuers: options.ValidIssuers));
+            TestValidIssuers: options.ValidIssuers,
+            ProbeRunner: probeRunner));
 
         await app.StartAsync();
         string address = app.Urls.First();
