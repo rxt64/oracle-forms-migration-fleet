@@ -321,6 +321,35 @@ $previewAst = [System.Management.Automation.Language.Parser]::ParseFile(
 if ($previewErrors.Count -ne 0) {
     throw "Preview script parsing failed: $($previewErrors.Message -join '; ')"
 }
+$guidMemberAccess = @($previewAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.MemberExpressionAst] -and
+        $node.Member.Extent.Text -ceq 'Guid'
+}, $true))
+if ($guidMemberAccess.Count -ne 0) {
+    throw 'The preview reads .Guid, which throws under strict mode for empty GUID arrays.'
+}
+$guidConversions = @($previewAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.PipelineAst] -and
+        $node.Extent.Text -cmatch '^\$(Operator|Validation)\w+Ids \| ForEach-Object \{ \$_\.ToString\(\) \}'
+}, $true))
+if ($guidConversions.Count -ne 6) {
+    throw "Expected six GUID array conversions in the preview; found $($guidConversions.Count)."
+}
+& {
+    Set-StrictMode -Version Latest
+    [guid[]] $OperatorPrincipalObjectIds = @([guid] 'dd84da40-177f-47b9-9c4d-4b657ee4de36')
+    [guid[]] $ValidationPrincipalObjectIds = @()
+    [guid[]] $ValidationClientApplicationIds = @()
+    foreach ($conversion in $guidConversions) {
+        $converted = @(& ([scriptblock]::Create($conversion.Extent.Text)))
+        $expected = if ($conversion.Extent.Text.StartsWith('$Operator', [StringComparison]::Ordinal)) { 1 } else { 0 }
+        if ($converted.Count -ne $expected -or ($expected -eq 1 -and $converted[0] -cne 'dd84da40-177f-47b9-9c4d-4b657ee4de36')) {
+            throw "Preview GUID conversion produced an unexpected result: $($conversion.Extent.Text)"
+        }
+    }
+}
 $compilerFunctions = @($previewAst.FindAll({
     param($node)
     $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
