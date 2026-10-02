@@ -1,8 +1,10 @@
 # Source Gateway Public Trust
 
-This directory deliberately contains no certificate yet. After an approved host bootstrap creates the
-private development root, copy only its public DER certificate here as
-`ofm-source-gateway-dev-root-2026.cer`, record its SHA-256, and submit the public bytes for review.
+`ofm-source-gateway-dev-root-2026.cer` contains only the public DER development root recovered
+from the allowlisted result of approved installation run `36945107616`. Its SHA-256 is
+`f285dc714a836a0c3b34855e4eb7c17009c5ac48421b7ca4092252aee1f2a327`, matching the root
+already bound on the Forms VM. The certificate is submitted for review with this record;
+its presence does not establish a deployed trust overlay or gateway qualification.
 
 The private key never leaves the Forms VM. The trusted `source-gateway-image.yml` workflow verifies the
 public certificate SHA-256, converts the reviewed DER bytes to PEM, verifies CA and self-chain properties,
