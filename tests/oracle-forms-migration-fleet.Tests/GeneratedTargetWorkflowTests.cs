@@ -279,6 +279,22 @@ public sealed class GeneratedTargetWorkflowTests
         Assert.Contains(commands, line => line.Contains("Add-Stage2EvidenceProvenance -Path $evidencePath -DispatchMode 'apply'", StringComparison.Ordinal));
         Assert.DoesNotContain(commands, line => line.Contains("GITHUB_ENV", StringComparison.Ordinal));
         Assert.DoesNotContain(commands, line => line.Contains("GITHUB_OUTPUT", StringComparison.Ordinal));
+        foreach (string guard in new[]
+        {
+            "Stage 1 deployment outputs could not be read",
+            "The approved workbench identity could not be read",
+            "The approved PostgreSQL server could not be read",
+            "The public workbench image could not be read",
+            "ACR overlay metadata could not be read",
+            "The retained preview run could not be read",
+            "The retained preview artifact could not be downloaded",
+        })
+        {
+            Assert.Contains(commands, line => line.Contains(guard, StringComparison.Ordinal));
+        }
+        YamlNode evidenceUpload = Assert.Single(job["steps"]!.Sequence!, step =>
+            step["name"]?.Text == "Retain redacted Stage 2 preview evidence");
+        Assert.Equal("always()", evidenceUpload["if"]!.Text);
     }
 
     [Fact]
@@ -294,8 +310,16 @@ public sealed class GeneratedTargetWorkflowTests
         Assert.True(applyGuard >= 0 && applyGuard < shouldProcess && shouldProcess < create && create < noOutput);
         Assert.Equal(create, wrapper.LastIndexOf("'deployment', 'group', 'create'", StringComparison.Ordinal));
         Assert.Contains("$null -ne $unexpectedChange", wrapper, StringComparison.Ordinal);
-        Assert.Contains("/setowner \"*$currentSid\" /inheritance:r /grant:r", wrapper, StringComparison.Ordinal);
-        Assert.Contains("--query 'properties.changes[].{resourceId:resourceId,changeType:changeType,resourceType:after.type}'", wrapper, StringComparison.Ordinal);
+        Assert.Contains("& icacls.exe $parameterPath /setowner \"*$currentSid\" | Out-Null", wrapper, StringComparison.Ordinal);
+        Assert.Contains("& icacls.exe $parameterPath /inheritance:r /grant:r", wrapper, StringComparison.Ordinal);
+        Assert.DoesNotContain("/setowner \"*$currentSid\" /inheritance:r", wrapper, StringComparison.Ordinal);
+        Assert.True(
+            wrapper.IndexOf("/inheritance:r /grant:r", StringComparison.Ordinal) <
+            wrapper.IndexOf("Set-Content -LiteralPath $parameterPath", StringComparison.Ordinal));
+        Assert.Contains("--query 'changes[].{resourceId:resourceId,changeType:changeType,resourceType:after.type}'", wrapper, StringComparison.Ordinal);
+        Assert.DoesNotContain("properties.changes", wrapper, StringComparison.Ordinal);
+        Assert.Contains("throw 'Application what-if returned no change list. Nothing was applied.'", wrapper, StringComparison.Ordinal);
+        Assert.Contains("throw 'Application what-if returned a malformed change entry. Nothing was applied.'", wrapper, StringComparison.Ordinal);
         Assert.Contains("resourceType = $_.resourceType", wrapper, StringComparison.Ordinal);
         Assert.DoesNotContain("$whatIfJson", wrapper, StringComparison.Ordinal);
         Assert.Contains("throw 'The temporary secure parameter file could not be removed.'", wrapper, StringComparison.Ordinal);

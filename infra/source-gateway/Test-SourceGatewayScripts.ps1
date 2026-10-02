@@ -329,6 +329,26 @@ $guidMemberAccess = @($previewAst.FindAll({
 if ($guidMemberAccess.Count -ne 0) {
     throw 'The preview reads .Guid, which throws under strict mode for empty GUID arrays.'
 }
+$icaclsCommands = @($previewAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -ceq 'icacls.exe'
+}, $true))
+if ($icaclsCommands.Count -ne 2 -or
+    @($icaclsCommands | Where-Object {
+        $_.Extent.Text -cmatch '/setowner' -and $_.Extent.Text -cmatch '/inheritance|/grant'
+    }).Count -ne 0) {
+    throw 'The preview must set ownership and restrict the ACL in separate icacls calls.'
+}
+$parameterWrite = @($previewAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -ceq 'Set-Content' -and $node.Extent.Text -cmatch '\$parameterPath'
+}, $true))
+if ($parameterWrite.Count -ne 1 -or
+    @($icaclsCommands | Where-Object { $_.Extent.StartOffset -gt $parameterWrite[0].Extent.StartOffset }).Count -ne 0) {
+    throw 'The preview must restrict the secure parameter file before writing it.'
+}
 $guidConversions = @($previewAst.FindAll({
     param($node)
     $node -is [System.Management.Automation.Language.PipelineAst] -and

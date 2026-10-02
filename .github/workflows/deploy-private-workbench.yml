@@ -180,6 +180,9 @@ jobs:
           $foundation = az deployment group show --subscription $env:EXPECTED_SUBSCRIPTION_ID `
             --resource-group $env:RESOURCE_GROUP --name $env:FOUNDATION_DEPLOYMENT `
             --query properties.outputs --output json --only-show-errors | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $null -eq $foundation) {
+              throw "Stage 1 deployment outputs could not be read (exit code $LASTEXITCODE)."
+          }
           $domain = [string]$foundation.managedEnvironmentDefaultDomain.value
           $staticIp = [string]$foundation.managedEnvironmentInboundStaticIp.value
           $privateEndpointSubnetId = [string]$foundation.privateEndpointSubnetId.value
@@ -191,9 +194,15 @@ jobs:
           $identity = az identity show --subscription $env:EXPECTED_SUBSCRIPTION_ID `
             --resource-group $env:RESOURCE_GROUP --name $env:WORKBENCH_IDENTITY `
             --query '{name:name,clientId:clientId,principalId:principalId}' --output json --only-show-errors | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $null -eq $identity) {
+              throw "The approved workbench identity could not be read (exit code $LASTEXITCODE)."
+          }
           $postgresName = az postgres flexible-server show --subscription $env:EXPECTED_SUBSCRIPTION_ID `
             --resource-group $env:RESOURCE_GROUP --name $env:POSTGRES_SERVER `
             --query name --output tsv --only-show-errors
+          if ($LASTEXITCODE -ne 0) {
+              throw "The approved PostgreSQL server could not be read (exit code $LASTEXITCODE)."
+          }
           if ($identity.name -cne $env:WORKBENCH_IDENTITY -or
               $identity.clientId -cne 'f4492b02-ee64-4295-a1db-7c7677134e42' -or
               $identity.principalId -cne '595d3a27-a2a8-4ac4-b33d-98715cbcd684' -or
@@ -205,6 +214,9 @@ jobs:
           $publicImage = az containerapp show --subscription $env:EXPECTED_SUBSCRIPTION_ID `
             --resource-group $env:RESOURCE_GROUP --name $env:PUBLIC_WORKBENCH `
             --query properties.template.containers[0].image --output tsv --only-show-errors
+          if ($LASTEXITCODE -ne 0) {
+              throw "The public workbench image could not be read (exit code $LASTEXITCODE)."
+          }
           if ($publicImage -cne $manifest.baseImage) {
               throw 'The overlay base image is not the currently approved public workbench image.'
           }
@@ -212,6 +224,9 @@ jobs:
           $acrDigest = az acr manifest show-metadata --registry $env:REGISTRY `
             --name $manifest.image.Replace("$env:REGISTRY.azurecr.io/", '') `
             --query digest --output tsv --only-show-errors
+          if ($LASTEXITCODE -ne 0) {
+              throw "ACR overlay metadata could not be read (exit code $LASTEXITCODE)."
+          }
           if ($acrDigest -cne $digest) {
               throw 'ACR metadata does not contain the exact immutable overlay digest.'
           }
@@ -261,6 +276,9 @@ jobs:
                   throw 'apply requires a canonical preview_run_id.'
                 }
                 $previewRun = gh api "repos/$env:EXPECTED_REPOSITORY/actions/runs/$env:PREVIEW_RUN_ID" | ConvertFrom-Json
+                if ($LASTEXITCODE -ne 0 -or $null -eq $previewRun) {
+                  throw "The retained preview run could not be read (exit code $LASTEXITCODE)."
+                }
                 if ($previewRun.path -cne '.github/workflows/deploy-private-workbench.yml' -or
                   $previewRun.event -cne 'workflow_dispatch' -or $previewRun.status -cne 'completed' -or
                   $previewRun.conclusion -cne 'success' -or
@@ -272,6 +290,9 @@ jobs:
                 New-Item -ItemType Directory -Path $priorRoot | Out-Null
                 gh run download $env:PREVIEW_RUN_ID --repo $env:EXPECTED_REPOSITORY `
                 --name "private-workbench-preview-$env:REQUESTED_SHA-$env:PREVIEW_RUN_ID" --dir $priorRoot
+                if ($LASTEXITCODE -ne 0) {
+                  throw "The retained preview artifact could not be downloaded (exit code $LASTEXITCODE)."
+                }
                 $priorFiles = @(Get-ChildItem -LiteralPath $priorRoot -File)
                 if ($priorFiles.Count -ne 1 -or $priorFiles[0].Name -cne 'preview.json') {
                   throw 'The prior preview artifact must contain exactly preview.json.'
@@ -293,9 +314,10 @@ jobs:
           }
 
       - name: Retain redacted Stage 2 preview evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: private-workbench-preview-${{ inputs.commit_sha }}-${{ github.run_id }}
           path: ${{ runner.temp }}/stage2-evidence/preview.json
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30

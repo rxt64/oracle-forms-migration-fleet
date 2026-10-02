@@ -179,18 +179,35 @@ try {
             sandboxDatabaseName = @{ value = $SandboxDatabaseName }
         }
     }
-    $parameters | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $parameterPath -Encoding utf8NoBOM
+    New-Item -ItemType File -Path $parameterPath -Force | Out-Null
     $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-    & icacls.exe $parameterPath /setowner "*$currentSid" /inheritance:r /grant:r "*$currentSid`:(R,W)" | Out-Null
+    # icacls rejects /setowner combined with other ACL options, so ownership is a separate call.
+    & icacls.exe $parameterPath /setowner "*$currentSid" | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Could not take ownership of the temporary secure parameter file.'
+    }
+    & icacls.exe $parameterPath /inheritance:r /grant:r "*$currentSid`:(R,W)" | Out-Null
     if ($LASTEXITCODE -ne 0) {
         throw 'Could not restrict the temporary secure parameter file.'
     }
+    $parameters | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $parameterPath -Encoding utf8NoBOM
 
-    $resourceChanges = @(& az @commonArguments `
-        --query 'properties.changes[].{resourceId:resourceId,changeType:changeType,resourceType:after.type}' `
-        --parameters "@$parameterPath" | ConvertFrom-Json)
+    $whatIfOutput = (& az @commonArguments `
+        --query 'changes[].{resourceId:resourceId,changeType:changeType,resourceType:after.type}' `
+        --parameters "@$parameterPath" | Out-String)
     if ($LASTEXITCODE -ne 0) {
         throw 'Application what-if failed. Nothing was applied.'
+    }
+    if ([string]::IsNullOrWhiteSpace($whatIfOutput)) {
+        throw 'Application what-if returned no change list. Nothing was applied.'
+    }
+    $resourceChanges = @($whatIfOutput | ConvertFrom-Json | Where-Object { $null -ne $_ })
+    if (@($resourceChanges | Where-Object {
+            $_ -isnot [pscustomobject] -or
+            [string]::IsNullOrWhiteSpace([string]$_.PSObject.Properties['resourceId']?.Value) -or
+            [string]::IsNullOrWhiteSpace([string]$_.PSObject.Properties['changeType']?.Value)
+        }).Count -ne 0) {
+        throw 'Application what-if returned a malformed change entry. Nothing was applied.'
     }
 
     $expectedResourceIds = @(
@@ -208,7 +225,7 @@ try {
         "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Network/privateEndpoints/pe-ofmfleet-postgres-dev"
         "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Network/privateEndpoints/pe-ofmfleet-postgres-dev/privateDnsZoneGroups/default"
     ) | Sort-Object
-    $actualResourceIds = @($resourceChanges | ForEach-Object { $_.resourceId }) | Sort-Object
+    $actualResourceIds = @($resourceChanges | ForEach-Object { $_.resourceId } | Sort-Object)
     $unexpectedChange = $resourceChanges | Where-Object { $_.changeType -cne 'Create' } | Select-Object -First 1
     $resourceIdDifferences = @(Compare-Object -CaseSensitive $expectedResourceIds $actualResourceIds)
     if ($null -ne $unexpectedChange -or
