@@ -3,6 +3,27 @@
 This is the controlling delivery record. Small specs are implementation slices, not completion criteria.
 Export/fixture pilot and genuine native Forms 6i qualification are separate outcomes. Neither is complete.
 
+## Gateway Installation Retry: Succeeded
+
+Trusted main CI `36943306853` completed successfully for
+`73c5666ef39e792900c36555183f07f35aed043e`, including all four required checks and both
+release jobs. Approved installation retry `36945107616` completed successfully: the
+allowlisted guest result reports `installed` and `OFMSourceGateway` is `Running`.
+Managed Run Command cleanup succeeded. The installed bundle SHA-256 is
+`6a0d4b33592b2790cc57c2b687a6d70324dee3e59ae57f5b7d43b87fa809f6f6`.
+
+The public root certificate was recovered from that successful workflow's allowlisted
+result to `infra/source-gateway/trust/ofm-source-gateway-dev-root-2026.cer`. Its SHA-256
+is `f285dc714a836a0c3b34855e4eb7c17009c5ac48421b7ca4092252aee1f2a327`, matching the
+previously persisted root. Local validation confirmed its CA constraint, validity,
+expected thumbprint, and absence of a private key. Certificate publication and the
+trusted image overlay remain pending.
+
+Service installation is not native extraction or end-to-end gateway qualification.
+The private workbench and PostgreSQL endpoint remain undeployed; its sign-in callback
+still requires interactive lab-tenant access. No Oracle credential was provisioned,
+no migration DDL executed, no rows moved, and no migrated application verified.
+
 ## Status Vocabulary
 
 Implemented = code exists; Tested = scoped executable checks observed; Integrated = connected and
