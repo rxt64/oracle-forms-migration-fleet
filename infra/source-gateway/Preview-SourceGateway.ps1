@@ -42,6 +42,32 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Resolve-BicepExecutable {
+    $azureConfigDirectory = if ([string]::IsNullOrWhiteSpace($env:AZURE_CONFIG_DIR)) {
+        Join-Path $HOME '.azure'
+    } else {
+        $env:AZURE_CONFIG_DIR
+    }
+    $executable = Join-Path $azureConfigDirectory 'bin\bicep.exe'
+    if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
+        throw "The Azure CLI Bicep compiler was not found at $executable. The release workflow must install the pinned compiler first."
+    }
+    return $executable
+}
+
+function Invoke-BicepCompilation {
+    param(
+        [Parameter(Mandatory)] [string] $BicepExecutable,
+        [Parameter(Mandatory)] [string] $TemplatePath,
+        [Parameter(Mandatory)] [string] $OutputPath
+    )
+
+    & $BicepExecutable build $TemplatePath --outfile $OutputPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "Bicep compilation failed for $TemplatePath with exit code $LASTEXITCODE."
+    }
+}
+
 $expectedSubscriptionId = 'd4394e57-c076-4c92-a870-5de6bf44f255'
 $forbiddenDefaultSubscriptionId = '0832b3b6-22b3-4c47-8d8b-572054b97257'
 $expectedTenantId = '1984d248-06ca-4d04-a3b8-4c0c1577ab86'
@@ -71,16 +97,10 @@ if ($LASTEXITCODE -ne 0 -or $account.id -ne $expectedSubscriptionId -or $account
     throw 'Azure CLI authentication does not match the pinned lab subscription and tenant.'
 }
 
-$bicep = Join-Path $HOME '.azure\bin\bicep.exe'
-if (-not (Test-Path -LiteralPath $bicep -PathType Leaf)) {
-    throw "The Azure CLI Bicep compiler was not found at $bicep. Run 'az bicep install' outside this validation script first."
-}
+$bicep = Resolve-BicepExecutable
 $compiledTemplate = Join-Path ([IO.Path]::GetTempPath()) "ofm-source-gateway-$([guid]::NewGuid().ToString('N')).json"
 try {
-    & $bicep build $template --outfile $compiledTemplate
-    if ($LASTEXITCODE -ne 0) {
-        throw "Bicep compilation failed for $template."
-    }
+    Invoke-BicepCompilation -BicepExecutable $bicep -TemplatePath $template -OutputPath $compiledTemplate
 }
 finally {
     Remove-Item -LiteralPath $compiledTemplate -Force -ErrorAction SilentlyContinue

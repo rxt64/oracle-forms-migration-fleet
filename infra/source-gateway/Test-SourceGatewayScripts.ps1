@@ -315,6 +315,65 @@ $previewAst = [System.Management.Automation.Language.Parser]::ParseFile(
 if ($previewErrors.Count -ne 0) {
     throw "Preview script parsing failed: $($previewErrors.Message -join '; ')"
 }
+$compilerFunctions = @($previewAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -cin @('Resolve-BicepExecutable', 'Invoke-BicepCompilation')
+}, $true))
+if ($compilerFunctions.Count -ne 2) {
+    throw 'The preview Bicep compiler functions could not be loaded for runtime verification.'
+}
+$compilerFunctionsText = $compilerFunctions.Extent.Text -join "`n"
+& {
+    function Test-Path {
+        param([string] $LiteralPath, [object] $PathType)
+        return $LiteralPath -ceq (Join-Path $env:AZURE_CONFIG_DIR 'bin\bicep.exe')
+    }
+    . ([scriptblock]::Create($compilerFunctionsText))
+    $savedAzureConfigDirectory = $env:AZURE_CONFIG_DIR
+    try {
+        $env:AZURE_CONFIG_DIR = Join-Path ([IO.Path]::GetTempPath()) 'mock-azure-config'
+        $expectedBicep = Join-Path $env:AZURE_CONFIG_DIR 'bin\bicep.exe'
+        $resolvedBicep = Resolve-BicepExecutable
+        if ($resolvedBicep -cne $expectedBicep) {
+            throw 'The preview did not resolve Bicep from AZURE_CONFIG_DIR.'
+        }
+    }
+    finally {
+        $env:AZURE_CONFIG_DIR = $savedAzureConfigDirectory
+    }
+}
+$missingBicep = & {
+    function Test-Path { param([string] $LiteralPath, [object] $PathType); return $false }
+    . ([scriptblock]::Create($compilerFunctionsText))
+    try { Resolve-BicepExecutable; $null } catch { $_ }
+}
+if ($null -eq $missingBicep -or $missingBicep.Exception.Message -notmatch 'release workflow must install the pinned compiler') {
+    throw 'The preview accepted a missing Bicep compiler.'
+}
+$failedCompilation = & {
+    function mock-bicep { $global:LASTEXITCODE = 19 }
+    . ([scriptblock]::Create($compilerFunctionsText))
+    try {
+        Invoke-BicepCompilation -BicepExecutable 'mock-bicep' -TemplatePath 'mock.bicep' -OutputPath 'mock.json'
+        $null
+    } catch { $_ }
+}
+if ($null -eq $failedCompilation -or $failedCompilation.Exception.Message -ne
+    'Bicep compilation failed for mock.bicep with exit code 19.') {
+    throw 'The preview accepted a nonzero Bicep compiler exit code.'
+}
+$successfulCompilation = & {
+    function mock-bicep { $global:LASTEXITCODE = 0 }
+    . ([scriptblock]::Create($compilerFunctionsText))
+    try {
+        Invoke-BicepCompilation -BicepExecutable 'mock-bicep' -TemplatePath 'mock.bicep' -OutputPath 'mock.json'
+        return $true
+    } catch { return $false }
+}
+if (-not $successfulCompilation) {
+    throw 'The preview rejected a successful mocked Bicep compilation.'
+}
 $resourceDifferenceAssignment = $previewAst.Find({
     param($node)
     $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and

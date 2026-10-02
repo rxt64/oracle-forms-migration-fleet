@@ -248,7 +248,14 @@ public sealed class GeneratedTargetWorkflowTests
 
         IReadOnlyList<string> ciCommands = CommandsFor(job, "Verify exact current main commit and required CI");
         IReadOnlyList<string> imageCommands = CommandsFor(job, "Download and verify trusted overlay manifest");
+        IReadOnlyList<string> bicepCommands = CommandsFor(job, "Install pinned Bicep compiler");
         IReadOnlyList<string> commands = CommandsFor(job, "Verify bindings, preview, and optionally apply");
+        int login = job["steps"]!.Sequence.ToList().FindIndex(step =>
+            step["name"]?.Text == "Sign in to pinned Azure tenant and subscription");
+        int bicepInstall = job["steps"]!.Sequence.ToList().FindIndex(step =>
+            step["name"]?.Text == "Install pinned Bicep compiler");
+        int preview = job["steps"]!.Sequence.ToList().FindIndex(step =>
+            step["name"]?.Text == "Verify bindings, preview, and optionally apply");
         int firstPreview = commands.ToList().FindIndex(line =>
             line.Contains("Preview-SourceGateway.ps1 @arguments", StringComparison.Ordinal) &&
             !line.Contains("-Apply", StringComparison.Ordinal));
@@ -256,6 +263,10 @@ public sealed class GeneratedTargetWorkflowTests
             line.Contains("$prior.dispatchMode -cne 'preview'", StringComparison.Ordinal));
         int apply = commands.ToList().FindIndex(line =>
             line.Contains("Preview-SourceGateway.ps1 @arguments -Apply -Confirm:$false", StringComparison.Ordinal));
+        Assert.True(login >= 0 && login < bicepInstall && bicepInstall < preview);
+        Assert.Contains(bicepCommands, line => line.Contains("az bicep install --version $env:BICEP_VERSION", StringComparison.Ordinal));
+        Assert.Contains(bicepCommands, line => line.Contains("$actualVersion = az bicep version", StringComparison.Ordinal));
+        Assert.Equal("v0.37.4", job["steps"]!.Sequence[bicepInstall]["env"]!["BICEP_VERSION"]!.Text);
         Assert.True(firstPreview >= 0 && firstPreview < retainedPreviewCheck && retainedPreviewCheck < apply);
         Assert.Contains(commands, line => line.Contains("templateSha256 -cne $evidence.templateSha256", StringComparison.Ordinal));
         Assert.Contains(commands, line => line.Contains("publicBindingSha256 -cne $evidence.publicBindingSha256", StringComparison.Ordinal));
