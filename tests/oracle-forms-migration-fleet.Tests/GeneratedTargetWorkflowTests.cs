@@ -265,7 +265,7 @@ public sealed class GeneratedTargetWorkflowTests
             line.Contains("Preview-SourceGateway.ps1 @arguments -Apply -Confirm:$false", StringComparison.Ordinal));
         Assert.True(login >= 0 && login < bicepInstall && bicepInstall < preview);
         Assert.Contains(bicepCommands, line => line.Contains("az bicep install --version $env:BICEP_VERSION", StringComparison.Ordinal));
-        Assert.Contains(bicepCommands, line => line.Contains("$actualVersion = az bicep version", StringComparison.Ordinal));
+        Assert.Contains(bicepCommands, line => line.Contains("$actualVersion = (az bicep version 2>&1 | Out-String)", StringComparison.Ordinal));
         Assert.Equal("v0.37.4", job["steps"]!.Sequence[bicepInstall]["env"]!["BICEP_VERSION"]!.Text);
         Assert.True(firstPreview >= 0 && firstPreview < retainedPreviewCheck && retainedPreviewCheck < apply);
         Assert.Contains(commands, line => line.Contains("templateSha256 -cne $evidence.templateSha256", StringComparison.Ordinal));
