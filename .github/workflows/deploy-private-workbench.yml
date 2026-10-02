@@ -150,7 +150,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
               throw "Pinned Bicep installation failed with exit code $LASTEXITCODE."
           }
-          $actualVersion = az bicep version
+          $actualVersion = (az bicep version 2>&1 | Out-String)
           if ($LASTEXITCODE -ne 0) {
               throw "Bicep version verification failed with exit code $LASTEXITCODE."
           }
