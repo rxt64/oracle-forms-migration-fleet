@@ -225,13 +225,17 @@ try {
         "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Network/privateEndpoints/pe-ofmfleet-postgres-dev"
         "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Network/privateEndpoints/pe-ofmfleet-postgres-dev/privateDnsZoneGroups/default"
     ) | Sort-Object
-    $actualResourceIds = @($resourceChanges | ForEach-Object { $_.resourceId } | Sort-Object)
-    $unexpectedChange = $resourceChanges | Where-Object { $_.changeType -cne 'Create' } | Select-Object -First 1
+    # Ignore = existing resource-group resources outside this template; incremental deployment leaves them untouched.
+    $actionableChanges = @($resourceChanges | Where-Object { $_.changeType -cnotin @('Ignore', 'NoChange') })
+    $actualResourceIds = @($actionableChanges | ForEach-Object { $_.resourceId } | Sort-Object)
+    $unexpectedChange = $actionableChanges | Where-Object { $_.changeType -cne 'Create' } | Select-Object -First 1
     $resourceIdDifferences = @(Compare-Object -CaseSensitive $expectedResourceIds $actualResourceIds)
     if ($null -ne $unexpectedChange -or
         $resourceIdDifferences.Count -ne 0) {
         $counts = $resourceChanges | Group-Object changeType | Sort-Object Name | ForEach-Object { "$($_.Name)=$($_.Count)" }
-        throw "Application what-if exceeded the approved create-only scope. Change counts: $($counts -join ', '). Nothing was applied."
+        $offending = @($actionableChanges | Where-Object { $_.changeType -cne 'Create' } | ForEach-Object { "$($_.changeType) $($_.resourceId)" }) +
+            @($resourceIdDifferences | ForEach-Object { "$(if ($_.SideIndicator -eq '<=') { 'Missing' } else { 'Unexpected' }) $($_.InputObject)" })
+        throw "Application what-if exceeded the approved create-only scope. Change counts: $($counts -join ', '). Differences: $($offending -join '; '). Nothing was applied."
     }
 
     $publicBindings = [ordered]@{
@@ -254,7 +258,7 @@ try {
     $bindingSha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
         [Text.Encoding]::UTF8.GetBytes($bindingJson))).ToLowerInvariant()
     $templateSha256 = (Get-FileHash -LiteralPath $template -Algorithm SHA256).Hash.ToLowerInvariant()
-    $changes = @($resourceChanges | Sort-Object resourceId | ForEach-Object {
+    $changes = @($actionableChanges | Sort-Object resourceId | ForEach-Object {
         [ordered]@{
             resourceId = $_.resourceId
             changeType = $_.changeType
@@ -270,7 +274,11 @@ try {
         templateSha256 = $templateSha256
         publicBindingSha256 = $bindingSha256
         publicBindings = $publicBindings
-        changeCounts = [ordered]@{ Create = $resourceChanges.Count }
+        changeCounts = [ordered]@{
+            Create = $actionableChanges.Count
+            Ignore = @($resourceChanges | Where-Object { $_.changeType -ceq 'Ignore' }).Count
+            NoChange = @($resourceChanges | Where-Object { $_.changeType -ceq 'NoChange' }).Count
+        }
         changes = $changes
         whatIfSucceeded = $true
     }

@@ -429,34 +429,47 @@ $successfulCompilation = & {
 if (-not $successfulCompilation) {
     throw 'The preview rejected a successful mocked Bicep compilation.'
 }
-$resourceDifferenceAssignment = $previewAst.Find({
+$resourceScopeAssignments = @($previewAst.FindAll({
     param($node)
     $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
-        $node.Left.Extent.Text -ceq '$resourceIdDifferences'
-}, $true)
+        $node.Left.Extent.Text -cin @('$actionableChanges', '$actualResourceIds', '$unexpectedChange', '$resourceIdDifferences')
+}, $true) | Sort-Object { $_.Extent.StartOffset })
 $resourceScopeGuard = $previewAst.Find({
     param($node)
     $node -is [System.Management.Automation.Language.IfStatementAst] -and
         $node.Clauses[0].Item1.Extent.Text -match '\$resourceIdDifferences\.Count'
 }, $true)
-if ($null -eq $resourceDifferenceAssignment -or $null -eq $resourceScopeGuard) {
+if ($resourceScopeAssignments.Count -ne 4 -or $null -eq $resourceScopeGuard) {
     throw 'The preview resource-scope comparison could not be loaded for runtime verification.'
 }
 $resourceScopeCheck = [scriptblock]::Create(
-    "$($resourceDifferenceAssignment.Extent.Text)`n$($resourceScopeGuard.Extent.Text)")
+    "$(($resourceScopeAssignments | ForEach-Object { $_.Extent.Text }) -join "`n")`n$($resourceScopeGuard.Extent.Text)")
 $expectedResourceIds = @('/resource/a', '/resource/b')
-$actualResourceIds = @('/resource/a', '/resource/b')
+function New-WhatIfChange([string] $Id, [string] $Type) { [pscustomobject]@{ resourceId = $Id; changeType = $Type } }
 $resourceChanges = @(
-    [pscustomobject]@{ resourceId = '/resource/a'; changeType = 'Create' }
-    [pscustomobject]@{ resourceId = '/resource/b'; changeType = 'Create' }
+    New-WhatIfChange '/resource/a' 'Create'
+    New-WhatIfChange '/resource/b' 'Create'
+    New-WhatIfChange '/resource/existing-vm' 'Ignore'
+    New-WhatIfChange '/resource/existing-server' 'NoChange'
 )
-$unexpectedChange = $null
-& $resourceScopeCheck
-$actualResourceIds = @('/resource/a', '/resource/c')
-$scopeRejection = try { & $resourceScopeCheck; $null } catch { $_ }
-if ($null -eq $scopeRejection -or
-    $scopeRejection.Exception.Message -notmatch 'exceeded the approved create-only scope') {
-    throw 'The preview resource-scope comparison accepted differing resource IDs.'
+. $resourceScopeCheck
+if ($actionableChanges.Count -ne 2) {
+    throw 'The preview did not exclude Ignore and NoChange entries from the actionable change set.'
+}
+foreach ($rejectedCase in @(
+        @(New-WhatIfChange '/resource/a' 'Create'; New-WhatIfChange '/resource/b' 'Modify'),
+        @(New-WhatIfChange '/resource/a' 'Create'; New-WhatIfChange '/resource/b' 'Create'; New-WhatIfChange '/resource/existing-vm' 'Delete'),
+        @(New-WhatIfChange '/resource/a' 'Create'; New-WhatIfChange '/resource/b' 'Ignore'),
+        @(New-WhatIfChange '/resource/a' 'Create'; New-WhatIfChange '/resource/b' 'NoChange'),
+        @(New-WhatIfChange '/resource/a' 'Create'; New-WhatIfChange '/resource/b' 'Deploy'),
+        @(New-WhatIfChange '/resource/a' 'Create'; New-WhatIfChange '/resource/b' 'Unsupported'),
+        @(New-WhatIfChange '/resource/a' 'Create'; New-WhatIfChange '/resource/c' 'Create'))) {
+    $resourceChanges = $rejectedCase
+    $scopeRejection = try { & $resourceScopeCheck; $null } catch { $_ }
+    if ($null -eq $scopeRejection -or
+        $scopeRejection.Exception.Message -notmatch 'exceeded the approved create-only scope') {
+        throw "The preview resource-scope comparison accepted: $(($rejectedCase | ForEach-Object { "$($_.changeType) $($_.resourceId)" }) -join ', ')"
+    }
 }
 
 $installWorkflow = Get-Content -LiteralPath (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) '.github/workflows/install-source-gateway.yml') -Raw
