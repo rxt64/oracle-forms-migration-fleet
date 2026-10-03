@@ -538,7 +538,7 @@ if ($credentialScript -notmatch '\$accountProvisioned = \$true' -or
     throw 'The credential host script must relock only after provisioning proved tooling ownership.'
 }
 
-$transferTestRoot = Join-Path $env:TEMP "ofm-transfer-cleanup-test-$([guid]::NewGuid().ToString('N'))"
+$transferTestRoot = Join-Path ([IO.Path]::GetTempPath()) "ofm-transfer-cleanup-test-$([guid]::NewGuid().ToString('N'))"
 try {
     [void](New-Item -ItemType Directory -Path $transferTestRoot)
     $transferId = '0123456789abcdef0123456789abcdef'
