@@ -257,6 +257,421 @@ if ($completion -notmatch 'certificateCleanupRequired = \$true' -or
     $completion -notmatch 'if \(\$null -ne \$operationError\) \{ throw \$operationError \}') {
     throw 'The privileged scheduling leg must check certificate and private-key cleanup before reporting success.'
 }
+
+Import-Module (Join-Path $PSScriptRoot 'SourceGatewayCredentialTransfer.psm1') -Force
+$testRsa = [Security.Cryptography.RSA]::Create(2048)
+$testCertificate = $null
+$testPublicCertificate = $null
+$testPlaintext = [Text.Encoding]::UTF8.GetBytes('offline-transfer-round-trip')
+$testCiphertext = $null
+$testDecrypted = $null
+try {
+    $testRequest = [Security.Cryptography.X509Certificates.CertificateRequest]::new(
+        'CN=OFM Offline Transfer Test', $testRsa,
+        [Security.Cryptography.HashAlgorithmName]::SHA256,
+        [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+    $testCertificate = $testRequest.CreateSelfSigned([DateTimeOffset]::UtcNow.AddMinutes(-1), [DateTimeOffset]::UtcNow.AddHours(1))
+    $testPublicCertificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new(
+        $testCertificate.Export([Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+    $testCiphertext = Protect-SourceGatewayCredentialBytes -Certificate $testPublicCertificate -Plaintext $testPlaintext
+    $testDecrypted = $testRsa.Decrypt($testCiphertext, [Security.Cryptography.RSAEncryptionPadding]::OaepSHA256)
+    if ($testCiphertext -isnot [byte[]] -or
+        [Text.Encoding]::UTF8.GetString($testDecrypted) -cne 'offline-transfer-round-trip') {
+        throw 'The shared credential transfer helper did not preserve an OAEP-SHA256 byte-array round trip.'
+    }
+}
+finally {
+    if ($null -ne $testDecrypted) { [Array]::Clear($testDecrypted, 0, $testDecrypted.Length) }
+    if ($null -ne $testCiphertext) { [Array]::Clear($testCiphertext, 0, $testCiphertext.Length) }
+    [Array]::Clear($testPlaintext, 0, $testPlaintext.Length)
+    if ($null -ne $testPublicCertificate) { $testPublicCertificate.Dispose() }
+    if ($null -ne $testCertificate) { $testCertificate.Dispose() }
+    $testRsa.Dispose()
+}
+
+$passwords = @(1..500 | ForEach-Object { New-SourceGatewayOraclePassword })
+if (@($passwords | Where-Object { $_ -cnotmatch '^[A-Za-z][A-Za-z0-9]{29}$' }).Count -ne 0 -or
+    @($passwords | Sort-Object -Unique).Count -le 1) {
+    throw 'The Oracle password generator violated the 30-character letter-first alphanumeric contract.'
+}
+$windowsPowerShell = if ($IsWindows -and $env:SystemRoot) {
+    Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+}
+if ($windowsPowerShell -and (Test-Path -LiteralPath $windowsPowerShell -PathType Leaf)) {
+    $modulePath = (Join-Path $PSScriptRoot 'SourceGatewayCredentialTransfer.psm1').Replace("'", "''")
+    $windowsPassword = & $windowsPowerShell -NoProfile -NonInteractive -Command `
+        "Import-Module '$modulePath' -Force; New-SourceGatewayOraclePassword" 2>&1
+    if ($LASTEXITCODE -ne 0 -or [string]$windowsPassword -cnotmatch '^[A-Za-z][A-Za-z0-9]{29}$') {
+        throw 'The Oracle password generator did not execute under Windows PowerShell 5.1.'
+    }
+}
+
+$knownPassword = 'Abc123456789012345678901234567'
+$provisioningSql = New-SourceGatewayOracleProvisioningSql
+$allProvisioningSql = $provisioningSql.BootstrapSql + "`n" + $provisioningSql.ReconciliationSql
+$dictionaryViews = @(
+    'DBA_OBJECTS', 'DBA_TABLES', 'DBA_TAB_COLUMNS', 'DBA_CONSTRAINTS', 'DBA_CONS_COLUMNS',
+    'DBA_SEQUENCES', 'DBA_SOURCE', 'DBA_INDEXES', 'DBA_IND_COLUMNS', 'DBA_TAB_PRIVS',
+    'DBA_COL_PRIVS', 'DBA_TRIGGERS', 'DBA_DEPENDENCIES'
+)
+foreach ($requiredSql in @(
+        'create profile OFM_GATEWAY_TOOLING',
+        'profile OFM_GATEWAY_TOOLING',
+        'create user OFM_GATEWAY_RO identified externally',
+        'account lock',
+        "where grantee = 'OFM_GATEWAY_RO'",
+        'create role OFM_GATEWAY_SOURCE_RO',
+        'grant create session to OFM_GATEWAY_RO',
+        'grant select on SYS.',
+        "object_type = 'TABLE'",
+        'grant select on MERIDIAN.',
+        'grant OFM_GATEWAY_SOURCE_RO to OFM_GATEWAY_RO',
+        'from dba_sys_privs',
+        'from dba_role_privs',
+        'from dba_tab_privs',
+        'from dba_col_privs',
+        'from dba_policies',
+        'from dba_audit_policies',
+        'from v$pwfile_users',
+        'from proxy_users',
+        'connect by prior granted_role = grantee',
+        'DBA_DEPENDENCIES',
+        'Final OFM gateway privileges do not exactly match the read-only contract')) {
+    if ($allProvisioningSql -cnotmatch [regex]::Escape($requiredSql)) {
+        throw "Oracle provisioning SQL is missing '$requiredSql'."
+    }
+}
+foreach ($dictionaryView in $dictionaryViews) {
+    if ($provisioningSql.ReconciliationSql -cnotmatch
+        [regex]::Escape("grant select on SYS.$dictionaryView to OFM_GATEWAY_SOURCE_RO")) {
+        throw "Oracle provisioning SQL does not directly grant the required SYS.$dictionaryView view."
+    }
+}
+foreach ($adoptionGuard in @(
+        "owner in ('OFM_GATEWAY_RO', 'OFM_GATEWAY_SOURCE_RO')",
+        "username in ('OFM_GATEWAY_RO', 'OFM_GATEWAY_SOURCE_RO')",
+        "proxy in ('OFM_GATEWAY_RO', 'OFM_GATEWAY_SOURCE_RO')",
+        "client in ('OFM_GATEWAY_RO', 'OFM_GATEWAY_SOURCE_RO')",
+        "profile = 'OFM_GATEWAY_TOOLING' and username <> 'OFM_GATEWAY_RO'",
+        "(grantee = 'SYS' and admin_option = 'YES')")) {
+    if ($provisioningSql.BootstrapSql -cnotmatch [regex]::Escape($adoptionGuard)) {
+        throw "Oracle foreign-account adoption is missing '$adoptionGuard'."
+    }
+}
+if ($provisioningSql.ReconciliationSql -cnotmatch
+    [regex]::Escape("from dba_policies where object_owner = 'MERIDIAN'") -or
+    $provisioningSql.ReconciliationSql -cnotmatch
+    [regex]::Escape("from dba_audit_policies where object_schema = 'MERIDIAN'") -or
+    $provisioningSql.ReconciliationSql -cnotmatch [regex]::Escape("object_type = 'TABLE'") -or
+    $provisioningSql.ReconciliationSql -match [regex]::Escape("object_type = 'VIEW'")) {
+    throw 'Oracle grants must fail on MERIDIAN VPD/FGA policies and cover MERIDIAN tables only.'
+}
+if ($provisioningSql.BootstrapSql -cnotmatch [regex]::Escape("(grantee = 'SYS' and admin_option = 'YES')") -or
+    $provisioningSql.ReconciliationSql -cnotmatch [regex]::Escape("(grantee = 'SYS' and admin_option = 'YES')") -or
+    $provisioningSql.ReconciliationSql -cnotmatch
+        [regex]::Escape("where grantee = 'SYS' and granted_role = 'OFM_GATEWAY_SOURCE_RO' and admin_option = 'YES'") -or
+    $provisioningSql.ReconciliationSql -match 'grantee\s*<>\s*''OFM_GATEWAY_RO''') {
+    throw 'Oracle 9i role reconciliation must accept only the automatic SYS creator grant with ADMIN OPTION.'
+}
+if ($provisioningSql.ReconciliationSql.IndexOf('from dba_audit_policies') -gt
+    $provisioningSql.ReconciliationSql.IndexOf("grant create session to OFM_GATEWAY_RO")) {
+    throw 'FGA policy refusal must run before the first privilege grant.'
+}
+if ($provisioningSql.ReconciliationSql -match 'account unlock' -or
+    $provisioningSql.UnlockSql -cnotmatch 'alter user OFM_GATEWAY_RO account unlock' -or
+    $provisioningSql.LockSql -cnotmatch "account_status = 'LOCKED'") {
+    throw 'The Oracle account must remain locked through reconciliation and use separate verified unlock/relock stages.'
+}
+foreach ($forbiddenSql in @(
+        $knownPassword,
+        'SELECT_CATALOG_ROLE',
+        'SELECT ANY',
+        'EXECUTE ANY',
+        'GRANT DBA',
+        'grant execute on MERIDIAN.',
+        "object_type in ('TABLE', 'VIEW')",
+        "object_type in ('TABLE', 'SEQUENCE')")) {
+    if ($allProvisioningSql -match [regex]::Escape($forbiddenSql)) {
+        throw "Oracle provisioning SQL contains forbidden broad privilege '$forbiddenSql'."
+    }
+}
+$actualGrantContract = @(Get-SourceGatewayOracleGrantContract)
+$expectedGrantContract = @(
+    'CREATE SESSION',
+    'OFM_GATEWAY_SOURCE_RO',
+    'SELECT ON MERIDIAN TABLES',
+    'SELECT ON 13 SYS DBA DICTIONARY VIEWS'
+)
+if (($actualGrantContract -join "`n") -cne ($expectedGrantContract -join "`n")) {
+    throw 'The reported Oracle grant contract changed from the exact least-privilege allowlist.'
+}
+
+$script:capturedSqlPlusStartInfo = $null
+$script:capturedSqlPlusLines = [Collections.Generic.List[string]]::new()
+$script:mockSqlPlusOutputs = [Collections.Generic.Queue[string]]::new()
+function New-MockSqlPlusProcess([string] $Output, [int] $ExitCode = 0) {
+    $mockInput = [pscustomobject]@{}
+    $mockInput | Add-Member ScriptMethod WriteLine { param($value) $script:capturedSqlPlusLines.Add([string]$value) }
+    $mockInput | Add-Member ScriptMethod Close { }
+    $outputReader = [pscustomobject]@{ Value = $Output }
+    $outputReader | Add-Member ScriptMethod ReadToEndAsync { [Threading.Tasks.Task[string]]::FromResult([string]$this.Value) }
+    $errorReader = [pscustomobject]@{ Value = '' }
+    $errorReader | Add-Member ScriptMethod ReadToEndAsync { [Threading.Tasks.Task[string]]::FromResult([string]$this.Value) }
+    $mockProcess = [pscustomobject]@{
+        StandardInput = $mockInput
+        StandardOutput = $outputReader
+        StandardError = $errorReader
+        ExitCode = $ExitCode
+    }
+    $mockProcess | Add-Member ScriptMethod WaitForExit { param($milliseconds) return $true }
+    $mockProcess | Add-Member ScriptMethod Kill { }
+    $mockProcess | Add-Member ScriptMethod Dispose { }
+    return $mockProcess
+}
+@(
+    'OFM_STAGE_BOOTSTRAP_OK',
+    'OFM_STAGE_RELOCK_OK',
+    'OFM_STAGE_PASSWORD_OK',
+    'OFM_STAGE_RECONCILIATION_OK',
+    'OFM_STAGE_UNLOCK_OK',
+    "OFM_LOGIN_OK:OFM_GATEWAY_RO`nOFM_STAGE_LOGIN_OK"
+) | ForEach-Object { $script:mockSqlPlusOutputs.Enqueue($_) }
+Invoke-SourceGatewaySqlPlus -SqlPlusPath 'mock-sqlplus' -ProvisioningSql $provisioningSql `
+    -Password $knownPassword -ProcessFactory {
+    param($startInfo)
+    $script:capturedSqlPlusStartInfo = $startInfo
+    return New-MockSqlPlusProcess -Output $script:mockSqlPlusOutputs.Dequeue()
+}
+$passwordAnswerIndexes = @(for ($index = 0; $index -lt $script:capturedSqlPlusLines.Count; $index++) {
+        if ($script:capturedSqlPlusLines[$index] -ceq $knownPassword) { $index }
+    })
+$nonAnswerInput = @($script:capturedSqlPlusLines | Where-Object { $_ -cne $knownPassword }) -join "`n"
+if ($script:capturedSqlPlusStartInfo.Arguments -cne '-S /nolog' -or
+    $script:capturedSqlPlusStartInfo.Arguments -match [regex]::Escape($knownPassword) -or
+    $passwordAnswerIndexes.Count -ne 3 -or
+    $passwordAnswerIndexes[1] -ne ($passwordAnswerIndexes[0] + 1) -or
+    $nonAnswerInput -match [regex]::Escape($knownPassword) -or
+    $script:capturedSqlPlusLines[$passwordAnswerIndexes[0] - 1] -cne 'password OFM_GATEWAY_RO' -or
+    $script:capturedSqlPlusLines[$passwordAnswerIndexes[2] - 2] -cne 'connect' -or
+    $script:capturedSqlPlusLines[$passwordAnswerIndexes[2] - 1] -cne 'OFM_GATEWAY_RO') {
+    throw 'SQL*Plus provisioning did not keep the generated password exclusively in redirected prompt answers.'
+}
+if ($script:capturedSqlPlusLines.IndexOf([string]$provisioningSql.ReconciliationSql) -gt
+    $script:capturedSqlPlusLines.IndexOf([string]$provisioningSql.UnlockSql)) {
+    throw 'SQL*Plus unlocked the Oracle account before final privilege reconciliation passed.'
+}
+$bootstrapIndex = $script:capturedSqlPlusLines.IndexOf([string]$provisioningSql.BootstrapSql)
+$preRotationLockIndex = $script:capturedSqlPlusLines.IndexOf([string]$provisioningSql.LockSql)
+if ($bootstrapIndex -lt 0 -or $preRotationLockIndex -le $bootstrapIndex -or
+    $preRotationLockIndex -ge $passwordAnswerIndexes[0]) {
+    throw 'An adopted Oracle account was not locked and verified before password rotation.'
+}
+
+$failureCases = @(
+    [pscustomobject]@{
+        Prefix = @('OFM_STAGE_BOOTSTRAP_OK')
+        Output = ''
+        ExpectedCodes = @()
+    },
+    [pscustomobject]@{
+        Prefix = @('OFM_STAGE_BOOTSTRAP_OK', 'OFM_STAGE_RELOCK_OK')
+        Output = 'ORA-20006: sensitive text must not escape'
+        ExpectedCodes = @('ORA-20006')
+    },
+    [pscustomobject]@{
+        Prefix = @('OFM_STAGE_BOOTSTRAP_OK', 'OFM_STAGE_RELOCK_OK', 'OFM_STAGE_PASSWORD_OK',
+            'OFM_STAGE_RECONCILIATION_OK', 'OFM_STAGE_UNLOCK_OK')
+        Output = "ORA-01017: sensitive text must not escape`nSP2-0306: sensitive text must not escape"
+        ExpectedCodes = @('ORA-01017', 'SP2-0306')
+    }
+)
+foreach ($failureCase in $failureCases) {
+    $script:capturedSqlPlusLines.Clear()
+    $script:mockSqlPlusOutputs.Clear()
+    foreach ($prefixOutput in $failureCase.Prefix) { $script:mockSqlPlusOutputs.Enqueue($prefixOutput) }
+    $script:mockSqlPlusOutputs.Enqueue($failureCase.Output)
+    $script:mockSqlPlusOutputs.Enqueue('OFM_STAGE_RELOCK_OK')
+    $failure = try {
+        Invoke-SourceGatewaySqlPlus -SqlPlusPath 'mock-sqlplus' -ProvisioningSql $provisioningSql `
+            -Password $knownPassword -ProcessFactory {
+            param($startInfo)
+            return New-MockSqlPlusProcess -Output $script:mockSqlPlusOutputs.Dequeue()
+        }
+        $null
+    }
+    catch { $_ }
+    if ($null -eq $failure -or
+        $script:capturedSqlPlusLines -cnotcontains [string]$provisioningSql.LockSql -or
+        $failure.Exception.Message -match 'sensitive text must not escape') {
+        throw 'SQL*Plus marker/error refusal did not fail closed, sanitize output, and verify account relock.'
+    }
+    foreach ($expectedCode in $failureCase.ExpectedCodes) {
+        if ($failure.Exception.Message -notmatch [regex]::Escape($expectedCode)) {
+            throw "SQL*Plus refusal did not report observed error code '$expectedCode'."
+        }
+    }
+}
+
+foreach ($bootstrapRejection in @('ORA-20002: Existing OFM gateway principals are not tooling-owned.', '')) {
+    $script:capturedSqlPlusLines.Clear()
+    $script:mockSqlPlusOutputs.Clear()
+    $script:mockSqlPlusOutputs.Enqueue($bootstrapRejection)
+    $script:mockSqlPlusOutputs.Enqueue('OFM_STAGE_RELOCK_OK')
+    $failure = try {
+        Invoke-SourceGatewaySqlPlus -SqlPlusPath 'mock-sqlplus' -ProvisioningSql $provisioningSql `
+            -Password $knownPassword -ProcessFactory {
+            param($startInfo)
+            return New-MockSqlPlusProcess -Output $script:mockSqlPlusOutputs.Dequeue()
+        }
+        $null
+    }
+    catch { $_ }
+    if ($null -eq $failure -or
+        $script:capturedSqlPlusLines -ccontains [string]$provisioningSql.LockSql -or
+        $script:mockSqlPlusOutputs.Count -ne 1) {
+        throw 'A bootstrap rejection mutated an Oracle account whose tooling ownership was not proven.'
+    }
+}
+$credentialScript = Get-Content -LiteralPath (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'infra/source-lab/forms6i/New-SourceGatewayOracleCredential.ps1') -Raw
+if ($credentialScript -notmatch '\$accountProvisioned = \$true' -or
+    $credentialScript -notmatch 'if \(-not \$completed -and \$accountProvisioned -and') {
+    throw 'The credential host script must relock only after provisioning proved tooling ownership.'
+}
+
+$transferTestRoot = Join-Path $env:TEMP "ofm-transfer-cleanup-test-$([guid]::NewGuid().ToString('N'))"
+try {
+    [void](New-Item -ItemType Directory -Path $transferTestRoot)
+    $transferId = '0123456789abcdef0123456789abcdef'
+    $corruptedMetadata = Join-Path $transferTestRoot "credential-transfer-$transferId.json"
+    Set-Content -LiteralPath $corruptedMetadata -Value '{not-json' -Encoding utf8
+    if ($null -ne (Read-SourceGatewayTransferMetadata -TransferId $transferId `
+            -MetadataPath $corruptedMetadata).PrivateKeyName) {
+        throw 'Corrupted transfer metadata unexpectedly supplied a private-key binding.'
+    }
+    Set-Content -LiteralPath $corruptedMetadata -Value '{"transferId":"0123456789abcdef0123456789abcdef"}' -Encoding utf8
+    if ($null -ne (Read-SourceGatewayTransferMetadata -TransferId $transferId `
+            -MetadataPath $corruptedMetadata).PrivateKeyName) {
+        throw 'Partial transfer metadata unexpectedly supplied a private-key binding.'
+    }
+    $bound = [pscustomobject]@{ Subject = "CN=OFM Source Gateway Credential Transfer $transferId"; FriendlyName = ''; Name = 'bound' }
+    $friendlyBound = [pscustomobject]@{ Subject = 'CN=unrelated'; FriendlyName = "OFM Source Gateway Credential Transfer $transferId"; Name = 'friendly' }
+    $unrelated = [pscustomobject]@{ Subject = 'CN=unrelated'; FriendlyName = ''; Name = 'unrelated' }
+    $resolved = @(Get-SourceGatewayTransferCertificates -TransferId $transferId `
+        -Certificates @($bound, $friendlyBound, $unrelated))
+    if (($resolved.Name -join ',') -cne 'bound,friendly') {
+        throw 'Transfer cleanup did not discover certificates independently from the GUID binding.'
+    }
+}
+finally {
+    Remove-Item -LiteralPath $transferTestRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+$result = New-SourceGatewayOracleCredentialResult -Dsn 'OFM_GATEWAY_ORACLE9I' `
+    -CiphertextBase64 'AA==' -CiphertextSha256 ('a' * 64) -CertificateThumbprint ('B' * 40)
+$resultJson = $result | ConvertTo-Json -Compress
+$parsedResult = $resultJson | ConvertFrom-Json
+$expectedResultKeys = @(
+    'schemaVersion', 'status', 'username', 'roleName', 'schema', 'dsn', 'grants',
+    'ciphertextBase64', 'ciphertextSha256', 'certificateThumbprint'
+)
+$actualResultKeys = @($parsedResult.PSObject.Properties.Name | Sort-Object)
+$sortedExpectedResultKeys = @($expectedResultKeys | Sort-Object)
+if (($actualResultKeys -join "`n") -cne ($sortedExpectedResultKeys -join "`n") -or
+    $resultJson -match [regex]::Escape($knownPassword) -or $parsedResult.username -cne 'OFM_GATEWAY_RO') {
+    throw 'The Oracle guest result does not match the exact nonsecret JSON allowlist.'
+}
+
+$oracleGuestPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'source-lab/forms6i/New-SourceGatewayOracleCredential.ps1'
+$oracleGuestTokens = $null
+$oracleGuestErrors = $null
+[void][System.Management.Automation.Language.Parser]::ParseFile(
+    $oracleGuestPath, [ref]$oracleGuestTokens, [ref]$oracleGuestErrors)
+if ($oracleGuestErrors.Count -ne 0) {
+    throw "Oracle credential guest script parsing failed: $($oracleGuestErrors.Message -join '; ')"
+}
+$oracleGuest = Get-Content -LiteralPath $oracleGuestPath -Raw
+if ($oracleGuest -match 'Start-Transcript|Write-Host|Write-Verbose' -or
+    $oracleGuest -notmatch 'Invoke-SourceGatewaySqlPlus' -or
+    $oracleGuest -notmatch '-ProvisioningSql \$sql -Password \$password' -or
+    $oracleGuest -notmatch 'Protect-SourceGatewayCredentialBytes') {
+    throw 'The Oracle guest script must use stdin-only SQL*Plus and the shared OAEP-SHA256 transfer helper without transcript output.'
+}
+
+$oracleBootstrapPath = Join-Path $PSScriptRoot 'Invoke-SourceGatewayOracleCredentialProvision.ps1'
+$oracleBootstrapTokens = $null
+$oracleBootstrapErrors = $null
+[void][System.Management.Automation.Language.Parser]::ParseFile(
+    $oracleBootstrapPath, [ref]$oracleBootstrapTokens, [ref]$oracleBootstrapErrors)
+if ($oracleBootstrapErrors.Count -ne 0) {
+    throw "Oracle credential bootstrap parsing failed: $($oracleBootstrapErrors.Message -join '; ')"
+}
+$oracleBootstrap = Get-Content -LiteralPath $oracleBootstrapPath -Raw
+foreach ($requiredBootstrapContract in @(
+        'HKLM:\SOFTWARE\WOW6432Node\ODBC\ODBC.INI\ODBC Data Sources',
+        "StartsWith('C:\orant\'",
+        'Complete-SourceGatewayCredentialTransfer.ps1',
+        'OFM_GATEWAY_ORACLE_MERIDIAN_RO.dpapi',
+        'oracleConnectionRegistered = $true',
+        "if (`$Operation -eq 'CleanupTransferKey')",
+        'privateKeyName',
+        'Remove-TransferCertificateAndKey',
+        '[Security.Cryptography.CngKey]::Open(',
+        'Remove-BoundTransferMaterial -Id $TransferId',
+        'catch {',
+        'Transfer-key creation requires the runner-generated transfer identifier.',
+        'CN=OFM Source Gateway Credential Transfer $TransferId',
+        'Get-ChildItem -LiteralPath $transferRoot -Filter "credential-transfer-$TransferId.*"')) {
+    if ($oracleBootstrap -cnotmatch [regex]::Escape($requiredBootstrapContract)) {
+        throw "Oracle credential bootstrap is missing '$requiredBootstrapContract'."
+    }
+}
+$newTransferKeyBranch = $oracleBootstrap.Substring($oracleBootstrap.IndexOf("if (`$Operation -eq 'NewTransferKey')"))
+$createTransferCertificate = $newTransferKeyBranch.IndexOf('$certificate = New-SelfSignedCertificate')
+$cleanupAfterCreationFailure = $newTransferKeyBranch.IndexOf('Remove-BoundTransferMaterial -Id $TransferId')
+if ($createTransferCertificate -lt 0 -or $cleanupAfterCreationFailure -lt 0 -or
+    $createTransferCertificate -gt $cleanupAfterCreationFailure) {
+    throw 'Runner-bound transfer-key creation does not clean certificate and CNG material on failure.'
+}
+
+$oracleWorkflowPath = Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) '.github/workflows/provision-source-gateway-oracle-credential.yml'
+$oracleWorkflow = Get-Content -LiteralPath $oracleWorkflowPath -Raw
+foreach ($requiredWorkflowContract in @(
+        'id-token: write',
+        'vm-ofm-forms6i-j6mrrerz',
+        'vm-ofm-oracle9i-j6mrrerz',
+        'az vm run-command create',
+        'az vm run-command delete',
+        'ValidatePrerequisites',
+        'CleanupTransferKey',
+        'PublicCertificateBase64=$PUBLIC_CERTIFICATE',
+        'CiphertextBase64=$CIPHERTEXT',
+        'transfer-key-removed',
+        'Generate transfer identifier before key creation',
+        'Remove transfer certificate and CNG key',
+        'Delete managed Run Commands',
+        'if: always()',
+        'SELECT ON MERIDIAN TABLES',
+        'SELECT ON 13 SYS DBA DICTIONARY VIEWS',
+        'Compile every embedded Python block before mutation',
+        "value['certificateThumbprint'].upper() != sys.argv[3].upper()",
+        "value['oracleConnectionRegistered'] is not True")) {
+    if ($oracleWorkflow -cnotmatch [regex]::Escape($requiredWorkflowContract)) {
+        throw "Oracle credential workflow is missing '$requiredWorkflowContract'."
+    }
+}
+if ($oracleWorkflow -match '(?i)(Password|Pwd)=\$') {
+    throw 'The Oracle credential workflow passes plaintext credential material as a Run Command parameter.'
+}
+if ($oracleWorkflow -match 'SELECT_CATALOG_ROLE|SELECT ON MERIDIAN TABLES AND VIEWS' -or
+    $oracleWorkflow -match 'CleanupTransferKey.+TransferCertificateThumbprint' -or
+    $oracleWorkflow.IndexOf('uuid.uuid4().hex') -gt $oracleWorkflow.IndexOf('NewTransferKey')) {
+    throw 'The Oracle credential workflow does not preserve the exact grant and pre-generated cleanup binding.'
+}
+if ($oracleWorkflow.IndexOf('Compile every embedded Python block before mutation') -gt
+    $oracleWorkflow.IndexOf('invoke_guest "$ORACLE_VM"')) {
+    throw 'Embedded workflow validation must complete before the Oracle mutation leg.'
+}
+
 $workflow = Get-Content -LiteralPath (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) '.github/workflows/source-gateway-image.yml') -Raw
 $dockerfile = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Dockerfile.private-workbench') -Raw
 $applicationTemplate = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'application.bicep') -Raw

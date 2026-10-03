@@ -224,6 +224,166 @@ public sealed class GeneratedTargetWorkflowTests
     }
 
     [Fact]
+    public void Source_gateway_oracle_credential_workflow_uses_oidc_and_transfers_only_public_or_encrypted_material()
+    {
+        YamlNode workflow = YamlNode.Parse(RepositoryText(".github/workflows/provision-source-gateway-oracle-credential.yml"));
+        YamlNode jobs = workflow["jobs"]!;
+
+        Assert.Equal(["workflow_dispatch"], workflow["on"]!.Keys);
+        Assert.Empty(workflow["permissions"]!.Keys);
+        Assert.Equal(["package", "publish", "reachability", "provision"], jobs.Keys);
+        Assert.Equal(
+            new Dictionary<string, string> { ["actions"] = "read", ["contents"] = "read" },
+            jobs["package"]!["permissions"]!.ScalarFields);
+        Assert.Equal(
+            new Dictionary<string, string> { ["actions"] = "read", ["contents"] = "write" },
+            jobs["publish"]!["permissions"]!.ScalarFields);
+        Assert.Equal(
+            new Dictionary<string, string> { ["contents"] = "read" },
+            jobs["reachability"]!["permissions"]!.ScalarFields);
+        Assert.Equal(
+            new Dictionary<string, string> { ["contents"] = "read", ["id-token"] = "write" },
+            jobs["provision"]!["permissions"]!.ScalarFields);
+        Assert.Null(jobs["provision"]!["environment"]);
+
+        IReadOnlyList<string> packageCommands = CommandsFor(
+            jobs["package"]!, "Verify exact current main commit and trusted CI");
+        Assert.Contains(packageCommands, line => line.Contains("verify_required_ci.py", StringComparison.Ordinal));
+        Assert.Contains(packageCommands, line => line.Contains("git checkout --detach", StringComparison.Ordinal));
+        Assert.Contains(
+            CommandsFor(jobs["package"]!, "Compile every embedded Python block before mutation"),
+            line => line.Contains("compile(source", StringComparison.Ordinal));
+
+        IReadOnlyList<string> identifierCommands = CommandsFor(
+            jobs["provision"]!, "Generate transfer identifier before key creation");
+        Assert.Contains(identifierCommands, line => line.Contains("uuid.uuid4().hex", StringComparison.Ordinal));
+        Assert.Contains(identifierCommands, line => line.Contains("TRANSFER_ID=$TRANSFER_ID", StringComparison.Ordinal));
+
+        IReadOnlyList<string> commands = CommandsFor(
+            jobs["provision"]!, "Create, encrypt, complete, and verify credential transfer");
+        Assert.Contains(commands, line => line.Contains("az vm run-command create", StringComparison.Ordinal));
+        Assert.DoesNotContain(commands, line => line.Contains("az vm run-command delete", StringComparison.Ordinal));
+        Assert.Contains(commands, line => line.Contains("$FORMS_VM", StringComparison.Ordinal) &&
+            line.Contains("ValidatePrerequisites", StringComparison.Ordinal));
+        Assert.Contains(commands, line => line.Contains("$FORMS_VM", StringComparison.Ordinal) &&
+            line.Contains("NewTransferKey", StringComparison.Ordinal));
+        Assert.Contains(commands, line => line.Contains("TransferId=$TRANSFER_ID", StringComparison.Ordinal));
+        Assert.Contains(commands, line => line.Contains("$ORACLE_VM", StringComparison.Ordinal) &&
+            line.Contains("ProvisionOracle", StringComparison.Ordinal));
+        Assert.Contains(commands, line => line.Contains("$FORMS_VM", StringComparison.Ordinal) &&
+            line.Contains("CompleteTransfer", StringComparison.Ordinal));
+        Assert.DoesNotContain(commands, line => line.Contains("CleanupTransferKey", StringComparison.Ordinal));
+        Assert.Contains(commands, line => line.Contains("PublicCertificateBase64=", StringComparison.Ordinal));
+        Assert.Contains(commands, line => line.Contains("CiphertextBase64=", StringComparison.Ordinal));
+        Assert.Contains(commands, line => line.Contains("SELECT ON MERIDIAN TABLES", StringComparison.Ordinal));
+        Assert.Contains(commands, line => line.Contains("SELECT ON 13 SYS DBA DICTIONARY VIEWS", StringComparison.Ordinal));
+        Assert.DoesNotContain(commands, line => line.Contains("SELECT_CATALOG_ROLE", StringComparison.Ordinal));
+        Assert.DoesNotContain(commands, line => line.Contains("TABLES AND SEQUENCES", StringComparison.Ordinal) ||
+            line.Contains("TABLES AND VIEWS", StringComparison.Ordinal) ||
+            line.Contains("EXECUTE ON MERIDIAN", StringComparison.Ordinal));
+        Assert.DoesNotContain(commands, line => line.Contains("Password=", StringComparison.OrdinalIgnoreCase) ||
+            line.Contains("Pwd=", StringComparison.OrdinalIgnoreCase) ||
+            line.Contains("OFM_WORKER_ORACLE_CONNECTION_STRING", StringComparison.Ordinal));
+        Assert.True(
+            commands.ToList().FindIndex(line => line.Contains("ValidatePrerequisites", StringComparison.Ordinal)) <
+            commands.ToList().FindIndex(line => line.Contains("NewTransferKey", StringComparison.Ordinal)),
+            "ODBC prerequisites must be verified before transfer-key creation or Oracle mutation.");
+        Assert.Contains(commands, line => line.Contains("oracleConnectionRegistered", StringComparison.Ordinal) &&
+            line.Contains("is not True", StringComparison.Ordinal));
+
+        YamlNode cleanupStep = jobs["provision"]!["steps"]!.Sequence.Single(
+            step => step["name"]?.Text == "Remove transfer certificate and CNG key");
+        Assert.Equal("always()", cleanupStep["if"]!.Text);
+        IReadOnlyList<string> cleanupCommands = CommandLines(cleanupStep["run"]!.Text);
+        Assert.Contains(cleanupCommands, line => line.Contains("Operation=CleanupTransferKey", StringComparison.Ordinal));
+        Assert.Contains(cleanupCommands, line => line.Contains("TransferId=$TRANSFER_ID", StringComparison.Ordinal));
+        Assert.Contains(cleanupCommands, line => line.Contains("transfer-key-removed", StringComparison.Ordinal));
+        Assert.DoesNotContain(cleanupCommands, line => line.Contains("TRANSFER_THUMBPRINT", StringComparison.Ordinal) ||
+            line.Contains("TransferCertificateThumbprint", StringComparison.Ordinal));
+
+        YamlNode deletionStep = jobs["provision"]!["steps"]!.Sequence.Single(
+            step => step["name"]?.Text == "Delete managed Run Commands");
+        Assert.Equal("always()", deletionStep["if"]!.Text);
+        IReadOnlyList<string> deletionCommands = CommandLines(deletionStep["run"]!.Text);
+        Assert.Contains(deletionCommands, line => line.Contains("az vm run-command delete", StringComparison.Ordinal));
+        Assert.Contains(deletionCommands, line => line.Contains("ofm-oracle-key-cleanup-", StringComparison.Ordinal));
+
+        List<YamlNode> provisionSteps = jobs["provision"]!["steps"]!.Sequence.ToList();
+        Assert.True(
+            provisionSteps.FindIndex(step => step["name"]?.Text == "Generate transfer identifier before key creation") <
+            provisionSteps.FindIndex(step => step["name"]?.Text == "Create, encrypt, complete, and verify credential transfer"),
+            "The transfer identifier must exist before any key material can be created.");
+
+        Assert.Equal("vm-ofm-forms6i-j6mrrerz", workflow["env"]!["FORMS_VM"]!.Text);
+        Assert.Equal("vm-ofm-oracle9i-j6mrrerz", workflow["env"]!["ORACLE_VM"]!.Text);
+        Assert.Equal("d4394e57-c076-4c92-a870-5de6bf44f255", workflow["env"]!["EXPECTED_SUBSCRIPTION_ID"]!.Text);
+        Assert.Equal("1984d248-06ca-4d04-a3b8-4c0c1577ab86", workflow["env"]!["EXPECTED_TENANT_ID"]!.Text);
+
+        string transferModule = RepositoryText("infra/source-gateway/SourceGatewayCredentialTransfer.psm1");
+        Assert.Contains("from dba_audit_policies where object_schema = 'MERIDIAN'", transferModule, StringComparison.Ordinal);
+        Assert.True(
+            transferModule.IndexOf("from dba_audit_policies", StringComparison.Ordinal) <
+            transferModule.IndexOf("grant create session to OFM_GATEWAY_RO", StringComparison.Ordinal),
+            "FGA policy refusal must precede every gateway privilege grant.");
+        Assert.Contains("(grantee = 'SYS' and admin_option = 'YES')", transferModule, StringComparison.Ordinal);
+        Assert.Contains("where grantee = 'SYS' and granted_role = 'OFM_GATEWAY_SOURCE_RO' and admin_option = 'YES'", transferModule, StringComparison.Ordinal);
+        Assert.DoesNotContain("granted_role = 'OFM_GATEWAY_SOURCE_RO' and grantee <> 'OFM_GATEWAY_RO'", transferModule, StringComparison.Ordinal);
+        Assert.Contains("OFM_STAGE_BOOTSTRAP_OK", transferModule, StringComparison.Ordinal);
+        Assert.Contains("OFM_STAGE_PASSWORD_OK", transferModule, StringComparison.Ordinal);
+        Assert.Contains("OFM_STAGE_RECONCILIATION_OK", transferModule, StringComparison.Ordinal);
+        Assert.Contains("OFM_STAGE_UNLOCK_OK", transferModule, StringComparison.Ordinal);
+        Assert.Contains("OFM_LOGIN_OK:OFM_GATEWAY_RO", transferModule, StringComparison.Ordinal);
+        Assert.Contains("OFM_STAGE_RELOCK_OK", transferModule, StringComparison.Ordinal);
+        Assert.Contains("whenever oserror exit failure rollback", transferModule, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("-S /nolog", transferModule, StringComparison.Ordinal);
+        Assert.Contains("ORA-\\d{5}|SP2-\\d{4}", transferModule, StringComparison.Ordinal);
+        Assert.Contains("Set-SourceGatewayOracleAccountLocked", transferModule, StringComparison.Ordinal);
+        Assert.Contains("if (-not $ownershipProven)", transferModule, StringComparison.Ordinal);
+
+        string oracleGuest = RepositoryText("infra/source-lab/forms6i/New-SourceGatewayOracleCredential.ps1");
+        Assert.Contains("if (-not $completed -and $accountProvisioned -and $null -ne $sql)", oracleGuest, StringComparison.Ordinal);
+        Assert.DoesNotContain("if (-not $completed -and $null -ne $sql)", oracleGuest, StringComparison.Ordinal);
+        Assert.Contains("Set-SourceGatewayOracleAccountLocked", oracleGuest, StringComparison.Ordinal);
+
+        string formsBootstrap = RepositoryText("infra/source-gateway/Invoke-SourceGatewayOracleCredentialProvision.ps1");
+        Assert.Contains("Get-SourceGatewayTransferCertificates -TransferId $Id", formsBootstrap, StringComparison.Ordinal);
+        Assert.Contains("Read-SourceGatewayTransferMetadata -TransferId $Id", formsBootstrap, StringComparison.Ordinal);
+        Assert.Contains("-FriendlyName \"OFM Source Gateway Credential Transfer $TransferId\"", formsBootstrap, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Source_gateway_oracle_credential_workflow_compiles_every_embedded_python_block()
+    {
+        YamlNode workflow = YamlNode.Parse(RepositoryText(".github/workflows/provision-source-gateway-oracle-credential.yml"));
+        string python = PythonExecutable();
+        int compiled = 0;
+
+        foreach (string jobName in workflow["jobs"]!.Keys)
+        {
+            foreach (YamlNode step in workflow["jobs"]![jobName]!["steps"]!.Sequence)
+            {
+                string? script = step["run"]?.Text;
+                if (script is null)
+                {
+                    continue;
+                }
+
+                foreach (string program in HereDocuments(script, "PY"))
+                {
+                    (int exit, string output) = Run(
+                        python,
+                        ["-c", "import sys; compile(sys.argv[1], '<workflow-python>', 'exec')", program],
+                        RepositoryRoot());
+                    Assert.True(exit == 0, $"Embedded Python block {compiled + 1} did not compile:\n{output}");
+                    compiled++;
+                }
+            }
+        }
+
+        Assert.True(compiled >= 6, $"Expected every embedded Python block to be compiled, but found only {compiled}.");
+    }
+
+    [Fact]
     public void Private_workbench_stage2_is_preview_first_and_apply_requires_exact_retained_evidence()
     {
         YamlNode workflow = YamlNode.Parse(RepositoryText(".github/workflows/deploy-private-workbench.yml"));
@@ -369,6 +529,40 @@ public sealed class GeneratedTargetWorkflowTests
         Assert.True(close > open, $"The here-document opened with <<'{marker}' is never closed.");
 
         return string.Join('\n', lines[(open + 1)..close]);
+    }
+
+    private static IEnumerable<string> HereDocuments(string script, string marker)
+    {
+        string[] lines = script.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
+        int searchFrom = 0;
+        while (searchFrom < lines.Length)
+        {
+            int open = Array.FindIndex(
+                lines,
+                searchFrom,
+                line => line.Contains($"<<'{marker}'", StringComparison.Ordinal));
+            if (open < 0)
+            {
+                yield break;
+            }
+
+            int close = Array.FindIndex(lines, open + 1, line => line.Trim() == marker);
+            Assert.True(close > open, $"The here-document opened with <<'{marker}' is never closed.");
+            yield return Dedent(string.Join('\n', lines[(open + 1)..close]));
+            searchFrom = close + 1;
+        }
+    }
+
+    private static string Dedent(string source)
+    {
+        string[] lines = source.Split('\n');
+        int indentation = lines
+            .Where(line => !string.IsNullOrWhiteSpace(line))
+            .Select(line => line.Length - line.TrimStart().Length)
+            .DefaultIfEmpty(0)
+            .Min();
+        return string.Join('\n', lines.Select(line =>
+            line.Length >= indentation ? line[indentation..] : string.Empty));
     }
 
     /// <summary>

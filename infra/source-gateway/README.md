@@ -16,6 +16,7 @@ objects, create an Oracle account, extract a source, or deploy a migration.
    UAMI assignment. It creates no credential, redirect, Graph permission, or Azure RBAC assignment.
 - `Install-SourceGateway.ps1`: trusted main-push x86 artifact verification plus LocalService/TLS/service bootstrap.
 - `New-*`, `Protect-*`, `Complete-*`: one-time public-key transfer and LocalService DPAPI CurrentUser provisioning.
+- `Invoke-SourceGatewayOracleCredentialProvision.ps1` and the source-lab Oracle guest script: reviewed two-VM credential provisioning.
 - `source-registry.json`: nonsecret single-source binding for `meridian-native-6i` and project `prj-d616e6e807e14b6bb5a468a33da3d744`.
 - `Dockerfile.private-workbench`: public-root trust overlay for a release-approved immutable workbench image.
 
@@ -140,6 +141,70 @@ service SID, pins the stable content root, grants both LocalService and the rest
 input/home access, separate credential/output/temp modify access, and leaf private-key read access. It
 reuses its persisted certificate binding on rerun and refuses unmanaged trust instead of rotating it. It
 creates no Oracle credential.
+
+## Oracle Read-Only Credential
+
+The manual `provision-source-gateway-oracle-credential.yml` workflow is the reviewed mutation path. It
+authenticates to the pinned lab subscription with GitHub OIDC, verifies the current `main` commit and its
+required CI run, and deletes every managed Run Command in an exit trap. It first verifies the 32-bit
+System DSN and installed gateway on the Forms VM without mutation, then performs three ordered legs:
+
+1. Generate a transfer GUID on the runner before any key material exists, create a non-exportable eight-hour transfer
+   key bound to that GUID on `vm-ofm-forms6i-j6mrrerz`, and return only its public certificate. Guest creation removes
+   the certificate and CNG key on any later failure. A separate `if: always()` step invokes idempotent guest cleanup
+   using only the pre-generated GUID; managed Run Command deletion is a separate always-run step. Cleanup discovers
+   the certificate by its exact GUID-bound subject or friendly name and derives the CNG key from that certificate, so
+   missing, partial, or corrupt metadata cannot prevent certificate/key and exact-prefix residual-file removal.
+2. On `vm-ofm-oracle9i-j6mrrerz`, generate a 30-character letter-first alphanumeric password, run SQL*Plus
+   as `SYSDBA` through redirected standard input, set the real password with SQL*Plus `PASSWORD OFM_GATEWAY_RO`
+   (OCIPasswordChange), and verify a prompt-driven login before returning only OAEP-SHA256 ciphertext plus nonsecret
+   metadata. Every SQL*Plus stage uses `WHENEVER SQLERROR` and `WHENEVER OSERROR`, captures output only in memory,
+   requires its exact nonsecret success marker, and reports only observed markers, ORA-/SP2- codes, and the exit code.
+   Raw SQL*Plus output is never surfaced. The account remains locked through final privilege reconciliation; unlock is
+   the last account mutation before login verification. Any SQL, encryption, or result-construction failure invokes a
+   separate SYSDBA relock and verifies `DBA_USERS.ACCOUNT_STATUS = 'LOCKED'`. The real password is never part of a SQL
+   statement, PL/SQL block, command argument, disk file, or log.
+3. On the Forms VM, verify the ciphertext digest and the existing 32-bit System DSN, provision the
+   LocalService DPAPI blob, restart the gateway, and report `oracleConnectionRegistered=true` only after
+   the blob and running service are present. The one-time certificate, private key, ciphertext, exported
+   public CER, and transfer metadata are removed before success is reported.
+
+`OFM_GATEWAY_RO` receives exactly `CREATE SESSION` and `OFM_GATEWAY_SOURCE_RO`. The dedicated
+`OFM_GATEWAY_SOURCE_RO` role receives only non-grantable `SELECT` on MERIDIAN tables and these 13 SYS views:
+`DBA_OBJECTS`, `DBA_TABLES`, `DBA_TAB_COLUMNS`, `DBA_CONSTRAINTS`, `DBA_CONS_COLUMNS`, `DBA_SEQUENCES`,
+`DBA_SOURCE`, `DBA_INDEXES`, `DBA_IND_COLUMNS`, `DBA_TAB_PRIVS`, `DBA_COL_PRIVS`, `DBA_TRIGGERS`, and
+`DBA_DEPENDENCIES`. It receives no catalog role, no MERIDIAN view or sequence grant, no `EXECUTE`, no `ANY`
+privilege, and no DML privilege. Provisioning refuses to grant anything when `DBA_POLICIES` reports a VPD policy
+or `DBA_AUDIT_POLICIES` reports an FGA policy on a MERIDIAN object.
+
+The provisioning script marks its user with the dedicated `OFM_GATEWAY_TOOLING` profile. A new user begins as
+`IDENTIFIED EXTERNALLY` and locked, so no usable bootstrap password enters SQL text. If either named principal
+already exists, adoption happens only when both principals and the marker profile form the expected set, neither
+principal owns an object or appears in `V$PWFILE_USERS`, no proxy grant exists, no column grant exists, and the
+recursive `DBA_ROLE_PRIVS` closure plus direct system/object grants are exactly the final contract or a strict
+subset. Any excess fails before password rotation or grants; an existing user is never dropped. Reconciliation
+adds missing grants and verifies the exact final graph, including all MERIDIAN tables and all 13 dictionary views.
+Oracle 9i automatically grants a newly created role back to its creator with `ADMIN OPTION`, and Oracle does not permit
+that creator to revoke the role from itself. Because creation is pinned to `CONNECT / AS SYSDBA`, adoption and final
+reconciliation permit exactly the resulting `SYS`/`OFM_GATEWAY_SOURCE_RO`/`ADMIN_OPTION=YES` row in addition to the
+single non-admin default grant to `OFM_GATEWAY_RO`; every other role grantee remains a refusal.
+
+The connection value is the worker-tested ODBC shape
+`Dsn=<32-bit-system-dsn>;Uid=OFM_GATEWAY_RO;Pwd=<generated>`. The repository proves a Forms 6i Oracle
+client at `C:\orant` and Net8 configuration, but contains no evidence that a 32-bit Oracle ODBC driver or
+System DSN is currently registered. The workflow therefore does not guess or create one: completion fails
+unless the named DSN exists under the 32-bit machine ODBC registry and resolves to an installed driver
+under `C:\orant`.
+
+After review, publish through the normal PR/main/CI path, confirm or create the approved 32-bit System DSN
+out of band, and dispatch exactly once:
+
+```powershell
+$sha = (git rev-parse origin/main).Trim()
+$ciRunId = '<successful-main-push-ci-run-id>'
+gh workflow run provision-source-gateway-oracle-credential.yml --repo rxt64/oracle-forms-migration-fleet `
+    --ref main -f commit_sha=$sha -f ci_run_id=$ciRunId -f odbc_dsn=OFM_GATEWAY_ORACLE9I
+```
 
 ## Cost And Security Delta
 
