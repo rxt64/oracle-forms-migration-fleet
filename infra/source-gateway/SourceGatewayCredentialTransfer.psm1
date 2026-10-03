@@ -21,7 +21,9 @@ function Protect-SourceGatewayCredentialBytes {
             throw 'The one-time public certificate has no RSA public key.'
         }
 
-        $maximumPlaintextBytes = ($rsa.KeySize / 8) - (2 * 32) - 2
+        # RSAOpenSsl exposes KeySize as write-only to PowerShell on Linux; the modulus length is portable.
+        $keyBytes = $rsa.ExportParameters($false).Modulus.Length
+        $maximumPlaintextBytes = $keyBytes - (2 * 32) - 2
         if ($Plaintext.Length -le 0 -or $Plaintext.Length -gt $maximumPlaintextBytes) {
             throw "The credential must contain at most $maximumPlaintextBytes UTF-8 bytes."
         }
