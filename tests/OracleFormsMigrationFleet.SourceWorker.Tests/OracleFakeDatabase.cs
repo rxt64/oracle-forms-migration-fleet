@@ -377,7 +377,7 @@ public sealed class FakeOracleConnectionFactory(
 public static class MeridianCatalog
 {
     /// <summary>
-    /// Every object ALL_OBJECTS reports for MERIDIAN: four tables, the five indexes its primary and unique
+    /// Every object DBA_OBJECTS reports for MERIDIAN: four tables, the five indexes its primary and unique
     /// keys are built on, one sequence and one procedure. The detail reads below must reconcile against
     /// exactly this list, which is what makes an unlisted view or synonym a failure rather than a silence.
     /// </summary>
@@ -403,12 +403,12 @@ public static class MeridianCatalog
     {
         FakeOracleDatabase database = new();
 
-        database.OnView("ALL_OBJECTS", Objects());
+        database.OnView("DBA_OBJECTS", Objects());
 
-        database.OnView("ALL_TABLES", FakeResultSet.Of("TABLE_NAME",
+        database.OnView("DBA_TABLES", FakeResultSet.Of("TABLE_NAME",
             ["CUSTOMERS"], ["ORDERS"], ["ORDER_ITEMS"], ["PRODUCTS"]));
 
-        database.OnView("ALL_TAB_COLUMNS", FakeResultSet.Of(
+        database.OnView("DBA_TAB_COLUMNS", FakeResultSet.Of(
             "TABLE_NAME, COLUMN_NAME, COLUMN_ID, DATA_TYPE, DATA_LENGTH, CHAR_LENGTH, CHAR_USED, DATA_PRECISION, DATA_SCALE, NULLABLE, DATA_DEFAULT",
             ["CUSTOMERS", "CUSTOMER_ID", "1", "NUMBER", "22", null, null, "10", "0", "N", null],
             ["CUSTOMERS", "CUSTOMER_NAME", "2", "VARCHAR2", "100", "100", "B", null, null, "N", null],
@@ -425,7 +425,7 @@ public static class MeridianCatalog
             ["PRODUCTS", "PRODUCT_NAME", "2", "VARCHAR2", "80", "80", "B", null, null, "N", null],
             ["PRODUCTS", "UNIT_PRICE", "3", "NUMBER", "22", null, null, "12", "2", "N", null]));
 
-        database.OnView("ALL_CONSTRAINTS", FakeResultSet.Of(
+        database.OnView("DBA_CONSTRAINTS", FakeResultSet.Of(
             "TABLE_NAME, CONSTRAINT_NAME, CONSTRAINT_TYPE, R_OWNER, R_CONSTRAINT_NAME, DELETE_RULE, STATUS, SEARCH_CONDITION",
             ["CUSTOMERS", "PK_CUSTOMERS", "P", null, null, null, "ENABLED", null],
             ["CUSTOMERS", "SYS_C0011001", "C", null, null, null, "ENABLED", "\"CUSTOMER_NAME\" IS NOT NULL"],
@@ -438,7 +438,7 @@ public static class MeridianCatalog
             ["PRODUCTS", "PK_PRODUCTS", "P", null, null, null, "ENABLED", null],
             ["PRODUCTS", "UQ_PRODUCTS_NAME", "U", null, null, null, "ENABLED", null]));
 
-        database.OnView("ALL_CONS_COLUMNS", FakeResultSet.Of(
+        database.OnView("DBA_CONS_COLUMNS", FakeResultSet.Of(
             "CONSTRAINT_NAME, COLUMN_NAME, POSITION",
             ["FK_ORDERS_CUSTOMER", "CUSTOMER_ID", "1"],
             ["FK_ORDER_ITEMS_ORDER", "ORDER_ID", "1"],
@@ -450,24 +450,32 @@ public static class MeridianCatalog
             ["PK_PRODUCTS", "PRODUCT_ID", "1"],
             ["UQ_PRODUCTS_NAME", "PRODUCT_NAME", "1"]));
 
-        database.OnView("ALL_SEQUENCES", FakeResultSet.Of(
+        database.OnView("DBA_SEQUENCES", FakeResultSet.Of(
             "SEQUENCE_NAME, MIN_VALUE, MAX_VALUE, INCREMENT_BY, CACHE_SIZE, LAST_NUMBER, CYCLE_FLAG, ORDER_FLAG",
             ["SEQ_ORDER_ID", "1", "999999999999999999999999999", "1", "20", "1041", "N", "N"]));
 
-        database.OnView("ALL_INDEXES", Indexes());
-        database.OnView("ALL_IND_COLUMNS", IndexColumns());
+        database.OnView("DBA_INDEXES", Indexes());
+        database.OnView("DBA_IND_COLUMNS", IndexColumns());
 
-        database.OnView("ALL_TAB_PRIVS", FakeResultSet.Of("TABLE_NAME, GRANTEE, PRIVILEGE, GRANTABLE"));
-        database.OnView("ALL_COL_PRIVS", FakeResultSet.Of("TABLE_NAME, COLUMN_NAME, GRANTEE, PRIVILEGE"));
+        database.OnView("DBA_TAB_PRIVS", ObjectPrivileges());
+        database.OnView("DBA_COL_PRIVS", ColumnPrivileges());
 
-        database.OnView("ALL_SOURCE", Source(ProcedureBody));
-        database.OnView("ALL_TRIGGERS", FakeResultSet.Of("TRIGGER_NAME"));
-        database.OnView("ALL_DEPENDENCIES", Dependencies());
+        database.OnView("DBA_SOURCE", Source(ProcedureBody));
+        database.OnView("DBA_TRIGGERS", FakeResultSet.Of("TRIGGER_NAME"));
+        database.OnView("DBA_DEPENDENCIES", Dependencies());
 
         return database;
     }
 
-    /// <summary>The inventory, optionally with extra rows a negative test wants ALL_OBJECTS to report.</summary>
+    /// <summary>DBA_TAB_PRIVS as the dictionary reports it, with the object owner the reader checks.</summary>
+    public static FakeResultSet ObjectPrivileges(params object?[][] rows) =>
+        FakeResultSet.Of("OWNER, TABLE_NAME, GRANTEE, PRIVILEGE, GRANTABLE", rows);
+
+    /// <summary>DBA_COL_PRIVS as the dictionary reports it, with the object owner the reader checks.</summary>
+    public static FakeResultSet ColumnPrivileges(params object?[][] rows) =>
+        FakeResultSet.Of("OWNER, TABLE_NAME, COLUMN_NAME, GRANTEE, PRIVILEGE", rows);
+
+    /// <summary>The inventory, optionally with extra rows a negative test wants DBA_OBJECTS to report.</summary>
     public static FakeResultSet Objects(params object?[][] extra) =>
         FakeResultSet.Of("OBJECT_NAME, OBJECT_TYPE, STATUS",
         [

@@ -40,6 +40,30 @@ public static class OracleSchemaProtocol
 
     /// <summary>Owners whose objects are the server's own and are never expected in an allowlist.</summary>
     public static readonly string[] SystemOwners = ["SYS", "SYSTEM", "PUBLIC", "OUTLN", "CTXSYS", "MDSYS", "ORDSYS", "XDB", "WMSYS", "OLAPSYS", "DBSNMP"];
+
+    /// <summary>
+    /// The role the gateway's read-only access is provisioned through, and the only privilege that role is
+    /// contracted to hold. The contract grants it non-grantable SELECT on the read schema's <b>tables</b>
+    /// and on nothing else it owns, so only a grant matching all of that is this gateway's own access
+    /// rather than a property of the source, and only that one is left out. A SELECT the role holds on a
+    /// sequence, a view or any other object is outside the contract, is a real difference in the source,
+    /// and is read like any other grant.
+    /// </summary>
+    public const string ProvisioningRole = "OFM_GATEWAY_SOURCE_RO";
+
+    public const string ProvisioningPrivilege = "SELECT";
+
+    /// <summary>
+    /// The SYS dictionary views the provisioning contract grants the gateway role non-grantable SELECT on.
+    /// It is this enumerated list and not SELECT_CATALOG_ROLE, so the remediation an operator is handed
+    /// when the dictionary is unreadable names exactly what has to be granted.
+    /// </summary>
+    public static readonly string[] RequiredDictionaryViews =
+    [
+        "DBA_OBJECTS", "DBA_TABLES", "DBA_TAB_COLUMNS", "DBA_CONSTRAINTS", "DBA_CONS_COLUMNS",
+        "DBA_SEQUENCES", "DBA_SOURCE", "DBA_INDEXES", "DBA_IND_COLUMNS", "DBA_TAB_PRIVS",
+        "DBA_COL_PRIVS", "DBA_TRIGGERS", "DBA_DEPENDENCIES",
+    ];
 }
 
 /// <summary>
@@ -47,12 +71,12 @@ public static class OracleSchemaProtocol
 /// willing to treat as already covered when a dependency points outside the estate.
 ///
 /// It is a catalog rather than a rule because the failure mode it exists to prevent is an object kind that
-/// nobody enumerated silently leaving the artifact: ALL_OBJECTS is read first and every row it returns must
+/// nobody enumerated silently leaving the artifact: DBA_OBJECTS is read first and every row it returns must
 /// match one of these entries or the extraction fails and names the object.
 /// </summary>
 public static class OracleObjectCoverage
 {
-    /// <summary>ALL_OBJECTS.OBJECT_TYPE values this build rebuilds into a statement of its own.</summary>
+    /// <summary>DBA_OBJECTS.OBJECT_TYPE values this build rebuilds into a statement of its own.</summary>
     public static readonly string[] Emitted =
         ["FUNCTION", "INDEX", "PACKAGE", "PACKAGE BODY", "PROCEDURE", "SEQUENCE", "TABLE", "TYPE", "TYPE BODY"];
 
@@ -63,7 +87,7 @@ public static class OracleObjectCoverage
     /// </summary>
     public static readonly string[] Derived = ["LOB"];
 
-    /// <summary>The object types whose text comes from ALL_SOURCE.</summary>
+    /// <summary>The object types whose text comes from DBA_SOURCE.</summary>
     public static readonly string[] SourceTypes =
         ["FUNCTION", "PACKAGE", "PACKAGE BODY", "PROCEDURE", "TYPE", "TYPE BODY"];
 
@@ -75,7 +99,7 @@ public static class OracleObjectCoverage
     public static readonly string[] SystemBuiltins =
         ["DBMS_STANDARD", "DUAL", "PLITBLM", "STANDARD", "SYS_STUB_FOR_PURITY_ANALYSIS"];
 
-    /// <summary>ALL_INDEXES.INDEX_TYPE values whose definition can be rebuilt from ALL_IND_COLUMNS.</summary>
+    /// <summary>DBA_INDEXES.INDEX_TYPE values whose definition can be rebuilt from DBA_IND_COLUMNS.</summary>
     public static readonly string[] IndexTypes = ["NORMAL"];
 
     /// <summary>Object privileges this build writes back as a GRANT statement.</summary>
@@ -162,7 +186,7 @@ public sealed record OracleCatalogSequence(
 
 public sealed record OracleCatalogProgramUnit(string Schema, string Type, string Name, string Body);
 
-/// <summary>One row of the inventory: what ALL_OBJECTS says the schema contains.</summary>
+/// <summary>One row of the inventory: what DBA_OBJECTS says the schema contains.</summary>
 public sealed record OracleCatalogObject(string Schema, string Name, string Type, string Status);
 
 public sealed record OracleCatalogIndexColumn(string Name, bool Descending);
@@ -200,16 +224,19 @@ public sealed record OracleCatalogFacts(
 ///
 /// Three rules shape the whole class:
 ///
-/// 1. <b>Read-only and fully parameterized.</b> Every statement is a SELECT against an ALL_ catalog view
+/// 1. <b>Read-only and fully parameterized.</b> Every statement is a SELECT against a DBA_ catalog view
 ///    with the owner bound as a parameter. No identifier from a request is ever concatenated into SQL.
-/// 2. <b>The inventory comes first.</b> ALL_OBJECTS is enumerated for every requested schema before any
+///    Dictionary visibility is proved for every requested schema before anything is read, and there is no
+///    fallback to the ALL_ views: a credential that owns nothing would see only part of its own grants
+///    there, and a partial read that reports success is the failure this gate exists to prevent.
+/// 2. <b>The inventory comes first.</b> DBA_OBJECTS is enumerated for every requested schema before any
 ///    object is read in detail, and every row it returns must be an object kind on
 ///    <see cref="OracleObjectCoverage"/> and valid. A view, a synonym, a materialized view, a trigger, a
 ///    database link or any other kind this build does not rebuild therefore fails the extraction by name
 ///    instead of being absent from an artifact that reports success.
 /// 3. <b>Nothing is invented.</b> A column's precision, nullability, default, key membership, an index's
 ///    columns, a grant and a program unit's body are emitted exactly as the catalog reported them. A type
-///    this build cannot render, an index whose definition is not in ALL_IND_COLUMNS, a foreign key whose
+///    this build cannot render, an index whose definition is not in DBA_IND_COLUMNS, a foreign key whose
 ///    parent lies outside the allowlist, a dependency on an object the inventory does not cover, or a
 ///    database link all fail the extraction with an explicit finding rather than producing an artifact
 ///    that silently omits them.
@@ -259,6 +286,10 @@ public sealed class OracleSchemaExtractionService(IOracleConnectionFactory conne
         {
             return Failed(request, requested, "The catalog read exceeded this worker's configured time budget; no artifact was produced.");
         }
+        catch (CatalogDictionaryUnavailableException unavailable)
+        {
+            return DictionaryUnavailable(request, requested, unavailable.Message);
+        }
         catch (CatalogIncompleteException incomplete)
         {
             return Failed(request, requested, incomplete.Message);
@@ -289,6 +320,13 @@ public sealed class OracleSchemaExtractionService(IOracleConnectionFactory conne
         HashSet<(string Schema, string Name)> covered = [];
         Dictionary<(string Schema, string Type), SortedSet<string>> byType = [];
 
+        // Dictionary visibility is proved for every requested schema before any row is read, so a
+        // credential that cannot see DBA_ stops here rather than part-way through a successful-looking run.
+        foreach (string schema in schemas)
+        {
+            await reader.ProbeDictionaryVisibilityAsync(schema, cancellationToken);
+        }
+
         // The inventory is read for every requested schema before any object is read in detail, so a kind
         // this build does not rebuild is refused by name rather than being absent from a successful result.
         foreach (string schema in schemas)
@@ -297,7 +335,7 @@ public sealed class OracleSchemaExtractionService(IOracleConnectionFactory conne
             if (objects.Count == 0)
             {
                 throw new CatalogIncompleteException(
-                    $"Schema '{schema}' returned no object from ALL_OBJECTS; it is either absent or invisible to this worker's connection identity.");
+                    $"Schema '{schema}' returned no object from DBA_OBJECTS; it is either absent or invisible to this worker's connection identity.");
             }
 
             string[] unsupported =
@@ -353,7 +391,8 @@ public sealed class OracleSchemaExtractionService(IOracleConnectionFactory conne
             IReadOnlyList<OracleCatalogConstraint> schemaConstraints = await reader.ReadConstraintsAsync(schema, cancellationToken);
             IReadOnlyList<OracleCatalogSequence> schemaSequences = await reader.ReadSequencesAsync(schema, cancellationToken);
             IReadOnlyList<OracleCatalogIndex> schemaIndexes = await reader.ReadIndexesAsync(schema, cancellationToken);
-            IReadOnlyList<OracleCatalogGrant> schemaGrants = await reader.ReadObjectGrantsAsync(schema, cancellationToken);
+            IReadOnlyList<OracleCatalogGrant> schemaGrants = await reader.ReadObjectGrantsAsync(
+                schema, new HashSet<string>(schemaTables, StringComparer.Ordinal), findings, cancellationToken);
             IReadOnlyList<string> columnGrants = await reader.ReadColumnGrantTargetsAsync(schema, cancellationToken);
             IReadOnlyList<OracleCatalogProgramUnit> schemaUnits = await reader.ReadProgramUnitsAsync(schema, cancellationToken);
             IReadOnlyList<string> schemaTriggers = await reader.ReadTriggerNamesAsync(schema, cancellationToken);
@@ -465,7 +504,7 @@ public sealed class OracleSchemaExtractionService(IOracleConnectionFactory conne
         byType.TryGetValue((schema, type), out SortedSet<string>? names) ? names : [];
 
     /// <summary>
-    /// Refuses any disagreement between what ALL_OBJECTS says a schema contains and what the detail read
+    /// Refuses any disagreement between what DBA_OBJECTS says a schema contains and what the detail read
     /// for that kind returned, in either direction. An object the inventory names and the detail read
     /// missed would otherwise be an artifact that is silently short; one the detail read returned and the
     /// inventory does not name means the two reads did not see the same schema.
@@ -479,14 +518,14 @@ public sealed class OracleSchemaExtractionService(IOracleConnectionFactory conne
         if (missing.Length > 0)
         {
             throw new CatalogIncompleteException(
-                $"Schema '{schema}' lists {missing.Length} {kind}(s) in ALL_OBJECTS that the {kind} read did not return ({Sample(missing)}); the inventory and the extraction disagree.");
+                $"Schema '{schema}' lists {missing.Length} {kind}(s) in DBA_OBJECTS that the {kind} read did not return ({Sample(missing)}); the inventory and the extraction disagree.");
         }
 
         string[] extra = [.. actual.Except(expected, StringComparer.Ordinal)];
         if (extra.Length > 0)
         {
             throw new CatalogIncompleteException(
-                $"Schema '{schema}' returned {extra.Length} {kind}(s) ALL_OBJECTS does not list ({Sample(extra)}); the inventory and the extraction disagree.");
+                $"Schema '{schema}' returned {extra.Length} {kind}(s) DBA_OBJECTS does not list ({Sample(extra)}); the inventory and the extraction disagree.");
         }
     }
 
@@ -554,6 +593,24 @@ public sealed class OracleSchemaExtractionService(IOracleConnectionFactory conne
             "OracleCatalogReadAccess", "operator.grant.catalog.read.on.allowlisted.schemas", detail,
             CapabilityState.Rejected);
 
+    /// <summary>
+    /// The data dictionary was not readable. It is separated from the general failure only by its
+    /// remediation, because the operator action is a specific one: the gateway role needs non-grantable
+    /// SELECT on the enumerated dictionary views, not SELECT_CATALOG_ROLE and not a wider grant on the
+    /// schema. The views are named in the detail so the operator does not have to guess which one failed.
+    /// </summary>
+    private OracleSchemaExtractionResult DictionaryUnavailable(
+        OracleSchemaExtractionRequest request,
+        IReadOnlyList<string> schemas,
+        string detail) =>
+        Terminal(request, schemas, "ExtractionFailed", "oracle.catalog.read",
+            "OracleCatalogReadAccess",
+            "operator.grant.select.on.required.dictionary.views.to.gateway.role",
+            $"{detail} Grant '{OracleSchemaProtocol.ProvisioningRole}' non-grantable SELECT on each of the " +
+            $"{OracleSchemaProtocol.RequiredDictionaryViews.Length} dictionary views this build reads: " +
+            $"{string.Join(", ", OracleSchemaProtocol.RequiredDictionaryViews)}.",
+            CapabilityState.Rejected);
+
     private OracleSchemaExtractionResult Terminal(
         OracleSchemaExtractionRequest request,
         IReadOnlyList<string> schemas,
@@ -579,6 +636,14 @@ public sealed class OracleSchemaExtractionService(IOracleConnectionFactory conne
 
 /// <summary>Raised when a required catalog part could not be covered. Never carries a credential.</summary>
 public sealed class CatalogIncompleteException(string message) : Exception(message);
+
+/// <summary>
+/// Raised when the connection cannot read the data dictionary. Distinct from
+/// <see cref="CatalogIncompleteException"/> because the remedy is a grant on the gateway identity rather
+/// than anything about the schema, and because it must never be answered by falling back to the ALL_ views.
+/// Never carries a credential.
+/// </summary>
+public sealed class CatalogDictionaryUnavailableException(string message) : Exception(message);
 
 internal sealed record OracleSchemaCoverage(
     int Objects,

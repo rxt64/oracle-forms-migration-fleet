@@ -6,8 +6,15 @@ using System.Text;
 namespace OracleFormsMigrationFleet.SourceWorker;
 
 /// <summary>
-/// Every catalog statement this worker is willing to run. All of them are SELECTs against ALL_ views with
+/// Every catalog statement this worker is willing to run. All of them are SELECTs against DBA_ views with
 /// the owner bound as a parameter, so a schema name can never reach the parser as text.
+///
+/// The DBA_ views are read rather than the ALL_ ones because the gateway's credential is a read-only
+/// identity that owns nothing: ALL_SOURCE, ALL_SEQUENCES, ALL_TAB_PRIVS and ALL_COL_PRIVS would show it
+/// only what it was itself granted, so a body, a sequence or a third-party grant it cannot see would be
+/// absent from an artifact that reported success. Visibility is proved once per schema before anything is
+/// read, and there is deliberately no fallback to ALL_: a connection that cannot read the data dictionary
+/// fails the extraction instead of producing a quietly partial one.
 ///
 /// The column lists avoid anything added after Oracle 9i, numeric columns are projected through TO_CHAR so
 /// no provider-specific numeric conversion sits between the catalog and the artifact, and the LONG columns
@@ -17,16 +24,26 @@ namespace OracleFormsMigrationFleet.SourceWorker;
 internal sealed class OracleCatalogReader(DbConnection connection, OracleParameterStyle parameterStyle, int commandTimeoutSeconds)
 {
     /// <summary>
+    /// Proves the connection can read the data dictionary for this owner. It is the first statement of the
+    /// run; on an instance where SELECT_CATALOG_ROLE is missing it fails at parse with ORA-00942, which is
+    /// the whole point of asking before any detail read has had a chance to come back short.
+    /// </summary>
+    private const string DictionaryProbeSql = """
+        SELECT 'VISIBLE' AS DICTIONARY_PROBE
+        FROM DBA_OBJECTS WHERE OWNER = :owner AND ROWNUM = 1
+        """;
+
+    /// <summary>
     /// The inventory of record. It is read before anything else so an object kind this build does not
     /// rebuild is refused by name rather than being absent from a result that reports success.
     /// </summary>
     private const string ObjectsSql = """
         SELECT OBJECT_NAME, OBJECT_TYPE, STATUS
-        FROM ALL_OBJECTS WHERE OWNER = :owner ORDER BY OBJECT_TYPE, OBJECT_NAME
+        FROM DBA_OBJECTS WHERE OWNER = :owner ORDER BY OBJECT_TYPE, OBJECT_NAME
         """;
 
     private const string TablesSql = """
-        SELECT TABLE_NAME FROM ALL_TABLES WHERE OWNER = :owner ORDER BY TABLE_NAME
+        SELECT TABLE_NAME FROM DBA_TABLES WHERE OWNER = :owner ORDER BY TABLE_NAME
         """;
 
     private const string ColumnsSql = """
@@ -34,40 +51,40 @@ internal sealed class OracleCatalogReader(DbConnection connection, OracleParamet
                TO_CHAR(DATA_LENGTH) AS DATA_LENGTH, TO_CHAR(CHAR_LENGTH) AS CHAR_LENGTH, CHAR_USED,
                TO_CHAR(DATA_PRECISION) AS DATA_PRECISION, TO_CHAR(DATA_SCALE) AS DATA_SCALE, NULLABLE,
                DATA_DEFAULT
-        FROM ALL_TAB_COLUMNS WHERE OWNER = :owner ORDER BY TABLE_NAME, COLUMN_ID
+        FROM DBA_TAB_COLUMNS WHERE OWNER = :owner ORDER BY TABLE_NAME, COLUMN_ID
         """;
 
-    /// <summary>The same read for a release whose ALL_TAB_COLUMNS has no character-semantics columns.</summary>
+    /// <summary>The same read for a release whose DBA_TAB_COLUMNS has no character-semantics columns.</summary>
     private const string ColumnsWithoutCharacterSemanticsSql = """
         SELECT TABLE_NAME, COLUMN_NAME, TO_CHAR(COLUMN_ID) AS COLUMN_ID, DATA_TYPE,
                TO_CHAR(DATA_LENGTH) AS DATA_LENGTH,
                TO_CHAR(DATA_PRECISION) AS DATA_PRECISION, TO_CHAR(DATA_SCALE) AS DATA_SCALE, NULLABLE,
                DATA_DEFAULT
-        FROM ALL_TAB_COLUMNS WHERE OWNER = :owner ORDER BY TABLE_NAME, COLUMN_ID
+        FROM DBA_TAB_COLUMNS WHERE OWNER = :owner ORDER BY TABLE_NAME, COLUMN_ID
         """;
 
     private const string ConstraintsSql = """
         SELECT TABLE_NAME, CONSTRAINT_NAME, CONSTRAINT_TYPE, R_OWNER, R_CONSTRAINT_NAME, DELETE_RULE, STATUS,
                SEARCH_CONDITION
-        FROM ALL_CONSTRAINTS WHERE OWNER = :owner AND CONSTRAINT_TYPE IN ('P', 'U', 'R', 'C')
+        FROM DBA_CONSTRAINTS WHERE OWNER = :owner AND CONSTRAINT_TYPE IN ('P', 'U', 'R', 'C')
         ORDER BY TABLE_NAME, CONSTRAINT_NAME
         """;
 
     private const string ConstraintColumnsSql = """
         SELECT CONSTRAINT_NAME, COLUMN_NAME, TO_CHAR(POSITION) AS POSITION
-        FROM ALL_CONS_COLUMNS WHERE OWNER = :owner ORDER BY CONSTRAINT_NAME, POSITION
+        FROM DBA_CONS_COLUMNS WHERE OWNER = :owner ORDER BY CONSTRAINT_NAME, POSITION
         """;
 
     private const string SequencesSql = """
         SELECT SEQUENCE_NAME, TO_CHAR(MIN_VALUE) AS MIN_VALUE, TO_CHAR(MAX_VALUE) AS MAX_VALUE,
                TO_CHAR(INCREMENT_BY) AS INCREMENT_BY, TO_CHAR(CACHE_SIZE) AS CACHE_SIZE,
                TO_CHAR(LAST_NUMBER) AS LAST_NUMBER, CYCLE_FLAG, ORDER_FLAG
-        FROM ALL_SEQUENCES WHERE SEQUENCE_OWNER = :owner ORDER BY SEQUENCE_NAME
+        FROM DBA_SEQUENCES WHERE SEQUENCE_OWNER = :owner ORDER BY SEQUENCE_NAME
         """;
 
     private const string SourceSql = """
         SELECT TYPE, NAME, TO_CHAR(LINE) AS LINE, TEXT
-        FROM ALL_SOURCE
+        FROM DBA_SOURCE
         WHERE OWNER = :owner AND TYPE IN ('TYPE', 'TYPE BODY', 'PACKAGE', 'PACKAGE BODY', 'FUNCTION', 'PROCEDURE')
         ORDER BY TYPE, NAME, LINE
         """;
@@ -79,40 +96,72 @@ internal sealed class OracleCatalogReader(DbConnection connection, OracleParamet
     /// </summary>
     private const string IndexesSql = """
         SELECT INDEX_NAME, TABLE_OWNER, TABLE_NAME, UNIQUENESS, INDEX_TYPE
-        FROM ALL_INDEXES WHERE OWNER = :owner ORDER BY INDEX_NAME
+        FROM DBA_INDEXES WHERE OWNER = :owner ORDER BY INDEX_NAME
         """;
 
     private const string IndexColumnsSql = """
         SELECT INDEX_NAME, COLUMN_NAME, TO_CHAR(COLUMN_POSITION) AS COLUMN_POSITION, DESCEND
-        FROM ALL_IND_COLUMNS WHERE INDEX_OWNER = :owner ORDER BY INDEX_NAME, COLUMN_POSITION
+        FROM DBA_IND_COLUMNS WHERE INDEX_OWNER = :owner ORDER BY INDEX_NAME, COLUMN_POSITION
         """;
 
+    /// <summary>
+    /// Every object grant the schema carries, to every grantee, with no grantee suppressed in SQL. The one
+    /// exclusion this build makes is decided in <see cref="ReadObjectGrantsAsync"/> against the projected
+    /// row, because a name on its own does not prove a grant is the provisioning contract.
+    /// </summary>
     private const string ObjectPrivilegesSql = """
-        SELECT TABLE_NAME, GRANTEE, PRIVILEGE, GRANTABLE
-        FROM ALL_TAB_PRIVS WHERE TABLE_SCHEMA = :owner ORDER BY TABLE_NAME, GRANTEE, PRIVILEGE
+        SELECT OWNER, TABLE_NAME, GRANTEE, PRIVILEGE, GRANTABLE
+        FROM DBA_TAB_PRIVS WHERE OWNER = :owner
+        ORDER BY TABLE_NAME, GRANTEE, PRIVILEGE
         """;
 
     /// <summary>
     /// Column-level privileges are read only to refuse them: this build writes object grants back and has
-    /// no statement for a column grant, so one has to fail the extraction rather than go unmentioned.
+    /// no statement for a column grant, so one has to fail the extraction rather than go unmentioned. No
+    /// grantee is exempt — the provisioning contract carries no column grant, so one addressed to the
+    /// gateway's own names is as much a surprise as any other.
     /// </summary>
     private const string ColumnPrivilegesSql = """
-        SELECT TABLE_NAME, COLUMN_NAME, GRANTEE, PRIVILEGE
-        FROM ALL_COL_PRIVS WHERE TABLE_SCHEMA = :owner ORDER BY TABLE_NAME, COLUMN_NAME, GRANTEE, PRIVILEGE
+        SELECT OWNER, TABLE_NAME, COLUMN_NAME, GRANTEE, PRIVILEGE
+        FROM DBA_COL_PRIVS WHERE OWNER = :owner
+        ORDER BY TABLE_NAME, COLUMN_NAME, GRANTEE, PRIVILEGE
         """;
 
     private const string TriggersSql = """
-        SELECT TRIGGER_NAME FROM ALL_TRIGGERS WHERE OWNER = :owner ORDER BY TRIGGER_NAME
+        SELECT TRIGGER_NAME FROM DBA_TRIGGERS WHERE OWNER = :owner ORDER BY TRIGGER_NAME
         """;
 
     private const string DependenciesSql = """
         SELECT NAME, REFERENCED_OWNER, REFERENCED_NAME, REFERENCED_LINK_NAME
-        FROM ALL_DEPENDENCIES WHERE OWNER = :owner ORDER BY NAME, REFERENCED_OWNER, REFERENCED_NAME
+        FROM DBA_DEPENDENCIES WHERE OWNER = :owner ORDER BY NAME, REFERENCED_OWNER, REFERENCED_NAME
         """;
 
     private static readonly string[] s_sourceOrder = ["TYPE", "TYPE BODY", "PACKAGE", "PACKAGE BODY", "FUNCTION", "PROCEDURE"];
 
     private readonly DbConnection _connection = connection;
+
+    /// <summary>
+    /// Runs one statement against DBA_OBJECTS for this owner so the run either has data-dictionary
+    /// visibility or stops here. A client failure is translated into
+    /// <see cref="CatalogDictionaryUnavailableException"/> rather than retried against the ALL_ views,
+    /// because the ALL_ views would answer for a read-only identity with whatever it happens to have been
+    /// granted and produce an artifact that is short without saying so.
+    /// </summary>
+    public async Task ProbeDictionaryVisibilityAsync(string schema, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await foreach (Row _ in QueryAsync(DictionaryProbeSql, schema, cancellationToken))
+            {
+            }
+        }
+        catch (DbException exception)
+        {
+            throw new CatalogDictionaryUnavailableException(
+                $"The data dictionary is not readable by this worker's connection identity for '{schema}' ({exception.GetType().Name}); " +
+                "this build reads DBA_ views so a read-only identity sees code bodies, sequences and third-party grants, and it does not fall back to the ALL_ views.");
+        }
+    }
 
     public async Task<IReadOnlyList<OracleCatalogObject>> ReadObjectsAsync(string schema, CancellationToken cancellationToken)
     {
@@ -160,7 +209,7 @@ internal sealed class OracleCatalogReader(DbConnection connection, OracleParamet
             // is recorded because it is why a character-semantics column would later fail closed.
             columns.Clear();
             characterSemantics = false;
-            findings.Add($"ALL_TAB_COLUMNS on this instance has no CHAR_LENGTH/CHAR_USED columns; '{schema}' was read with byte lengths only.");
+            findings.Add($"DBA_TAB_COLUMNS on this instance has no CHAR_LENGTH/CHAR_USED columns; '{schema}' was read with byte lengths only.");
             await ReadInto(ColumnsWithoutCharacterSemanticsSql);
         }
 
@@ -356,21 +405,62 @@ internal sealed class OracleCatalogReader(DbConnection connection, OracleParamet
         ];
     }
 
-    public async Task<IReadOnlyList<OracleCatalogGrant>> ReadObjectGrantsAsync(string schema, CancellationToken cancellationToken)
+    /// <summary>
+    /// Reads every object grant the schema carries. Exactly one shape is excluded: a non-grantable SELECT
+    /// held by the provisioning role on a <b>table</b> of the schema being read, which is precisely what
+    /// the provisioning contract grants and which no target schema should be given. Every other grant
+    /// survives, including one addressed to the gateway's own user or role, because a name is not evidence:
+    /// a DELETE or an EXECUTE to those names, or a SELECT on a sequence or a view the contract never
+    /// granted, is a real difference in the source and is written back or refused like any other rather
+    /// than disappearing because of who it names.
+    /// </summary>
+    /// <param name="tables">
+    /// The tables this run already read from DBA_TABLES for <paramref name="schema"/>. Membership is what
+    /// makes the exclusion the contract rather than the grantee's name.
+    /// </param>
+    public async Task<IReadOnlyList<OracleCatalogGrant>> ReadObjectGrantsAsync(
+        string schema,
+        IReadOnlySet<string> tables,
+        List<string> findings,
+        CancellationToken cancellationToken)
     {
         SortedSet<(string Object, string Grantee, string Privilege, bool Grantable)> distinct = [];
         int rows = 0;
+        int provisioning = 0;
 
         await foreach (Row row in QueryAsync(ObjectPrivilegesSql, schema, cancellationToken))
         {
             Bound(rows++, OracleSchemaProtocol.MaxGrants, "object privileges");
 
+            string owner = row.Required("OWNER");
+            string table = row.Required("TABLE_NAME");
+            string grantee = row.Required("GRANTEE");
+            string privilege = row.Required("PRIVILEGE").Trim().ToUpperInvariant();
+            bool grantable = string.Equals(row.Text("GRANTABLE"), "YES", StringComparison.OrdinalIgnoreCase);
+
+            if (!string.Equals(owner, schema, StringComparison.Ordinal))
+            {
+                throw new CatalogIncompleteException(
+                    $"DBA_TAB_PRIVS returned a grant on '{owner}.{table}' while the read was bound to '{schema}'; the extraction fails rather than attributing it to the wrong schema.");
+            }
+
+            if (string.Equals(grantee, OracleSchemaProtocol.ProvisioningRole, StringComparison.Ordinal) &&
+                string.Equals(privilege, OracleSchemaProtocol.ProvisioningPrivilege, StringComparison.Ordinal) &&
+                !grantable &&
+                tables.Contains(table))
+            {
+                provisioning++;
+                continue;
+            }
+
             // The same privilege granted by two grantors is one grant in the schema being rebuilt.
-            distinct.Add((
-                row.Required("TABLE_NAME"),
-                row.Required("GRANTEE"),
-                row.Required("PRIVILEGE").Trim().ToUpperInvariant(),
-                string.Equals(row.Text("GRANTABLE"), "YES", StringComparison.OrdinalIgnoreCase)));
+            distinct.Add((table, grantee, privilege, grantable));
+        }
+
+        if (provisioning > 0)
+        {
+            findings.Add(
+                $"Excluded {provisioning} {OracleSchemaProtocol.ProvisioningPrivilege} grant(s) on table(s) of '{schema}' held by '{OracleSchemaProtocol.ProvisioningRole}' as this gateway's own read access; every other grant on the schema was read.");
         }
 
         return [.. distinct.Select(entry => new OracleCatalogGrant(schema, entry.Object, entry.Grantee, entry.Privilege, entry.Grantable))];
@@ -385,7 +475,16 @@ internal sealed class OracleCatalogReader(DbConnection connection, OracleParamet
         await foreach (Row row in QueryAsync(ColumnPrivilegesSql, schema, cancellationToken))
         {
             Bound(rows++, OracleSchemaProtocol.MaxGrants, "column privileges");
-            targets.Add($"{row.Required("PRIVILEGE").Trim().ToUpperInvariant()} on {schema}.{row.Required("TABLE_NAME")}.{row.Required("COLUMN_NAME")} to {row.Required("GRANTEE")}");
+            string owner = row.Required("OWNER");
+            string table = row.Required("TABLE_NAME");
+
+            if (!string.Equals(owner, schema, StringComparison.Ordinal))
+            {
+                throw new CatalogIncompleteException(
+                    $"DBA_COL_PRIVS returned a column privilege on '{owner}.{table}' while the read was bound to '{schema}'; the extraction fails rather than attributing it to the wrong schema.");
+            }
+
+            targets.Add($"{row.Required("PRIVILEGE").Trim().ToUpperInvariant()} on {schema}.{table}.{row.Required("COLUMN_NAME")} to {row.Required("GRANTEE")}");
         }
 
         return [.. targets];

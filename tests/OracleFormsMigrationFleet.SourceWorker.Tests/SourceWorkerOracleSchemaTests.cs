@@ -49,13 +49,223 @@ public sealed class SourceWorkerOracleSchemaTests
 
         string[] required =
         [
-            "ALL_OBJECTS", "ALL_TABLES", "ALL_TAB_COLUMNS", "ALL_CONSTRAINTS", "ALL_CONS_COLUMNS",
-            "ALL_SEQUENCES", "ALL_INDEXES", "ALL_IND_COLUMNS", "ALL_TAB_PRIVS", "ALL_COL_PRIVS",
-            "ALL_SOURCE", "ALL_TRIGGERS", "ALL_DEPENDENCIES",
+            "DBA_OBJECTS", "DBA_TABLES", "DBA_TAB_COLUMNS", "DBA_CONSTRAINTS", "DBA_CONS_COLUMNS",
+            "DBA_SEQUENCES", "DBA_INDEXES", "DBA_IND_COLUMNS", "DBA_TAB_PRIVS", "DBA_COL_PRIVS",
+            "DBA_SOURCE", "DBA_TRIGGERS", "DBA_DEPENDENCIES",
         ];
 
         Assert.All(required, view =>
             Assert.Contains(database.Executed, execution => execution.CommandText.Contains(view, StringComparison.Ordinal)));
+
+        Assert.DoesNotContain(database.Executed, execution => execution.CommandText.Contains("FROM ALL_", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ExtractAsync_ProvesDictionaryVisibilityBeforeReadingAnything()
+    {
+        FakeOracleDatabase database = MeridianCatalog.Build();
+
+        await Service(database).ExtractAsync(MeridianCatalog.Request(), default);
+
+        FakeExecution probe = database.Executed[0];
+        Assert.Contains("DICTIONARY_PROBE", probe.CommandText, StringComparison.Ordinal);
+        Assert.Contains("DBA_OBJECTS", probe.CommandText, StringComparison.Ordinal);
+        Assert.Equal("MERIDIAN", probe.Owner);
+    }
+
+    [Fact]
+    public async Task ExtractAsync_FailsClosedWhenTheDataDictionaryIsNotReadable()
+    {
+        FakeOracleDatabase database = MeridianCatalog.Build()
+            .Fail(sql => sql.Contains("DICTIONARY_PROBE", StringComparison.Ordinal));
+
+        OracleSchemaExtractionResult result = await Service(database).ExtractAsync(MeridianCatalog.Request(), default);
+
+        Assert.Equal("ExtractionFailed", result.Status);
+        Assert.Null(result.SchemaArtifact);
+        Assert.Contains(result.Findings, finding => finding.Contains("data dictionary is not readable", StringComparison.Ordinal));
+        Assert.Contains(result.Capabilities, capability =>
+            capability.Remediation == "operator.grant.select.on.required.dictionary.views.to.gateway.role");
+        Assert.DoesNotContain(result.Capabilities, capability =>
+            (capability.Remediation ?? string.Empty).Contains("SELECT_CATALOG_ROLE", StringComparison.OrdinalIgnoreCase));
+
+        // The remediation is actionable only if it names the views the contract has to grant.
+        Assert.Equal(13, OracleSchemaProtocol.RequiredDictionaryViews.Length);
+        Assert.All(OracleSchemaProtocol.RequiredDictionaryViews, view =>
+            Assert.Contains(result.Findings, finding => finding.Contains(view, StringComparison.Ordinal)));
+
+        // No silent fallback: a run that cannot see DBA_ must not go on to read the ALL_ views instead.
+        Assert.DoesNotContain(database.Executed, execution => execution.CommandText.Contains("FROM ALL_", StringComparison.Ordinal));
+        Assert.Single(database.Executed);
+    }
+
+    [Fact]
+    public async Task ExtractAsync_ExcludesOnlyTheProvisioningSelectGrantsTheGatewayHoldsItself()
+    {
+        FakeOracleDatabase database = MeridianCatalog.Build()
+            .OverrideView("DBA_TAB_PRIVS", MeridianCatalog.ObjectPrivileges(
+                ["MERIDIAN", "ORDERS", OracleSchemaProtocol.ProvisioningRole, "SELECT", "NO"],
+                ["MERIDIAN", "CUSTOMERS", OracleSchemaProtocol.ProvisioningRole, "SELECT", "NO"],
+                ["MERIDIAN", "ORDERS", "REPORTING", "SELECT", "NO"]));
+
+        OracleSchemaExtractionResult result = await Service(database).ExtractAsync(MeridianCatalog.Request(), default);
+        string ddl = MeridianCatalog.Ddl(result);
+
+        Assert.Equal("Extracted", result.Status);
+        Assert.DoesNotContain(OracleSchemaProtocol.ProvisioningRole, ddl, StringComparison.Ordinal);
+        Assert.Contains("GRANT SELECT ON \"MERIDIAN\".\"ORDERS\" TO \"REPORTING\";", ddl, StringComparison.Ordinal);
+        Assert.Contains(result.Findings, finding => finding.Contains("Excluded 2 SELECT grant(s)", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// The provisioning contract grants the role SELECT on MERIDIAN tables and nothing else it owns, so a
+    /// SELECT it holds on a sequence is outside the contract and is a real difference in the source.
+    /// </summary>
+    [Fact]
+    public async Task ExtractAsync_KeepsASelectTheProvisioningRoleHoldsOnASequenceRatherThanATable()
+    {
+        FakeOracleDatabase database = MeridianCatalog.Build()
+            .OverrideView("DBA_TAB_PRIVS", MeridianCatalog.ObjectPrivileges(
+                ["MERIDIAN", "ORDERS", OracleSchemaProtocol.ProvisioningRole, "SELECT", "NO"],
+                ["MERIDIAN", "SEQ_ORDER_ID", OracleSchemaProtocol.ProvisioningRole, "SELECT", "NO"]));
+
+        OracleSchemaExtractionResult result = await Service(database).ExtractAsync(MeridianCatalog.Request(), default);
+        string ddl = MeridianCatalog.Ddl(result);
+
+        Assert.Equal("Extracted", result.Status);
+        Assert.Contains(
+            $"GRANT SELECT ON \"MERIDIAN\".\"SEQ_ORDER_ID\" TO \"{OracleSchemaProtocol.ProvisioningRole}\";",
+            ddl,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain($"\"ORDERS\" TO \"{OracleSchemaProtocol.ProvisioningRole}\"", ddl, StringComparison.Ordinal);
+        Assert.Contains(result.Findings, finding => finding.Contains("Excluded 1 SELECT grant(s)", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// The same boundary for a view: the contract grants the role no view, so the grant is retained and
+    /// then refused by the emitter as access control on an object this build does not rebuild. What must
+    /// never happen is the grant vanishing because of the grantee's name.
+    /// </summary>
+    [Fact]
+    public async Task ExtractAsync_KeepsASelectTheProvisioningRoleHoldsOnAViewRatherThanATable()
+    {
+        FakeOracleDatabase database = MeridianCatalog.Build()
+            .OverrideView("DBA_TAB_PRIVS", MeridianCatalog.ObjectPrivileges(
+                ["MERIDIAN", "ORDERS", OracleSchemaProtocol.ProvisioningRole, "SELECT", "NO"],
+                ["MERIDIAN", "V_OPEN_ORDERS", OracleSchemaProtocol.ProvisioningRole, "SELECT", "NO"]));
+
+        OracleSchemaExtractionResult result = await Service(database).ExtractAsync(MeridianCatalog.Request(), default);
+
+        Assert.Equal("ExtractionFailed", result.Status);
+        Assert.Null(result.SchemaArtifact);
+        Assert.Contains(result.Findings, finding => finding.Contains("MERIDIAN.V_OPEN_ORDERS", StringComparison.Ordinal));
+    }
+
+    /// <summary>A grantable SELECT on a table is not the contract either; the contract is non-grantable.</summary>
+    [Fact]
+    public async Task ExtractAsync_CountsOnlyTheNonGrantableTableSelectsItExcluded()
+    {
+        FakeOracleDatabase database = MeridianCatalog.Build()
+            .OverrideView("DBA_TAB_PRIVS", MeridianCatalog.ObjectPrivileges(
+                ["MERIDIAN", "ORDERS", OracleSchemaProtocol.ProvisioningRole, "SELECT", "NO"],
+                ["MERIDIAN", "CUSTOMERS", OracleSchemaProtocol.ProvisioningRole, "SELECT", "YES"],
+                ["MERIDIAN", "PRODUCTS", OracleSchemaProtocol.ProvisioningRole, "DELETE", "NO"]));
+
+        OracleSchemaExtractionResult result = await Service(database).ExtractAsync(MeridianCatalog.Request(), default);
+        string ddl = MeridianCatalog.Ddl(result);
+
+        Assert.Equal("Extracted", result.Status);
+        Assert.Contains(result.Findings, finding => finding.Contains("Excluded 1 SELECT grant(s)", StringComparison.Ordinal));
+        Assert.DoesNotContain($"\"ORDERS\" TO \"{OracleSchemaProtocol.ProvisioningRole}\"", ddl, StringComparison.Ordinal);
+        Assert.Contains(
+            $"GRANT SELECT ON \"MERIDIAN\".\"CUSTOMERS\" TO \"{OracleSchemaProtocol.ProvisioningRole}\" WITH GRANT OPTION;",
+            ddl,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $"GRANT DELETE ON \"MERIDIAN\".\"PRODUCTS\" TO \"{OracleSchemaProtocol.ProvisioningRole}\";",
+            ddl,
+            StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("OFM_GATEWAY_SOURCE_RO", "DELETE", "NO")]
+    [InlineData("OFM_GATEWAY_SOURCE_RO", "SELECT", "YES")]
+    [InlineData("OFM_GATEWAY_RO", "SELECT", "NO")]
+    [InlineData("OFM_GATEWAY_RO", "UPDATE", "NO")]
+    public async Task ExtractAsync_KeepsAnyGrantToTheGatewayNamesThatIsNotTheProvisioningContract(
+        string grantee,
+        string privilege,
+        string grantable)
+    {
+        FakeOracleDatabase database = MeridianCatalog.Build()
+            .OverrideView("DBA_TAB_PRIVS", MeridianCatalog.ObjectPrivileges(
+                ["MERIDIAN", "ORDERS", grantee, privilege, grantable]));
+
+        OracleSchemaExtractionResult result = await Service(database).ExtractAsync(MeridianCatalog.Request(), default);
+
+        Assert.Equal("Extracted", result.Status);
+        string ddl = MeridianCatalog.Ddl(result);
+        Assert.Contains($"GRANT {privilege} ON \"MERIDIAN\".\"ORDERS\" TO \"{grantee}\"", ddl, StringComparison.Ordinal);
+        Assert.DoesNotContain(result.Findings, finding => finding.Contains("Excluded", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ExtractAsync_KeepsAThirdPartyGrantTheGatewayIdentityCouldNotHaveSeenInTheAllViews()
+    {
+        FakeOracleDatabase database = MeridianCatalog.Build()
+            .OverrideView("DBA_TAB_PRIVS", MeridianCatalog.ObjectPrivileges(
+                ["MERIDIAN", "ORDERS", "REPORTING", "SELECT", "NO"],
+                ["MERIDIAN", "CUSTOMERS", "PUBLIC", "SELECT", "NO"],
+                ["MERIDIAN", "PLACE_ORDER", "BATCH_RUNNER", "EXECUTE", "NO"]));
+
+        OracleSchemaExtractionResult result = await Service(database).ExtractAsync(MeridianCatalog.Request(), default);
+        string ddl = MeridianCatalog.Ddl(result);
+
+        Assert.Equal("Extracted", result.Status);
+        Assert.Contains("GRANT SELECT ON \"MERIDIAN\".\"ORDERS\" TO \"REPORTING\";", ddl, StringComparison.Ordinal);
+        Assert.Contains("GRANT SELECT ON \"MERIDIAN\".\"CUSTOMERS\" TO PUBLIC;", ddl, StringComparison.Ordinal);
+        Assert.Contains("GRANT EXECUTE ON \"MERIDIAN\".\"PLACE_ORDER\" TO \"BATCH_RUNNER\";", ddl, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ExtractAsync_RefusesAColumnGrantEvenWhenItNamesTheGatewayRole()
+    {
+        FakeOracleDatabase database = MeridianCatalog.Build()
+            .OverrideView("DBA_COL_PRIVS", MeridianCatalog.ColumnPrivileges(
+                ["MERIDIAN", "CUSTOMERS", "CREDIT_LIMIT", OracleSchemaProtocol.ProvisioningRole, "SELECT"]));
+
+        OracleSchemaExtractionResult result = await Service(database).ExtractAsync(MeridianCatalog.Request(), default);
+
+        Assert.Equal("ExtractionFailed", result.Status);
+        Assert.Null(result.SchemaArtifact);
+        Assert.Contains(
+            result.Findings,
+            finding => finding.Contains($"SELECT on MERIDIAN.CUSTOMERS.CREDIT_LIMIT to {OracleSchemaProtocol.ProvisioningRole}", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ExtractAsync_ReadsPrivilegesForTheBoundOwnerWithNoGranteeSuppressedInSql()
+    {
+        FakeOracleDatabase database = MeridianCatalog.Build();
+
+        await Service(database).ExtractAsync(MeridianCatalog.Request(), default);
+
+        FakeExecution[] grantReads =
+        [
+            .. database.Executed.Where(execution =>
+                execution.CommandText.Contains("DBA_TAB_PRIVS", StringComparison.Ordinal) ||
+                execution.CommandText.Contains("DBA_COL_PRIVS", StringComparison.Ordinal)),
+        ];
+        Assert.Equal(2, grantReads.Length);
+        Assert.All(grantReads, execution =>
+        {
+            Assert.DoesNotContain("GRANTEE NOT IN", execution.CommandText, StringComparison.Ordinal);
+            Assert.DoesNotContain("OFM_GATEWAY", execution.CommandText, StringComparison.Ordinal);
+            Assert.Contains("WHERE OWNER = :owner", execution.CommandText, StringComparison.Ordinal);
+            Assert.DoesNotContain("SELECT ANY", execution.CommandText, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("MERIDIAN", execution.CommandText, StringComparison.Ordinal);
+            Assert.Equal("MERIDIAN", execution.Owner);
+        });
     }
 
     [Fact]
@@ -65,7 +275,7 @@ public sealed class SourceWorkerOracleSchemaTests
 
         await Service(database).ExtractAsync(MeridianCatalog.Request(), default);
 
-        Assert.Contains("ALL_OBJECTS", database.Executed[0].CommandText, StringComparison.Ordinal);
+        Assert.Contains("DBA_OBJECTS", database.Executed[0].CommandText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -111,7 +321,7 @@ public sealed class SourceWorkerOracleSchemaTests
         {
             Assert.StartsWith("SELECT", execution.CommandText.TrimStart(), StringComparison.Ordinal);
             Assert.DoesNotContain(';', execution.CommandText);
-            Assert.Contains("FROM ALL_", execution.CommandText, StringComparison.Ordinal);
+            Assert.Contains("FROM DBA_", execution.CommandText, StringComparison.Ordinal);
         });
     }
 
@@ -318,10 +528,10 @@ public sealed class SourceWorkerOracleSchemaTests
     public async Task ExtractAsync_FailsWhenTheSchemaIsAbsentOrInvisible()
     {
         FakeOracleDatabase database = MeridianCatalog.Build()
-            .OverrideView("ALL_OBJECTS", FakeResultSet.Of("OBJECT_NAME, OBJECT_TYPE, STATUS"))
-            .OverrideView("ALL_TABLES", FakeResultSet.Of("TABLE_NAME"))
-            .OverrideView("ALL_SEQUENCES", FakeResultSet.Of("SEQUENCE_NAME, MIN_VALUE, MAX_VALUE, INCREMENT_BY, CACHE_SIZE, LAST_NUMBER, CYCLE_FLAG, ORDER_FLAG"))
-            .OverrideView("ALL_SOURCE", FakeResultSet.Of("TYPE, NAME, LINE, TEXT"));
+            .OverrideView("DBA_OBJECTS", FakeResultSet.Of("OBJECT_NAME, OBJECT_TYPE, STATUS"))
+            .OverrideView("DBA_TABLES", FakeResultSet.Of("TABLE_NAME"))
+            .OverrideView("DBA_SEQUENCES", FakeResultSet.Of("SEQUENCE_NAME, MIN_VALUE, MAX_VALUE, INCREMENT_BY, CACHE_SIZE, LAST_NUMBER, CYCLE_FLAG, ORDER_FLAG"))
+            .OverrideView("DBA_SOURCE", FakeResultSet.Of("TYPE, NAME, LINE, TEXT"));
 
         OracleSchemaExtractionResult result = await Service(database).ExtractAsync(MeridianCatalog.Request(), default);
 
@@ -334,7 +544,7 @@ public sealed class SourceWorkerOracleSchemaTests
     public async Task ExtractAsync_FailsRatherThanDroppingADatabaseTrigger()
     {
         FakeOracleDatabase database = MeridianCatalog.Build()
-            .OverrideView("ALL_TRIGGERS", FakeResultSet.Of("TRIGGER_NAME", ["TRG_ORDERS_AUDIT"]));
+            .OverrideView("DBA_TRIGGERS", FakeResultSet.Of("TRIGGER_NAME", ["TRG_ORDERS_AUDIT"]));
 
         OracleSchemaExtractionResult result = await Service(database).ExtractAsync(MeridianCatalog.Request(), default);
 
@@ -347,7 +557,7 @@ public sealed class SourceWorkerOracleSchemaTests
     public async Task ExtractAsync_FailsRatherThanGuessingAnUnrenderableColumnType()
     {
         FakeOracleDatabase database = MeridianCatalog.Build()
-            .OverrideView("ALL_TAB_COLUMNS", FakeResultSet.Of(
+            .OverrideView("DBA_TAB_COLUMNS", FakeResultSet.Of(
                 "TABLE_NAME, COLUMN_NAME, COLUMN_ID, DATA_TYPE, DATA_LENGTH, CHAR_LENGTH, CHAR_USED, DATA_PRECISION, DATA_SCALE, NULLABLE, DATA_DEFAULT",
                 ["CUSTOMERS", "CUSTOMER_ID", "1", "NUMBER", "22", null, null, "10", "0", "N", null],
                 ["CUSTOMERS", "TERRITORY", "2", "SDO_GEOMETRY", "1", null, null, null, null, "Y", null]));
@@ -362,10 +572,10 @@ public sealed class SourceWorkerOracleSchemaTests
     public async Task ExtractAsync_FailsWhenAForeignKeyPointsOutsideTheCoveredSet()
     {
         FakeOracleDatabase database = MeridianCatalog.Build()
-            .OverrideView("ALL_CONSTRAINTS", FakeResultSet.Of(
+            .OverrideView("DBA_CONSTRAINTS", FakeResultSet.Of(
                 "TABLE_NAME, CONSTRAINT_NAME, CONSTRAINT_TYPE, R_OWNER, R_CONSTRAINT_NAME, DELETE_RULE, STATUS, SEARCH_CONDITION",
                 ["ORDERS", "FK_ORDERS_LEDGER", "R", "FINANCE", "PK_LEDGER", "NO ACTION", "ENABLED", null]))
-            .OverrideView("ALL_CONS_COLUMNS", FakeResultSet.Of(
+            .OverrideView("DBA_CONS_COLUMNS", FakeResultSet.Of(
                 "CONSTRAINT_NAME, COLUMN_NAME, POSITION",
                 ["FK_ORDERS_LEDGER", "CUSTOMER_ID", "1"]));
 
@@ -379,7 +589,7 @@ public sealed class SourceWorkerOracleSchemaTests
     public async Task ExtractAsync_FailsWhenAnObjectDependsOnASchemaOutsideTheAllowlist()
     {
         FakeOracleDatabase database = MeridianCatalog.Build()
-            .OverrideView("ALL_DEPENDENCIES", FakeResultSet.Of(
+            .OverrideView("DBA_DEPENDENCIES", FakeResultSet.Of(
                 "NAME, REFERENCED_OWNER, REFERENCED_NAME, REFERENCED_LINK_NAME",
                 ["PLACE_ORDER", "FINANCE", "LEDGER", null]));
 
@@ -393,7 +603,7 @@ public sealed class SourceWorkerOracleSchemaTests
     public async Task ExtractAsync_FailsWhenAnObjectIsReachedOverADatabaseLink()
     {
         FakeOracleDatabase database = MeridianCatalog.Build()
-            .OverrideView("ALL_DEPENDENCIES", FakeResultSet.Of(
+            .OverrideView("DBA_DEPENDENCIES", FakeResultSet.Of(
                 "NAME, REFERENCED_OWNER, REFERENCED_NAME, REFERENCED_LINK_NAME",
                 ["PLACE_ORDER", "MERIDIAN", "LEDGER", "FINANCE.WORLD"]));
 
@@ -407,21 +617,21 @@ public sealed class SourceWorkerOracleSchemaTests
     public async Task ExtractAsync_FallsBackWhenTheInstanceHasNoCharacterSemanticsColumns()
     {
         FakeOracleDatabase database = MeridianCatalog.Build()
-            .OverrideView("ALL_TAB_COLUMNS", FakeResultSet.Of(
+            .OverrideView("DBA_TAB_COLUMNS", FakeResultSet.Of(
                 "TABLE_NAME, COLUMN_NAME, COLUMN_ID, DATA_TYPE, DATA_LENGTH, DATA_PRECISION, DATA_SCALE, NULLABLE, DATA_DEFAULT",
                 ["CUSTOMERS", "CUSTOMER_ID", "1", "NUMBER", "22", "10", "0", "N", null],
                 ["CUSTOMERS", "CUSTOMER_NAME", "2", "VARCHAR2", "100", null, null, "N", null]))
             .Fail(sql => sql.Contains("CHAR_LENGTH", StringComparison.Ordinal))
-            .OverrideView("ALL_OBJECTS", FakeResultSet.Of("OBJECT_NAME, OBJECT_TYPE, STATUS", ["CUSTOMERS", "TABLE", "VALID"]))
-            .OverrideView("ALL_TABLES", FakeResultSet.Of("TABLE_NAME", ["CUSTOMERS"]))
-            .OverrideView("ALL_INDEXES", FakeResultSet.Of("INDEX_NAME, TABLE_OWNER, TABLE_NAME, UNIQUENESS, INDEX_TYPE"))
-            .OverrideView("ALL_IND_COLUMNS", FakeResultSet.Of("INDEX_NAME, COLUMN_NAME, COLUMN_POSITION, DESCEND"))
-            .OverrideView("ALL_SEQUENCES", FakeResultSet.Of("SEQUENCE_NAME, MIN_VALUE, MAX_VALUE, INCREMENT_BY, CACHE_SIZE, LAST_NUMBER, CYCLE_FLAG, ORDER_FLAG"))
-            .OverrideView("ALL_SOURCE", FakeResultSet.Of("TYPE, NAME, LINE, TEXT"))
-            .OverrideView("ALL_DEPENDENCIES", FakeResultSet.Of("NAME, REFERENCED_OWNER, REFERENCED_NAME, REFERENCED_LINK_NAME"))
-            .OverrideView("ALL_CONSTRAINTS", FakeResultSet.Of(
+            .OverrideView("DBA_OBJECTS", FakeResultSet.Of("OBJECT_NAME, OBJECT_TYPE, STATUS", ["CUSTOMERS", "TABLE", "VALID"]))
+            .OverrideView("DBA_TABLES", FakeResultSet.Of("TABLE_NAME", ["CUSTOMERS"]))
+            .OverrideView("DBA_INDEXES", FakeResultSet.Of("INDEX_NAME, TABLE_OWNER, TABLE_NAME, UNIQUENESS, INDEX_TYPE"))
+            .OverrideView("DBA_IND_COLUMNS", FakeResultSet.Of("INDEX_NAME, COLUMN_NAME, COLUMN_POSITION, DESCEND"))
+            .OverrideView("DBA_SEQUENCES", FakeResultSet.Of("SEQUENCE_NAME, MIN_VALUE, MAX_VALUE, INCREMENT_BY, CACHE_SIZE, LAST_NUMBER, CYCLE_FLAG, ORDER_FLAG"))
+            .OverrideView("DBA_SOURCE", FakeResultSet.Of("TYPE, NAME, LINE, TEXT"))
+            .OverrideView("DBA_DEPENDENCIES", FakeResultSet.Of("NAME, REFERENCED_OWNER, REFERENCED_NAME, REFERENCED_LINK_NAME"))
+            .OverrideView("DBA_CONSTRAINTS", FakeResultSet.Of(
                 "TABLE_NAME, CONSTRAINT_NAME, CONSTRAINT_TYPE, R_OWNER, R_CONSTRAINT_NAME, DELETE_RULE, STATUS, SEARCH_CONDITION"))
-            .OverrideView("ALL_CONS_COLUMNS", FakeResultSet.Of("CONSTRAINT_NAME, COLUMN_NAME, POSITION"));
+            .OverrideView("DBA_CONS_COLUMNS", FakeResultSet.Of("CONSTRAINT_NAME, COLUMN_NAME, POSITION"));
 
         OracleSchemaExtractionResult result = await Service(database).ExtractAsync(MeridianCatalog.Request(), default);
 
@@ -433,7 +643,7 @@ public sealed class SourceWorkerOracleSchemaTests
     [Fact]
     public async Task ExtractAsync_ReportsAClientFailureWithoutQuotingIt()
     {
-        FakeOracleDatabase database = MeridianCatalog.Build().Fail(sql => sql.Contains("ALL_CONSTRAINTS", StringComparison.Ordinal));
+        FakeOracleDatabase database = MeridianCatalog.Build().Fail(sql => sql.Contains("DBA_CONSTRAINTS", StringComparison.Ordinal));
 
         OracleSchemaExtractionResult result = await Service(database).ExtractAsync(MeridianCatalog.Request(), default);
 

@@ -167,7 +167,7 @@ public static class OracleDdlEmitter
         if (!OracleObjectCoverage.IndexTypes.Contains(index.IndexType, StringComparer.Ordinal))
         {
             throw new CatalogIncompleteException(
-                $"Index '{index.Schema}.{index.Name}' is of type '{index.IndexType}', whose definition this build cannot rebuild from ALL_IND_COLUMNS; the extraction fails rather than emitting a different index.");
+                $"Index '{index.Schema}.{index.Name}' is of type '{index.IndexType}', whose definition this build cannot rebuild from DBA_IND_COLUMNS; the extraction fails rather than emitting a different index.");
         }
 
         if (!tables.Contains((index.TableOwner, index.TableName)))

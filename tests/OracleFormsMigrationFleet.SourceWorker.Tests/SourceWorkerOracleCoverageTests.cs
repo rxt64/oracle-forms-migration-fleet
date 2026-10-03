@@ -98,9 +98,9 @@ public sealed class SourceWorkerOracleCoverageTests
     public async Task A_unique_index_a_constraint_was_built_on_under_another_name_is_not_written_twice()
     {
         FakeOracleDatabase database = MeridianCatalog.Build()
-            .OverrideView("ALL_OBJECTS", MeridianCatalog.Objects(["IX_PRODUCT_NAME", "INDEX", "VALID"]))
-            .OverrideView("ALL_INDEXES", MeridianCatalog.Indexes(["IX_PRODUCT_NAME", "MERIDIAN", "PRODUCTS", "UNIQUE", "NORMAL"]))
-            .OverrideView("ALL_IND_COLUMNS", MeridianCatalog.IndexColumns(["IX_PRODUCT_NAME", "PRODUCT_NAME", "1", "ASC"]));
+            .OverrideView("DBA_OBJECTS", MeridianCatalog.Objects(["IX_PRODUCT_NAME", "INDEX", "VALID"]))
+            .OverrideView("DBA_INDEXES", MeridianCatalog.Indexes(["IX_PRODUCT_NAME", "MERIDIAN", "PRODUCTS", "UNIQUE", "NORMAL"]))
+            .OverrideView("DBA_IND_COLUMNS", MeridianCatalog.IndexColumns(["IX_PRODUCT_NAME", "PRODUCT_NAME", "1", "ASC"]));
 
         OracleSchemaExtractionResult result = await Extract(database);
 
@@ -113,9 +113,9 @@ public sealed class SourceWorkerOracleCoverageTests
     public async Task A_non_constraint_index_is_written_as_the_index_the_catalog_reported()
     {
         FakeOracleDatabase database = MeridianCatalog.Build()
-            .OverrideView("ALL_OBJECTS", MeridianCatalog.Objects(["IDX_ORDERS_STATUS", "INDEX", "VALID"]))
-            .OverrideView("ALL_INDEXES", MeridianCatalog.Indexes(["IDX_ORDERS_STATUS", "MERIDIAN", "ORDERS", "NONUNIQUE", "NORMAL"]))
-            .OverrideView("ALL_IND_COLUMNS", MeridianCatalog.IndexColumns(
+            .OverrideView("DBA_OBJECTS", MeridianCatalog.Objects(["IDX_ORDERS_STATUS", "INDEX", "VALID"]))
+            .OverrideView("DBA_INDEXES", MeridianCatalog.Indexes(["IDX_ORDERS_STATUS", "MERIDIAN", "ORDERS", "NONUNIQUE", "NORMAL"]))
+            .OverrideView("DBA_IND_COLUMNS", MeridianCatalog.IndexColumns(
                 ["IDX_ORDERS_STATUS", "STATUS", "1", "ASC"],
                 ["IDX_ORDERS_STATUS", "ORDER_DATE", "2", "DESC"]));
 
@@ -135,9 +135,9 @@ public sealed class SourceWorkerOracleCoverageTests
     public async Task A_unique_non_constraint_index_keeps_its_uniqueness()
     {
         FakeOracleDatabase database = MeridianCatalog.Build()
-            .OverrideView("ALL_OBJECTS", MeridianCatalog.Objects(["UX_CUSTOMER_NAME", "INDEX", "VALID"]))
-            .OverrideView("ALL_INDEXES", MeridianCatalog.Indexes(["UX_CUSTOMER_NAME", "MERIDIAN", "CUSTOMERS", "UNIQUE", "NORMAL"]))
-            .OverrideView("ALL_IND_COLUMNS", MeridianCatalog.IndexColumns(["UX_CUSTOMER_NAME", "CUSTOMER_NAME", "1", "ASC"]));
+            .OverrideView("DBA_OBJECTS", MeridianCatalog.Objects(["UX_CUSTOMER_NAME", "INDEX", "VALID"]))
+            .OverrideView("DBA_INDEXES", MeridianCatalog.Indexes(["UX_CUSTOMER_NAME", "MERIDIAN", "CUSTOMERS", "UNIQUE", "NORMAL"]))
+            .OverrideView("DBA_IND_COLUMNS", MeridianCatalog.IndexColumns(["UX_CUSTOMER_NAME", "CUSTOMER_NAME", "1", "ASC"]));
 
         Assert.Contains(
             "CREATE UNIQUE INDEX \"MERIDIAN\".\"UX_CUSTOMER_NAME\" ON \"MERIDIAN\".\"CUSTOMERS\" (\"CUSTOMER_NAME\");",
@@ -153,12 +153,11 @@ public sealed class SourceWorkerOracleCoverageTests
     public async Task Indexes_and_grants_are_written_before_the_program_unit_section()
     {
         FakeOracleDatabase database = MeridianCatalog.Build()
-            .OverrideView("ALL_OBJECTS", MeridianCatalog.Objects(["IDX_ORDERS_STATUS", "INDEX", "VALID"]))
-            .OverrideView("ALL_INDEXES", MeridianCatalog.Indexes(["IDX_ORDERS_STATUS", "MERIDIAN", "ORDERS", "NONUNIQUE", "NORMAL"]))
-            .OverrideView("ALL_IND_COLUMNS", MeridianCatalog.IndexColumns(["IDX_ORDERS_STATUS", "STATUS", "1", "ASC"]))
-            .OverrideView("ALL_TAB_PRIVS", FakeResultSet.Of(
-                "TABLE_NAME, GRANTEE, PRIVILEGE, GRANTABLE",
-                ["ORDERS", "REPORTING", "SELECT", "NO"]));
+            .OverrideView("DBA_OBJECTS", MeridianCatalog.Objects(["IDX_ORDERS_STATUS", "INDEX", "VALID"]))
+            .OverrideView("DBA_INDEXES", MeridianCatalog.Indexes(["IDX_ORDERS_STATUS", "MERIDIAN", "ORDERS", "NONUNIQUE", "NORMAL"]))
+            .OverrideView("DBA_IND_COLUMNS", MeridianCatalog.IndexColumns(["IDX_ORDERS_STATUS", "STATUS", "1", "ASC"]))
+            .OverrideView("DBA_TAB_PRIVS", MeridianCatalog.ObjectPrivileges(
+                ["MERIDIAN", "ORDERS", "REPORTING", "SELECT", "NO"]));
 
         string ddl = MeridianCatalog.Ddl(await Extract(database));
 
@@ -176,12 +175,11 @@ public sealed class SourceWorkerOracleCoverageTests
     public async Task An_object_grant_is_written_back_with_its_grant_option()
     {
         FakeOracleDatabase database = MeridianCatalog.Build()
-            .OverrideView("ALL_TAB_PRIVS", FakeResultSet.Of(
-                "TABLE_NAME, GRANTEE, PRIVILEGE, GRANTABLE",
-                ["ORDERS", "REPORTING", "SELECT", "YES"],
-                ["ORDERS", "PUBLIC", "SELECT", "NO"],
-                ["PLACE_ORDER", "REPORTING", "EXECUTE", "NO"],
-                ["SEQ_ORDER_ID", "REPORTING", "SELECT", "NO"]));
+            .OverrideView("DBA_TAB_PRIVS", MeridianCatalog.ObjectPrivileges(
+                ["MERIDIAN", "ORDERS", "REPORTING", "SELECT", "YES"],
+                ["MERIDIAN", "ORDERS", "PUBLIC", "SELECT", "NO"],
+                ["MERIDIAN", "PLACE_ORDER", "REPORTING", "EXECUTE", "NO"],
+                ["MERIDIAN", "SEQ_ORDER_ID", "REPORTING", "SELECT", "NO"]));
 
         OracleSchemaExtractionResult result = await Extract(database);
         string ddl = MeridianCatalog.Ddl(result);
@@ -198,10 +196,9 @@ public sealed class SourceWorkerOracleCoverageTests
     public async Task The_same_privilege_from_two_grantors_is_one_grant()
     {
         FakeOracleDatabase database = MeridianCatalog.Build()
-            .OverrideView("ALL_TAB_PRIVS", FakeResultSet.Of(
-                "TABLE_NAME, GRANTEE, PRIVILEGE, GRANTABLE",
-                ["ORDERS", "REPORTING", "SELECT", "NO"],
-                ["ORDERS", "REPORTING", "SELECT", "NO"]));
+            .OverrideView("DBA_TAB_PRIVS", MeridianCatalog.ObjectPrivileges(
+                ["MERIDIAN", "ORDERS", "REPORTING", "SELECT", "NO"],
+                ["MERIDIAN", "ORDERS", "REPORTING", "SELECT", "NO"]));
 
         OracleSchemaExtractionResult result = await Extract(database);
 
@@ -212,8 +209,8 @@ public sealed class SourceWorkerOracleCoverageTests
     public async Task A_lob_segment_is_covered_by_the_table_that_declares_it()
     {
         FakeOracleDatabase database = MeridianCatalog.Build()
-            .OverrideView("ALL_OBJECTS", MeridianCatalog.Objects(["SYS_LOB0000031415C00004$$", "LOB", "VALID"]))
-            .OverrideView("ALL_TAB_COLUMNS", FakeResultSet.Of(
+            .OverrideView("DBA_OBJECTS", MeridianCatalog.Objects(["SYS_LOB0000031415C00004$$", "LOB", "VALID"]))
+            .OverrideView("DBA_TAB_COLUMNS", FakeResultSet.Of(
                 "TABLE_NAME, COLUMN_NAME, COLUMN_ID, DATA_TYPE, DATA_LENGTH, CHAR_LENGTH, CHAR_USED, DATA_PRECISION, DATA_SCALE, NULLABLE, DATA_DEFAULT",
                 ["CUSTOMERS", "CUSTOMER_ID", "1", "NUMBER", "22", null, null, "10", "0", "N", null],
                 ["CUSTOMERS", "CUSTOMER_NAME", "2", "VARCHAR2", "100", "100", "B", null, null, "N", null],
@@ -253,7 +250,7 @@ public sealed class SourceWorkerOracleCoverageTests
     public async Task An_object_kind_this_build_cannot_rebuild_produces_no_artifact(string objectType, string name)
     {
         FakeOracleDatabase database = MeridianCatalog.Build()
-            .OverrideView("ALL_OBJECTS", MeridianCatalog.Objects([name, objectType, "VALID"]));
+            .OverrideView("DBA_OBJECTS", MeridianCatalog.Objects([name, objectType, "VALID"]));
 
         OracleSchemaExtractionResult result = await Refused(database, $"MERIDIAN.{name} ({objectType})");
 
@@ -266,7 +263,7 @@ public sealed class SourceWorkerOracleCoverageTests
     public async Task A_view_in_an_approved_schema_is_no_longer_silently_absent()
     {
         FakeOracleDatabase database = MeridianCatalog.Build()
-            .OverrideView("ALL_OBJECTS", MeridianCatalog.Objects(["V_OPEN_ORDERS", "VIEW", "VALID"]));
+            .OverrideView("DBA_OBJECTS", MeridianCatalog.Objects(["V_OPEN_ORDERS", "VIEW", "VALID"]));
 
         OracleSchemaExtractionResult result = await Extract(database);
 
@@ -281,7 +278,7 @@ public sealed class SourceWorkerOracleCoverageTests
     public async Task An_object_the_instance_does_not_report_as_valid_produces_no_artifact(string status)
     {
         FakeOracleDatabase database = MeridianCatalog.Build()
-            .OverrideView("ALL_OBJECTS", MeridianCatalog.Objects(["RECALC_TOTALS", "PROCEDURE", status]));
+            .OverrideView("DBA_OBJECTS", MeridianCatalog.Objects(["RECALC_TOTALS", "PROCEDURE", status]));
 
         await Refused(database, $"MERIDIAN.RECALC_TOTALS (PROCEDURE is {status})");
     }
@@ -290,7 +287,7 @@ public sealed class SourceWorkerOracleCoverageTests
     public async Task An_object_the_inventory_lists_but_no_read_returned_produces_no_artifact()
     {
         FakeOracleDatabase database = MeridianCatalog.Build()
-            .OverrideView("ALL_OBJECTS", MeridianCatalog.Objects(["ARCHIVED_ORDERS", "TABLE", "VALID"]));
+            .OverrideView("DBA_OBJECTS", MeridianCatalog.Objects(["ARCHIVED_ORDERS", "TABLE", "VALID"]));
 
         await Refused(database, "ARCHIVED_ORDERS");
     }
@@ -299,8 +296,8 @@ public sealed class SourceWorkerOracleCoverageTests
     public async Task An_index_the_inventory_does_not_list_produces_no_artifact()
     {
         FakeOracleDatabase database = MeridianCatalog.Build()
-            .OverrideView("ALL_INDEXES", MeridianCatalog.Indexes(["IDX_GHOST", "MERIDIAN", "ORDERS", "NONUNIQUE", "NORMAL"]))
-            .OverrideView("ALL_IND_COLUMNS", MeridianCatalog.IndexColumns(["IDX_GHOST", "STATUS", "1", "ASC"]));
+            .OverrideView("DBA_INDEXES", MeridianCatalog.Indexes(["IDX_GHOST", "MERIDIAN", "ORDERS", "NONUNIQUE", "NORMAL"]))
+            .OverrideView("DBA_IND_COLUMNS", MeridianCatalog.IndexColumns(["IDX_GHOST", "STATUS", "1", "ASC"]));
 
         await Refused(database, "IDX_GHOST");
     }
@@ -309,7 +306,7 @@ public sealed class SourceWorkerOracleCoverageTests
     public async Task A_program_unit_the_inventory_lists_but_the_source_read_missed_produces_no_artifact()
     {
         FakeOracleDatabase database = MeridianCatalog.Build()
-            .OverrideView("ALL_SOURCE", MeridianCatalog.Source(MeridianCatalog.ProcedureBody, "PROCEDURE", "SHADOW_PROC"));
+            .OverrideView("DBA_SOURCE", MeridianCatalog.Source(MeridianCatalog.ProcedureBody, "PROCEDURE", "SHADOW_PROC"));
 
         await Refused(database, "PLACE_ORDER");
     }
@@ -322,9 +319,9 @@ public sealed class SourceWorkerOracleCoverageTests
     public async Task An_index_this_build_cannot_rebuild_produces_no_artifact(string indexType)
     {
         FakeOracleDatabase database = MeridianCatalog.Build()
-            .OverrideView("ALL_OBJECTS", MeridianCatalog.Objects(["IDX_ORDERS_STATUS", "INDEX", "VALID"]))
-            .OverrideView("ALL_INDEXES", MeridianCatalog.Indexes(["IDX_ORDERS_STATUS", "MERIDIAN", "ORDERS", "NONUNIQUE", indexType]))
-            .OverrideView("ALL_IND_COLUMNS", MeridianCatalog.IndexColumns(["IDX_ORDERS_STATUS", "STATUS", "1", "ASC"]));
+            .OverrideView("DBA_OBJECTS", MeridianCatalog.Objects(["IDX_ORDERS_STATUS", "INDEX", "VALID"]))
+            .OverrideView("DBA_INDEXES", MeridianCatalog.Indexes(["IDX_ORDERS_STATUS", "MERIDIAN", "ORDERS", "NONUNIQUE", indexType]))
+            .OverrideView("DBA_IND_COLUMNS", MeridianCatalog.IndexColumns(["IDX_ORDERS_STATUS", "STATUS", "1", "ASC"]));
 
         await Refused(database, indexType);
     }
@@ -333,8 +330,8 @@ public sealed class SourceWorkerOracleCoverageTests
     public async Task An_index_with_no_columns_produces_no_artifact()
     {
         FakeOracleDatabase database = MeridianCatalog.Build()
-            .OverrideView("ALL_OBJECTS", MeridianCatalog.Objects(["IDX_ORDERS_STATUS", "INDEX", "VALID"]))
-            .OverrideView("ALL_INDEXES", MeridianCatalog.Indexes(["IDX_ORDERS_STATUS", "MERIDIAN", "ORDERS", "NONUNIQUE", "NORMAL"]));
+            .OverrideView("DBA_OBJECTS", MeridianCatalog.Objects(["IDX_ORDERS_STATUS", "INDEX", "VALID"]))
+            .OverrideView("DBA_INDEXES", MeridianCatalog.Indexes(["IDX_ORDERS_STATUS", "MERIDIAN", "ORDERS", "NONUNIQUE", "NORMAL"]));
 
         await Refused(database, "IDX_ORDERS_STATUS' returned no columns");
     }
@@ -343,9 +340,9 @@ public sealed class SourceWorkerOracleCoverageTests
     public async Task An_index_on_a_table_outside_the_covered_set_produces_no_artifact()
     {
         FakeOracleDatabase database = MeridianCatalog.Build()
-            .OverrideView("ALL_OBJECTS", MeridianCatalog.Objects(["IDX_LEDGER", "INDEX", "VALID"]))
-            .OverrideView("ALL_INDEXES", MeridianCatalog.Indexes(["IDX_LEDGER", "FINANCE", "LEDGER", "NONUNIQUE", "NORMAL"]))
-            .OverrideView("ALL_IND_COLUMNS", MeridianCatalog.IndexColumns(["IDX_LEDGER", "ENTRY_ID", "1", "ASC"]));
+            .OverrideView("DBA_OBJECTS", MeridianCatalog.Objects(["IDX_LEDGER", "INDEX", "VALID"]))
+            .OverrideView("DBA_INDEXES", MeridianCatalog.Indexes(["IDX_LEDGER", "FINANCE", "LEDGER", "NONUNIQUE", "NORMAL"]))
+            .OverrideView("DBA_IND_COLUMNS", MeridianCatalog.IndexColumns(["IDX_LEDGER", "ENTRY_ID", "1", "ASC"]));
 
         await Refused(database, "FINANCE.LEDGER");
     }
@@ -354,9 +351,8 @@ public sealed class SourceWorkerOracleCoverageTests
     public async Task A_column_level_privilege_produces_no_artifact()
     {
         FakeOracleDatabase database = MeridianCatalog.Build()
-            .OverrideView("ALL_COL_PRIVS", FakeResultSet.Of(
-                "TABLE_NAME, COLUMN_NAME, GRANTEE, PRIVILEGE",
-                ["CUSTOMERS", "CREDIT_LIMIT", "REPORTING", "UPDATE"]));
+            .OverrideView("DBA_COL_PRIVS", MeridianCatalog.ColumnPrivileges(
+                ["MERIDIAN", "CUSTOMERS", "CREDIT_LIMIT", "REPORTING", "UPDATE"]));
 
         await Refused(database, "UPDATE on MERIDIAN.CUSTOMERS.CREDIT_LIMIT to REPORTING");
     }
@@ -365,9 +361,8 @@ public sealed class SourceWorkerOracleCoverageTests
     public async Task A_privilege_this_build_does_not_write_back_produces_no_artifact()
     {
         FakeOracleDatabase database = MeridianCatalog.Build()
-            .OverrideView("ALL_TAB_PRIVS", FakeResultSet.Of(
-                "TABLE_NAME, GRANTEE, PRIVILEGE, GRANTABLE",
-                ["ORDERS", "REPORTING", "ON COMMIT REFRESH", "NO"]));
+            .OverrideView("DBA_TAB_PRIVS", MeridianCatalog.ObjectPrivileges(
+                ["MERIDIAN", "ORDERS", "REPORTING", "ON COMMIT REFRESH", "NO"]));
 
         await Refused(database, "ON COMMIT REFRESH");
     }
@@ -376,9 +371,8 @@ public sealed class SourceWorkerOracleCoverageTests
     public async Task A_grant_on_an_object_this_run_did_not_cover_produces_no_artifact()
     {
         FakeOracleDatabase database = MeridianCatalog.Build()
-            .OverrideView("ALL_TAB_PRIVS", FakeResultSet.Of(
-                "TABLE_NAME, GRANTEE, PRIVILEGE, GRANTABLE",
-                ["V_OPEN_ORDERS", "REPORTING", "SELECT", "NO"]));
+            .OverrideView("DBA_TAB_PRIVS", MeridianCatalog.ObjectPrivileges(
+                ["MERIDIAN", "V_OPEN_ORDERS", "REPORTING", "SELECT", "NO"]));
 
         await Refused(database, "MERIDIAN.V_OPEN_ORDERS");
     }
@@ -387,7 +381,7 @@ public sealed class SourceWorkerOracleCoverageTests
     public async Task A_same_schema_dependency_the_inventory_does_not_cover_produces_no_artifact()
     {
         FakeOracleDatabase database = MeridianCatalog.Build()
-            .OverrideView("ALL_DEPENDENCIES", MeridianCatalog.Dependencies(["PLACE_ORDER", "MERIDIAN", "V_OPEN_ORDERS", null]));
+            .OverrideView("DBA_DEPENDENCIES", MeridianCatalog.Dependencies(["PLACE_ORDER", "MERIDIAN", "V_OPEN_ORDERS", null]));
 
         await Refused(database, "MERIDIAN.V_OPEN_ORDERS (absent from the inventory this run read)");
     }
@@ -396,7 +390,7 @@ public sealed class SourceWorkerOracleCoverageTests
     public async Task A_server_owned_dependency_that_is_not_a_language_builtin_produces_no_artifact()
     {
         FakeOracleDatabase database = MeridianCatalog.Build()
-            .OverrideView("ALL_DEPENDENCIES", MeridianCatalog.Dependencies(["PLACE_ORDER", "SYS", "DBMS_LOB", null]));
+            .OverrideView("DBA_DEPENDENCIES", MeridianCatalog.Dependencies(["PLACE_ORDER", "SYS", "DBMS_LOB", null]));
 
         await Refused(database, "SYS.DBMS_LOB (server-owned object this build does not cover)");
     }
@@ -405,7 +399,7 @@ public sealed class SourceWorkerOracleCoverageTests
     public async Task A_dependency_the_catalog_did_not_name_produces_no_artifact()
     {
         FakeOracleDatabase database = MeridianCatalog.Build()
-            .OverrideView("ALL_DEPENDENCIES", MeridianCatalog.Dependencies(["PLACE_ORDER", null, null, null]));
+            .OverrideView("DBA_DEPENDENCIES", MeridianCatalog.Dependencies(["PLACE_ORDER", null, null, null]));
 
         await Refused(database, "a dependency the catalog did not name");
     }
@@ -418,7 +412,7 @@ public sealed class SourceWorkerOracleCoverageTests
     public async Task The_language_builtins_a_plsql_unit_compiles_against_do_not_block()
     {
         FakeOracleDatabase database = MeridianCatalog.Build()
-            .OverrideView("ALL_DEPENDENCIES", MeridianCatalog.Dependencies(
+            .OverrideView("DBA_DEPENDENCIES", MeridianCatalog.Dependencies(
                 ["PLACE_ORDER", "SYS", "DUAL", null],
                 ["PLACE_ORDER", "SYS", "DBMS_STANDARD", null],
                 ["PLACE_ORDER", "SYS", "PLITBLM", null],
@@ -431,7 +425,7 @@ public sealed class SourceWorkerOracleCoverageTests
     public async Task A_cross_schema_dependency_inside_the_allowlist_resolves_against_the_inventory()
     {
         FakeOracleDatabase database = MeridianCatalog.Build()
-            .OverrideView("ALL_DEPENDENCIES", MeridianCatalog.Dependencies(["PLACE_ORDER", "PAYROLL", "STAFF", null]));
+            .OverrideView("DBA_DEPENDENCIES", MeridianCatalog.Dependencies(["PLACE_ORDER", "PAYROLL", "STAFF", null]));
 
         OracleSchemaExtractionService service = new(new FakeOracleConnectionFactory(database, ["MERIDIAN", "PAYROLL"]));
 
@@ -449,7 +443,7 @@ public sealed class SourceWorkerOracleCoverageTests
 
         await Extract(database);
 
-        FakeExecution inventory = database.Executed.First(execution => execution.CommandText.Contains("ALL_OBJECTS", StringComparison.Ordinal));
+        FakeExecution inventory = database.Executed.First(execution => execution.CommandText.Contains("DBA_OBJECTS", StringComparison.Ordinal));
 
         Assert.Contains(":owner", inventory.CommandText, StringComparison.Ordinal);
         Assert.DoesNotContain("MERIDIAN", inventory.CommandText, StringComparison.OrdinalIgnoreCase);
@@ -460,7 +454,7 @@ public sealed class SourceWorkerOracleCoverageTests
     public async Task A_refused_schema_still_reports_the_correlation_the_caller_sent()
     {
         FakeOracleDatabase database = MeridianCatalog.Build()
-            .OverrideView("ALL_OBJECTS", MeridianCatalog.Objects(["V_OPEN_ORDERS", "VIEW", "VALID"]));
+            .OverrideView("DBA_OBJECTS", MeridianCatalog.Objects(["V_OPEN_ORDERS", "VIEW", "VALID"]));
 
         OracleSchemaExtractionResult result = await Extract(database);
 

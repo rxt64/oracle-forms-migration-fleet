@@ -9,6 +9,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+Import-Module (Join-Path $PSScriptRoot 'SourceGatewayCredentialTransfer.psm1') -Force
 
 if (-not (Test-Path -LiteralPath $PublicCertificatePath -PathType Leaf)) {
     throw 'The one-time public certificate was not found.'
@@ -19,11 +20,11 @@ if (Test-Path -LiteralPath $OutputPath) {
 
 $certificate = New-Object Security.Cryptography.X509Certificates.X509Certificate2($PublicCertificatePath)
 try {
-    if ($certificate.NotAfter.ToUniversalTime() -le [DateTime]::UtcNow) {
-        throw 'The one-time public certificate has expired.'
-    }
     $rsa = [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPublicKey($certificate)
     try {
+        if ($null -eq $rsa) {
+            throw 'The one-time public certificate has no RSA public key.'
+        }
         $maximumPlaintextBytes = ($rsa.KeySize / 8) - (2 * 32) - 2
         $input = [Console]::OpenStandardInput()
         $buffer = [byte[]]::new($maximumPlaintextBytes + 3)
@@ -39,7 +40,7 @@ try {
         $plaintext = [byte[]]::new($count)
         [Array]::Copy($buffer, $plaintext, $count)
         try {
-            $ciphertext = $rsa.Encrypt($plaintext, [Security.Cryptography.RSAEncryptionPadding]::OaepSHA256)
+            $ciphertext = Protect-SourceGatewayCredentialBytes -Certificate $certificate -Plaintext $plaintext
             [IO.File]::WriteAllBytes($OutputPath, $ciphertext)
         }
         finally {
