@@ -806,7 +806,7 @@ if ($singleEnvironment.Environment.Count -ne 2 -or
     throw 'The service-environment merge collapsed a single prior variable instead of appending to it.'
 }
 
-$tnsBindingAdmin = 'C:\ProgramData\OracleFormsMigrationFleet\SourceGateway\oracle-net'
+$tnsBindingAdmin = Join-Path ([IO.Path]::GetTempPath()) 'ofm-mocked-oracle-net'
 $tnsBindingPath = Join-Path $tnsBindingAdmin 'tnsnames.ora'
 function Invoke-MockedTnsBindingAssertion {
     param([object] $Environment, [bool] $FilePresent = $true, [string] $Content = $expectedTnsNames)
