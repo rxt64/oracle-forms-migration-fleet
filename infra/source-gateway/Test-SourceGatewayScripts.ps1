@@ -509,6 +509,15 @@ if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
             throw 'The lab connection plan either misreported the pending service restart or wrote to the host.'
         }
 
+        $env:COMPUTERNAME = 'ofmforms6i'
+        $lowercaseHostState = New-MockedBootstrapState
+        $lowercasePlan = Invoke-MockedLabConnectionBootstrap -State $lowercaseHostState -PlanOnly | ConvertFrom-Json
+        if ($lowercasePlan.status -cne 'lab-connection-planned' -or
+            @(Get-MockedBootstrapMutations -State $lowercaseHostState).Count -ne 0) {
+            throw 'The lab connection plan refused the Forms VM under the lowercase casing Windows actually reports.'
+        }
+        $env:COMPUTERNAME = 'OFMFORMS6I'
+
         $applyState = New-MockedBootstrapState
         $apply = Invoke-MockedLabConnectionBootstrap -State $applyState | ConvertFrom-Json
         $applyMutations = @(Get-MockedBootstrapMutations -State $applyState)
@@ -852,7 +861,7 @@ foreach ($rejectedBinding in @(
 
 $bootstrap = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Initialize-SourceGatewayLabOracleConnection.ps1') -Raw
 foreach ($bootstrapGuard in @(
-        "if (`$env:COMPUTERNAME -cne 'OFMFORMS6I')",
+        "if (`$env:COMPUTERNAME -ine 'OFMFORMS6I')",
         'Refusing to adopt the pre-existing 32-bit System DSN',
         'Refusing to rewrite the existing tooling TNS configuration',
         'does not carry a valid Authenticode signature',
@@ -868,6 +877,51 @@ foreach ($bootstrapGuard in @(
     if ($bootstrap -cnotmatch [regex]::Escape($bootstrapGuard)) {
         throw "The lab connection bootstrap is missing '$bootstrapGuard'."
     }
+}
+
+$hostGuardPriorName = $env:COMPUTERNAME
+try {
+    $hostGuardSites = @()
+    foreach ($hostGuardFile in @(
+            (Join-Path $PSScriptRoot 'Invoke-SourceGatewayOracleCredentialProvision.ps1'),
+            (Join-Path $PSScriptRoot 'Initialize-SourceGatewayLabOracleConnection.ps1'),
+            (Join-Path (Split-Path -Parent $PSScriptRoot) 'source-lab\forms6i\New-SourceGatewayOracleCredential.ps1'))) {
+        $hostGuardAst = [Management.Automation.Language.Parser]::ParseFile($hostGuardFile, [ref] $null, [ref] $null)
+        $hostGuardSites += @($hostGuardAst.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.BinaryExpressionAst] -and
+                    $node.Left.Extent.Text -ceq '$env:COMPUTERNAME'
+            }, $true) | ForEach-Object {
+                [pscustomobject]@{
+                    Site = "$(Split-Path -Leaf $hostGuardFile):$($_.Extent.StartLineNumber)"
+                    Expected = $_.Right.Extent.Text.Trim("'")
+                    Rejects = [scriptblock]::Create(
+                        "param([string] `$Name) `$env:COMPUTERNAME = `$Name; return [bool] ($($_.Extent.Text))")
+                }
+            })
+    }
+    if ($hostGuardSites.Count -ne 4) {
+        throw "The Windows host identity is guarded at $($hostGuardSites.Count) sites rather than the four reviewed legs."
+    }
+    foreach ($hostGuardSite in $hostGuardSites) {
+        $hostGuardExpected = $hostGuardSite.Expected
+        $hostGuardMixed = -join (0..($hostGuardExpected.Length - 1) | ForEach-Object {
+            if ($_ % 2) { ([string]$hostGuardExpected[$_]).ToLowerInvariant() } else { ([string]$hostGuardExpected[$_]).ToUpperInvariant() }
+        })
+        foreach ($hostGuardAccepted in @($hostGuardExpected.ToLowerInvariant(), $hostGuardExpected.ToUpperInvariant(), $hostGuardMixed)) {
+            if (& $hostGuardSite.Rejects $hostGuardAccepted) {
+                throw "The host guard at $($hostGuardSite.Site) refused '$hostGuardAccepted', which is the same Windows identity as '$hostGuardExpected'."
+            }
+        }
+        foreach ($hostGuardRejected in @('OFMWORKBENCH', '', "X$hostGuardExpected", "${hostGuardExpected}X", " $hostGuardExpected", "$hostGuardExpected ")) {
+            if (-not (& $hostGuardSite.Rejects $hostGuardRejected)) {
+                throw "The host guard at $($hostGuardSite.Site) accepted '$hostGuardRejected', which is not '$hostGuardExpected'."
+            }
+        }
+    }
+}
+finally {
+    $env:COMPUTERNAME = $hostGuardPriorName
 }
 if ($bootstrap -match 'Uid=|Pwd=|Password' -or $bootstrap -match 'NET80\\ADMIN') {
     throw 'The lab connection bootstrap must hold no credential material and must not touch the Forms TNS configuration.'

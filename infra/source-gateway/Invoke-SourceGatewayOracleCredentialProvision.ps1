@@ -104,7 +104,7 @@ try {
     . $commonModulePath
 
     if ($Operation -eq 'ProvisionOracle') {
-        if ($env:COMPUTERNAME -cne 'OFMORADB') {
+        if ($env:COMPUTERNAME -ine 'OFMORADB') {
             throw 'The Oracle credential leg reached an unexpected host.'
         }
         if ([string]::IsNullOrWhiteSpace($PublicCertificateBase64)) {
@@ -117,7 +117,7 @@ try {
         return
     }
 
-    if ($env:COMPUTERNAME -cne 'OFMFORMS6I') {
+    if ($env:COMPUTERNAME -ine 'OFMFORMS6I') {
         throw 'The source-gateway credential leg reached an unexpected host.'
     }
 
