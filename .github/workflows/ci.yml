@@ -20,6 +20,28 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
+      # The Ubuntu leg can only reach the off-Windows branches of this harness. Scheduled tasks, stage
+      # ACLs, job-object containment and DPAPI only execute here, under both shells the operator uses.
+      - name: Verify source-gateway PowerShell contract on Windows
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $harness = 'infra/source-gateway/Test-SourceGatewayScripts.ps1'
+          $core = @(& pwsh -NoLogo -NoProfile -File $harness | ForEach-Object { $_.ToString().Trim() })
+          if ($LASTEXITCODE -ne 0) { throw 'The source-gateway PowerShell harness failed under PowerShell 7.' }
+          if ($core -cnotcontains 'SOURCE_GATEWAY_WINDOWS_NATIVE_CHECKS_PASS' -or
+              $core -cnotcontains 'SOURCE_GATEWAY_POWERSHELL_TESTS_PASS') {
+            throw 'The Windows-only source-gateway native checks did not run under PowerShell 7.'
+          }
+          $desktop = @(& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $harness | ForEach-Object { $_.ToString().Trim() })
+          if ($LASTEXITCODE -ne 0) { throw 'The source-gateway PowerShell harness failed under Windows PowerShell 5.1.' }
+          if ($desktop -cnotcontains 'SOURCE_GATEWAY_WINDOWS_NATIVE_CHECKS_PASS' -or
+              $desktop -cnotcontains 'SOURCE_GATEWAY_WINDOWS_POWERSHELL_51_TESTS_PASS') {
+            throw 'The Windows-only source-gateway native checks did not run under Windows PowerShell 5.1.'
+          }
+          $residue = @(Get-ChildItem ([IO.Path]::GetTempPath()) -Directory -Filter 'ofm-interactive-stage-*' -ErrorAction SilentlyContinue)
+          if ($residue.Count -ne 0) { throw 'The source-gateway harness left staged interactive folders behind.' }
+
       - name: Publish Windows x86 worker
         shell: pwsh
         run: >-
