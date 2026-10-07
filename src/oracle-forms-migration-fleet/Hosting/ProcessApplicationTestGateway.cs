@@ -41,6 +41,24 @@ public sealed class ProcessApplicationTestGateway : IApplicationTestGateway
         ("GENERATED_SUITE_REQUIRE_TARGET", "true"),
     ];
 
+    /// <summary>
+    /// Options every Maven leg shares. The dependency cache is mounted read-only, so Maven Resolver must
+    /// not reach for its default <c>file-lock</c> named lock factory: that one creates
+    /// <c>$LOCAL_REPO/.locks/*.lock</c> file channels and fails the build when it cannot. Each sandboxed
+    /// run is a single Maven process behind <see cref="ApplicationProcessGate"/>, so the in-JVM
+    /// <c>rwlock-local</c> factory is the correct scope and writes nothing. Both the system-level key and
+    /// its deprecated session-level predecessor are set so the choice holds across Resolver 1.9.x and 2.x.
+    /// </summary>
+    internal static readonly string[] MavenSharedOptions =
+    [
+        "--batch-mode",
+        "--no-transfer-progress",
+        "--offline",
+        "-Dmaven.repo.local=/m2",
+        "-Daether.system.named.factory=rwlock-local",
+        "-Daether.syncContext.named.factory=rwlock-local",
+    ];
+
     public async Task<ApplicationTestRun> RunBackendTestsAsync(
         string workingDirectory,
         string reportDirectory,
@@ -64,10 +82,7 @@ public sealed class ProcessApplicationTestGateway : IApplicationTestGateway
             ApplicationTestRun result = await RunAsync(
                 "mvn",
                 [
-                    "--batch-mode",
-                    "--no-transfer-progress",
-                    "--offline",
-                    "-Dmaven.repo.local=/m2",
+                    .. MavenSharedOptions,
                     "-Dsurefire.reportsDirectory=/reports",
                     "test",
                 ],
@@ -312,7 +327,7 @@ public sealed class ProcessApplicationTestGateway : IApplicationTestGateway
         {
             return await RunAsync(
                 "mvn",
-                ["--batch-mode", "--no-transfer-progress", "--offline", "-Dmaven.repo.local=/m2", "-DskipTests", "package"],
+                [.. MavenSharedOptions, "-DskipTests", "package"],
                 runner,
                 reports,
                 repository,

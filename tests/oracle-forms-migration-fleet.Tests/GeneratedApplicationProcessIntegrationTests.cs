@@ -10,6 +10,23 @@ namespace OracleFormsMigrationFleet.Tests;
 public sealed class GeneratedApplicationProcessIntegrationTests
 {
     [Fact]
+    public void Maven_stays_offline_on_the_read_only_cache_and_locks_inside_its_own_process()
+    {
+        string[] options = ProcessApplicationTestGateway.MavenSharedOptions;
+
+        Assert.Contains("--offline", options);
+        Assert.Contains("-Dmaven.repo.local=/m2", options);
+        Assert.Contains("-Daether.system.named.factory=rwlock-local", options);
+        Assert.Contains("-Daether.syncContext.named.factory=rwlock-local", options);
+        Assert.DoesNotContain(options, option =>
+            option.Contains("file-lock", StringComparison.Ordinal) ||
+            option.Contains(".locks", StringComparison.Ordinal) ||
+            option.Contains("locksDir", StringComparison.Ordinal));
+        // No second local repository: the cache stays the one read-only mount, nothing writable beside it.
+        Assert.Single(options, option => option.StartsWith("-Dmaven.repo.local=", StringComparison.Ordinal));
+    }
+
+    [Fact]
     [Trait("Category", "GeneratedApplicationIntegration")]
     public async Task Generated_test_sandbox_cannot_read_host_temp_or_reach_managed_identity()
     {
