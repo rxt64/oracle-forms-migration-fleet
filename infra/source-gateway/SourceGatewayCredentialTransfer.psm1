@@ -594,6 +594,8 @@ function Get-SourceGatewayDirectorySecurity {
             IdentitySid = $sid
             Rights = [Security.AccessControl.FileSystemRights]$_.FileSystemRights
             Type = [string]$_.AccessControlType
+            InheritanceFlags = [Security.AccessControl.InheritanceFlags]$_.InheritanceFlags
+            PropagationFlags = [Security.AccessControl.PropagationFlags]$_.PropagationFlags
         }
     })
     return [pscustomobject]@{
@@ -671,6 +673,11 @@ function Assert-SourceGatewaySecureStageAncestry {
             if ($trusted -ccontains [string]$rule.IdentitySid) { continue }
             $granted = [int]$rule.Rights -band $dangerous
             if ($granted -eq 0) { continue }
+            $propagationProperty = $rule.PSObject.Properties['PropagationFlags']
+            $isInheritOnly = $null -ne $propagationProperty -and
+                (([Security.AccessControl.PropagationFlags]$propagationProperty.Value -band
+                    [Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0)
+            if (-not $isPinnedOrBelow -and $isInheritOnly) { continue }
             if ($isOwnedStageOrBelow -and -not [string]::IsNullOrEmpty($ApprovedStageSid) -and
                 [string]$rule.IdentitySid -ceq $ApprovedStageSid) {
                 # This run creates the leaf and deliberately grants the resolved interactive account Modify
