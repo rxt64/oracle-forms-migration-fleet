@@ -89,7 +89,7 @@ function Get-SourceGatewayTransferCertificates {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [ValidatePattern('^[a-f0-9]{32}$')] [string] $TransferId,
-        [Parameter(Mandatory)] [object[]] $Certificates
+        [Parameter(Mandatory)] [AllowEmptyCollection()] [object[]] $Certificates
     )
 
     $binding = "OFM Source Gateway Credential Transfer $TransferId"

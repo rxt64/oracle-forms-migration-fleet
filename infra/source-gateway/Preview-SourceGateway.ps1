@@ -202,10 +202,16 @@ try {
         throw 'Application what-if returned no change list. Nothing was applied.'
     }
     $resourceChanges = @($whatIfOutput | ConvertFrom-Json | Where-Object { $null -ne $_ })
+    $readChangeProperty = {
+        param($Entry, [string] $Name)
+        $property = $Entry.PSObject.Properties[$Name]
+        if ($null -eq $property) { return $null }
+        return [string]$property.Value
+    }
     if (@($resourceChanges | Where-Object {
             $_ -isnot [pscustomobject] -or
-            [string]::IsNullOrWhiteSpace([string]$_.PSObject.Properties['resourceId']?.Value) -or
-            [string]::IsNullOrWhiteSpace([string]$_.PSObject.Properties['changeType']?.Value)
+            [string]::IsNullOrWhiteSpace((& $readChangeProperty $_ 'resourceId')) -or
+            [string]::IsNullOrWhiteSpace((& $readChangeProperty $_ 'changeType'))
         }).Count -ne 0) {
         throw 'Application what-if returned a malformed change entry. Nothing was applied.'
     }

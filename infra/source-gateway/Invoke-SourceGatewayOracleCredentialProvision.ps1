@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('ValidatePrerequisites', 'NewTransferKey', 'ProvisionOracle', 'CompleteTransfer', 'CleanupTransferKey')]
+    [ValidateSet('InitializeLabConnection', 'ValidatePrerequisites', 'NewTransferKey', 'ProvisionOracle',
+        'CompleteTransfer', 'CleanupTransferKey')]
     [string] $Operation,
 
     [Parameter(Mandatory)]
@@ -25,14 +26,30 @@ param(
     [ValidatePattern('^[a-f0-9]{64}$')]
     [string] $CiphertextSha256,
 
-    [ValidatePattern('^[A-Za-z][A-Za-z0-9_]{2,31}$')]
-    [string] $OdbcDsn = 'OFM_GATEWAY_ORACLE9I'
+    [ValidateSet('OFM_GATEWAY_ORACLE9I')]
+    [string] $OdbcDsn = 'OFM_GATEWAY_ORACLE9I',
+
+    [ValidateSet('OFM_ORCL9I')]
+    [string] $TnsAlias = 'OFM_ORCL9I',
+
+    [ValidateSet('10.246.0.37')]
+    [string] $OracleHost = '10.246.0.37',
+
+    [ValidateSet(1521)]
+    [int] $OraclePort = 1521,
+
+    [ValidateSet('orcl')]
+    [string] $OracleSid = 'orcl',
+
+    [ValidateSet('true', 'false')]
+    [string] $PlanOnly = 'true'
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $expectedFiles = @(
     'Complete-SourceGatewayCredentialTransfer.ps1',
+    'Initialize-SourceGatewayLabOracleConnection.ps1',
     'New-SourceGatewayCredentialTransferKey.ps1',
     'New-SourceGatewayOracleCredential.ps1',
     'SourceGatewayCredentialTransfer.psm1',
@@ -48,25 +65,17 @@ function Write-AllowlistedResult {
 }
 
 function Assert-FormsOdbcPrerequisite {
-    param([Parameter(Mandatory)] [string] $Dsn)
+    param([Parameter(Mandatory)] [string] $Dsn, [Parameter(Mandatory)] [string] $Server)
 
-    $dataSourcesPath = 'HKLM:\SOFTWARE\WOW6432Node\ODBC\ODBC.INI\ODBC Data Sources'
-    $dataSources = Get-ItemProperty -LiteralPath $dataSourcesPath -ErrorAction Stop
-    $driverProperty = $dataSources.PSObject.Properties[$Dsn]
-    $driverName = if ($null -eq $driverProperty) { $null } else { [string]$driverProperty.Value }
-    if ([string]::IsNullOrWhiteSpace($driverName)) {
-        throw "The required 32-bit System DSN '$Dsn' is not registered on the Forms VM."
-    }
-
-    $driverPath = "HKLM:\SOFTWARE\WOW6432Node\ODBC\ODBCINST.INI\$driverName"
-    $driver = [string](Get-ItemPropertyValue -LiteralPath $driverPath -Name Driver -ErrorAction Stop)
-    if ([string]::IsNullOrWhiteSpace($driver) -or
-        -not $driver.StartsWith('C:\orant\', [StringComparison]::OrdinalIgnoreCase) -or
-        -not (Test-Path -LiteralPath $driver -PathType Leaf)) {
-        throw "The 32-bit System DSN '$Dsn' does not resolve to an installed driver under C:\orant."
-    }
-
-    return [pscustomobject]@{ DriverName = $driverName; DriverPath = $driver }
+    $resolved = Resolve-SourceGatewayFormsOdbcDriver -Dsn $Dsn -OdbcRoot 'HKLM:\SOFTWARE\WOW6432Node\ODBC' `
+        -SystemRoot $env:SystemRoot `
+        -AllowedDriverRoots (Get-SourceGatewayAllowedOdbcDriverRoots -SystemRoot $env:SystemRoot) `
+        -ExpectedServer $Server
+    $tnsAdmin = 'C:\ProgramData\OracleFormsMigrationFleet\SourceGateway\oracle-net'
+    [void](Assert-SourceGatewayLabTnsBinding -ServiceName 'OFMSourceGateway' -TnsAdmin $tnsAdmin `
+        -ExpectedTnsNames (New-SourceGatewayTnsNamesContent -Alias $Server -OracleHost $OracleHost `
+            -OraclePort $OraclePort -OracleSid $OracleSid))
+    return $resolved
 }
 
 try {
@@ -91,6 +100,8 @@ try {
         $archive.Dispose()
     }
     [IO.Compression.ZipFile]::ExtractToDirectory($archivePath, $bundleRoot)
+    $commonModulePath = Join-Path $bundleRoot 'SourceGatewayInstaller.Common.ps1'
+    . $commonModulePath
 
     if ($Operation -eq 'ProvisionOracle') {
         if ($env:COMPUTERNAME -cne 'OFMORADB') {
@@ -129,7 +140,7 @@ try {
 
         $subject = "CN=OFM Source Gateway Credential Transfer $Id"
         $certificates = @(Get-SourceGatewayTransferCertificates -TransferId $Id `
-            -Certificates @(Get-ChildItem -LiteralPath 'Cert:\LocalMachine\My' -ErrorAction Stop))
+            -Certificates @(Get-SourceGatewayCertificateStoreItems -StorePath 'Cert:\LocalMachine\My'))
         foreach ($certificate in $certificates) {
             $certificatePrivateKeyPath = $null
             $privateKey = [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($certificate)
@@ -162,23 +173,40 @@ try {
         $privateKeyRemains = -not [string]::IsNullOrWhiteSpace($privateKeyPath) -and
             (Test-Path -LiteralPath $privateKeyPath -PathType Leaf)
         $certificateRemains = @(Get-SourceGatewayTransferCertificates -TransferId $Id `
-            -Certificates @(Get-ChildItem -LiteralPath 'Cert:\LocalMachine\My' -ErrorAction Stop)).Count -ne 0
+            -Certificates @(Get-SourceGatewayCertificateStoreItems -StorePath 'Cert:\LocalMachine\My')).Count -ne 0
         if ($certificateRemains -or $privateKeyRemains -or $remainingFiles.Count -ne 0) {
             throw 'One-time transfer material remained after transfer-key cleanup.'
         }
     }
 
+    if ($Operation -eq 'InitializeLabConnection') {
+        $bootstrapArguments = @{
+            OdbcDsn = $OdbcDsn
+            TnsAlias = $TnsAlias
+            OracleHost = $OracleHost
+            OraclePort = $OraclePort
+            OracleSid = $OracleSid
+            CommonModulePath = $commonModulePath
+        }
+        if ($PlanOnly -ceq 'true') { $bootstrapArguments['PlanOnly'] = $true }
+        & (Join-Path $bundleRoot 'Initialize-SourceGatewayLabOracleConnection.ps1') @bootstrapArguments
+        return
+    }
+
     if ($Operation -eq 'ValidatePrerequisites') {
-        $odbc = Assert-FormsOdbcPrerequisite -Dsn $OdbcDsn
         if ($null -eq (Get-Service -Name 'OFMSourceGateway' -ErrorAction SilentlyContinue)) {
             throw 'The source gateway must be installed before Oracle credential provisioning.'
         }
+        $odbc = Assert-FormsOdbcPrerequisite -Dsn $OdbcDsn -Server $TnsAlias
         Write-AllowlistedResult ([ordered]@{
             schemaVersion = 1
             status = 'prerequisites-verified'
             dsn = $OdbcDsn
             driverName = $odbc.DriverName
             driverPath = $odbc.DriverPath
+            driverMachine = $odbc.DriverMachine
+            tnsAlias = $odbc.Server
+            oracleEndpoint = "${OracleHost}:${OraclePort}/$OracleSid"
             serviceName = 'OFMSourceGateway'
         })
         return
@@ -187,7 +215,6 @@ try {
         if ([string]::IsNullOrWhiteSpace($TransferId)) {
             throw 'Transfer-key creation requires the runner-generated transfer identifier.'
         }
-        . (Join-Path $bundleRoot 'SourceGatewayInstaller.Common.ps1')
         New-Item -ItemType Directory -Path $transferRoot -Force | Out-Null
         Set-RestrictedPathAcl -Path $transferRoot -Grants @(
             'SYSTEM:(OI)(CI)(F)',
@@ -198,7 +225,7 @@ try {
         $metadataPath = Join-Path $transferRoot "credential-transfer-$TransferId.json"
         $publicCertificatePath = Join-Path $transferRoot "credential-transfer-$TransferId.cer"
         if ((Test-Path -LiteralPath $metadataPath) -or (Test-Path -LiteralPath $publicCertificatePath) -or
-            @(Get-ChildItem -LiteralPath 'Cert:\LocalMachine\My' -ErrorAction Stop |
+            @(Get-SourceGatewayCertificateStoreItems -StorePath 'Cert:\LocalMachine\My' |
                 Where-Object { $_.Subject -ceq "CN=OFM Source Gateway Credential Transfer $TransferId" }).Count -ne 0) {
             throw 'Refusing to overwrite existing material for the runner-generated transfer identifier.'
         }
@@ -277,7 +304,7 @@ try {
     if ([string]::IsNullOrWhiteSpace($CiphertextBase64)) {
         throw 'The completion leg requires the encrypted credential payload.'
     }
-    [void](Assert-FormsOdbcPrerequisite -Dsn $OdbcDsn)
+    [void](Assert-FormsOdbcPrerequisite -Dsn $OdbcDsn -Server $TnsAlias)
     . (Join-Path $bundleRoot 'SourceGatewayInstaller.Common.ps1')
     $ciphertext = [Convert]::FromBase64String($CiphertextBase64)
     try {
