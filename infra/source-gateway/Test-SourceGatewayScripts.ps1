@@ -139,6 +139,773 @@ if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
     finally {
         Remove-Item -LiteralPath $aclTestRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
+
+    $odbcTestRoot = "HKCU:\Software\OFM-SourceGateway-Test-$([guid]::NewGuid().ToString('N'))"
+    $driverStage = Join-Path ([IO.Path]::GetTempPath()) "ofm-source-gateway-driver-$([guid]::NewGuid().ToString('N'))"
+    try {
+        $x86Source = Join-Path $env:SystemRoot 'SysWOW64\kernel32.dll'
+        $x64Source = Join-Path $env:SystemRoot 'System32\kernel32.dll'
+        if (-not (Test-Path -LiteralPath $x86Source -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $x64Source -PathType Leaf)) {
+            throw 'The ODBC driver resolution test needs both a SysWOW64 and a System32 image on this host.'
+        }
+        New-Item -ItemType Directory -Path $driverStage | Out-Null
+        $stagedX86 = Join-Path $driverStage 'ofmdrv32.dll'
+        $stagedX64 = Join-Path $driverStage 'ofmdrv64.dll'
+        $stagedText = Join-Path $driverStage 'ofmdrv-text.dll'
+        Copy-Item -LiteralPath $x86Source -Destination $stagedX86
+        Copy-Item -LiteralPath $x64Source -Destination $stagedX64
+        Set-Content -LiteralPath $stagedText -Value 'not an image' -Encoding ascii
+
+        if ((Get-SourceGatewayPortableExecutableMachine -Path $stagedX86) -ne 0x014C -or
+            (Get-SourceGatewayPortableExecutableMachine -Path $stagedX64) -eq 0x014C) {
+            throw 'The portable-executable machine reader did not distinguish x86 from x64 images.'
+        }
+        $notAnImage = try { Get-SourceGatewayPortableExecutableMachine -Path $stagedText; $null } catch { $_ }
+        if ($null -eq $notAnImage -or $notAnImage.Exception.Message -notmatch 'not a Windows executable image') {
+            throw 'The portable-executable machine reader accepted a file that is not an image.'
+        }
+
+        $redirected = Resolve-SourceGatewayWow64DriverPath -RawDriverPath (Join-Path $env:SystemRoot 'system32\kernel32.dll') `
+            -SystemRoot $env:SystemRoot
+        if ($redirected -cne $x86Source) {
+            throw 'A 32-bit hive driver path under System32 must resolve to the physical SysWOW64 image.'
+        }
+        if ((Resolve-SourceGatewayWow64DriverPath -RawDriverPath $stagedX86 -SystemRoot $env:SystemRoot) -cne $stagedX86) {
+            throw 'A driver path outside System32 must be returned unchanged.'
+        }
+        $defaultRoots = @(Get-SourceGatewayAllowedOdbcDriverRoots -SystemRoot $env:SystemRoot)
+        if ($defaultRoots.Count -ne 2 -or $defaultRoots[0] -cne 'C:\orant\' -or
+            $defaultRoots[1] -cne ((Join-Path $env:SystemRoot 'SysWOW64') + '\')) {
+            throw 'The approved ODBC driver roots are not exactly the Forms Oracle home and the 32-bit system directory.'
+        }
+
+        $dataSourcesKey = Join-Path $odbcTestRoot 'ODBC\ODBC.INI\ODBC Data Sources'
+        $installedKey = Join-Path $odbcTestRoot 'ODBC\ODBCINST.INI\ODBC Drivers'
+        $driverKey = Join-Path $odbcTestRoot 'ODBC\ODBCINST.INI\Microsoft ODBC for Oracle'
+        $legacyDriverKey = Join-Path $odbcTestRoot 'ODBC\ODBCINST.INI\OFM Legacy Oracle Test Driver'
+        $legacyDsnKey = Join-Path $odbcTestRoot 'ODBC\ODBC.INI\OFM_LEGACY_TEST'
+        New-Item -Path $dataSourcesKey -Force | Out-Null
+        New-Item -Path $installedKey -Force | Out-Null
+        New-Item -Path $driverKey -Force | Out-Null
+        New-Item -Path $legacyDriverKey -Force | Out-Null
+        New-Item -Path $legacyDsnKey -Force | Out-Null
+        $odbcHive = Join-Path $odbcTestRoot 'ODBC'
+        $stageRoots = @($driverStage + '\')
+        $resolve = {
+            param([string] $Dsn, [string] $ExpectedServer = 'OFM_ORCL9I')
+            Resolve-SourceGatewayFormsOdbcDriver -Dsn $Dsn -OdbcRoot $odbcHive -SystemRoot $env:SystemRoot `
+                -AllowedDriverRoots $stageRoots -ExpectedServer $ExpectedServer
+        }
+
+        $canonicalMicrosoftDriver = Get-SourceGatewayCanonicalOdbcDriverPath -DriverName 'Microsoft ODBC for Oracle' `
+            -SystemRoot $env:SystemRoot
+        if ($canonicalMicrosoftDriver -cne (Join-Path $env:SystemRoot 'SysWOW64\msorcl32.dll') -or
+            $null -ne (Get-SourceGatewayCanonicalOdbcDriverPath -DriverName 'OFM Legacy Oracle Test Driver' `
+                -SystemRoot $env:SystemRoot)) {
+            throw 'The Microsoft ODBC for Oracle driver is not pinned to exactly its canonical 32-bit library.'
+        }
+
+        $missingDsn = try { & $resolve 'OFM_GATEWAY_ORACLE9I'; $null } catch { $_ }
+        if ($null -eq $missingDsn -or $missingDsn.Exception.Message -notmatch 'is not registered on the Forms VM') {
+            throw 'The ODBC preflight accepted an unregistered 32-bit System DSN.'
+        }
+
+        New-ItemProperty -Path $dataSourcesKey -Name 'OFM_GATEWAY_ORACLE9I' -Value 'Microsoft ODBC for Oracle' `
+            -PropertyType String -Force | Out-Null
+        $notInstalled = try { & $resolve 'OFM_GATEWAY_ORACLE9I'; $null } catch { $_ }
+        if ($null -eq $notInstalled -or $notInstalled.Exception.Message -notmatch 'is not registered as installed') {
+            throw 'The ODBC preflight accepted a DSN whose driver is not a registered installed driver.'
+        }
+
+        New-ItemProperty -Path $installedKey -Name 'Microsoft ODBC for Oracle' -Value 'Installed' `
+            -PropertyType String -Force | Out-Null
+        foreach ($rejectedMicrosoftDriver in @($x86Source, $stagedX86, $stagedX64)) {
+            New-ItemProperty -Path $driverKey -Name 'Driver' -Value $rejectedMicrosoftDriver -PropertyType String -Force | Out-Null
+            $offCanonical = try { & $resolve 'OFM_GATEWAY_ORACLE9I'; $null } catch { $_ }
+            if ($null -eq $offCanonical -or $offCanonical.Exception.Message -notmatch 'canonical library') {
+                throw 'The ODBC preflight accepted the Microsoft Oracle driver from a path other than its canonical library.'
+            }
+        }
+
+        New-ItemProperty -Path $dataSourcesKey -Name 'OFM_LEGACY_TEST' -Value 'OFM Legacy Oracle Test Driver' `
+            -PropertyType String -Force | Out-Null
+        New-ItemProperty -Path $installedKey -Name 'OFM Legacy Oracle Test Driver' -Value 'Installed' `
+            -PropertyType String -Force | Out-Null
+        New-ItemProperty -Path $legacyDriverKey -Name 'Driver' -Value $x86Source -PropertyType String -Force | Out-Null
+        $outsideAllowlist = try { & $resolve 'OFM_LEGACY_TEST'; $null } catch { $_ }
+        if ($null -eq $outsideAllowlist -or $outsideAllowlist.Exception.Message -notmatch 'approved location') {
+            throw 'The ODBC preflight accepted a driver outside the approved driver roots.'
+        }
+
+        New-ItemProperty -Path $legacyDriverKey -Name 'Driver' -Value $stagedX64 -PropertyType String -Force | Out-Null
+        $wrongArchitecture = try { & $resolve 'OFM_LEGACY_TEST'; $null } catch { $_ }
+        if ($null -eq $wrongArchitecture -or $wrongArchitecture.Exception.Message -notmatch 'is not an x86 image') {
+            throw 'The ODBC preflight accepted a 64-bit driver image for a 32-bit System DSN.'
+        }
+
+        New-ItemProperty -Path $legacyDriverKey -Name 'Driver' -Value $stagedX86 -PropertyType String -Force | Out-Null
+        $missingDsnDriverValue = try { & $resolve 'OFM_LEGACY_TEST'; $null } catch { $_ }
+        if ($null -eq $missingDsnDriverValue) {
+            throw 'The ODBC preflight accepted a DSN that records no driver library of its own.'
+        }
+
+        New-ItemProperty -Path $legacyDsnKey -Name 'Server' -Value 'OFM_ORCL9I' -PropertyType String -Force | Out-Null
+        foreach ($rejectedDsnDriver in @($stagedX64, $x86Source, (Join-Path $driverStage 'absent.dll'))) {
+            New-ItemProperty -Path $legacyDsnKey -Name 'Driver' -Value $rejectedDsnDriver -PropertyType String -Force | Out-Null
+            $dsnDriverMismatch = try { & $resolve 'OFM_LEGACY_TEST'; $null } catch { $_ }
+            if ($null -eq $dsnDriverMismatch -or
+                $dsnDriverMismatch.Exception.Message -notmatch 'instead of the registered') {
+                throw "The ODBC preflight trusted a good driver catalog entry while the DSN itself pointed at '$rejectedDsnDriver'."
+            }
+        }
+
+        New-ItemProperty -Path $legacyDsnKey -Name 'Driver' -Value $stagedX86 -PropertyType String -Force | Out-Null
+        foreach ($rejectedServer in @('XE', 'XEDED', 'OFM_ORCL9I_OLD', 'ofm_orcl9i', '')) {
+            New-ItemProperty -Path $legacyDsnKey -Name 'Server' -Value $rejectedServer -PropertyType String -Force | Out-Null
+            $serverMismatch = try { & $resolve 'OFM_LEGACY_TEST'; $null } catch { $_ }
+            if ($null -eq $serverMismatch -or
+                $serverMismatch.Exception.Message -notmatch 'approved tooling TNS alias') {
+                throw "The ODBC preflight accepted a DSN bound to the stale or conflicting alias '$rejectedServer'."
+            }
+        }
+
+        New-ItemProperty -Path $legacyDsnKey -Name 'Server' -Value 'OFM_ORCL9I' -PropertyType String -Force | Out-Null
+        $unpinnedAlias = try { & $resolve 'OFM_LEGACY_TEST' ''; $null } catch { $_ }
+        if ($null -eq $unpinnedAlias -or
+            $unpinnedAlias.Exception.Message -notmatch 'approved tooling TNS alias to compare against') {
+            throw 'The ODBC preflight resolved a DSN without an approved alias to compare it against.'
+        }
+
+        $resolved = & $resolve 'OFM_LEGACY_TEST'
+        if ($resolved.DriverName -cne 'OFM Legacy Oracle Test Driver' -or $resolved.DriverPath -cne $stagedX86 -or
+            $resolved.DriverMachine -cne 'x86' -or $resolved.Server -cne 'OFM_ORCL9I' -or
+            @($resolved.PSObject.Properties).Count -ne 4) {
+            throw 'The ODBC preflight did not report exactly the registered x86 driver and alias it verified.'
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $odbcTestRoot -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $driverStage -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    $bootstrapStage = Join-Path ([IO.Path]::GetTempPath()) "ofm-source-gateway-bootstrap-$([guid]::NewGuid().ToString('N'))"
+    $bootstrapHost = $env:COMPUTERNAME
+    try {
+        New-Item -ItemType Directory -Path $bootstrapStage | Out-Null
+        $mockCommonPath = Join-Path $bootstrapStage 'MockCommon.ps1'
+        Set-Content -LiteralPath $mockCommonPath -Encoding ascii -Value @(
+            ". '$($common.Replace("'", "''"))'",
+            'function Get-SourceGatewayPortableExecutableMachine { param([string] $Path) return 0x014C }',
+            'function Set-RestrictedPathAcl { param([string] $Path, [string[]] $Grants, [string] $TrustedOwnerSid) }'
+        )
+
+        $bootstrapText = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Initialize-SourceGatewayLabOracleConnection.ps1') -Raw) -replace "`r`n", "`n"
+        $elevationGuard = @(
+            'if (-not ([Security.Principal.WindowsPrincipal]::new(',
+            '        [Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole(',
+            '        [Security.Principal.WindowsBuiltInRole]::Administrator)) {',
+            "    throw 'This lab connection bootstrap must run elevated.'",
+            '}'
+        ) -join "`n"
+        if ([regex]::Matches($bootstrapText, [regex]::Escape($elevationGuard)).Count -ne 1) {
+            throw 'The lab connection bootstrap no longer carries exactly one verbatim elevation guard.'
+        }
+        $bootstrapScriptBlock = [scriptblock]::Create($bootstrapText.Replace($elevationGuard, ''))
+        $canonicalDriverPath = Get-SourceGatewayCanonicalOdbcDriverPath -DriverName 'Microsoft ODBC for Oracle' `
+            -SystemRoot $env:SystemRoot
+        $bootstrapTnsNames = New-SourceGatewayTnsNamesContent -Alias 'OFM_ORCL9I' -OracleHost '10.246.0.37' `
+            -OraclePort 1521 -OracleSid 'orcl'
+        $matchingDsn = [pscustomobject]@{
+            DriverName = 'Microsoft ODBC for Oracle'
+            Attribute = @{ Server = 'OFM_ORCL9I' }
+        }
+
+        function New-MockedBootstrapState {
+            param([hashtable] $Overrides = @{})
+            $state = @{
+                Calls = [Collections.Generic.List[string]]::new()
+                DriverRegistration = 'Installed'
+                DriverPath = $canonicalDriverPath
+                SignatureStatus = 'Valid'
+                SignerSubject = 'CN=Microsoft Windows, O=Microsoft Corporation, C=US'
+                TnsNamesContent = $bootstrapTnsNames
+                Environment = @('ASPNETCORE_ENVIRONMENT=Production')
+                ServiceStatus = 'Running'
+                StopFailures = 0
+                StartFailures = 0
+                StartNoOp = $false
+                DsnCatalogDriver = 'Microsoft ODBC for Oracle'
+                DsnAttributeDriver = $canonicalDriverPath
+                DsnAttributeServer = 'OFM_ORCL9I'
+                ExistingDsn = @()
+                VerifiedDsn = @($matchingDsn)
+                DsnReadCount = 0
+                TnsNamesPath = 'C:\ProgramData\OracleFormsMigrationFleet\SourceGateway\oracle-net\tnsnames.ora'
+                TnsNamesPresent = $true
+                RemoveDsnFailure = $false
+                RemoveItemFailurePath = $null
+                RemoveEnvFailure = $false
+            }
+            foreach ($key in $Overrides.Keys) { $state[$key] = $Overrides[$key] }
+            return $state
+        }
+
+        function Invoke-MockedLabConnectionBootstrap {
+            param([hashtable] $State, [switch] $PlanOnly)
+
+            $mockTnsAdmin = 'C:\ProgramData\OracleFormsMigrationFleet\SourceGateway\oracle-net'
+            $mockTnsNames = $State.TnsNamesPath
+            $mockServiceKey = 'HKLM:\SYSTEM\CurrentControlSet\Services\OFMSourceGateway'
+            $mockDriversKey = 'HKLM:\SOFTWARE\WOW6432Node\ODBC\ODBCINST.INI\ODBC Drivers'
+            $mockDriverKey = 'HKLM:\SOFTWARE\WOW6432Node\ODBC\ODBCINST.INI\Microsoft ODBC for Oracle'
+            $mockDataSourcesKey = 'HKLM:\SOFTWARE\WOW6432Node\ODBC\ODBC.INI\ODBC Data Sources'
+            $mockDsnKey = 'HKLM:\SOFTWARE\WOW6432Node\ODBC\ODBC.INI\OFM_GATEWAY_ORACLE9I'
+
+            function Get-ItemProperty {
+                param([string] $LiteralPath, [object] $ErrorAction)
+                if ($LiteralPath -ceq $mockDriversKey) {
+                    return [pscustomobject]@{ 'Microsoft ODBC for Oracle' = $State.DriverRegistration }
+                }
+                if ($LiteralPath -ceq $mockDataSourcesKey) {
+                    return [pscustomobject]@{ 'OFM_GATEWAY_ORACLE9I' = $State.DsnCatalogDriver }
+                }
+                if ($LiteralPath -ceq $mockServiceKey) {
+                    if ($null -eq $State.Environment) { return [pscustomobject]@{ ImagePath = 'mock' } }
+                    return [pscustomobject]@{ Environment = $State.Environment }
+                }
+                throw "The bootstrap read an unexpected registry path '$LiteralPath'."
+            }
+            function Get-ItemPropertyValue {
+                param([string] $LiteralPath, [string] $Name, [object] $ErrorAction)
+                if ($LiteralPath -ceq $mockDsnKey) {
+                    if ($Name -ceq 'Driver') { return $State.DsnAttributeDriver }
+                    if ($Name -ceq 'Server') { return $State.DsnAttributeServer }
+                    throw "The bootstrap read an unexpected DSN attribute '$Name'."
+                }
+                if ($LiteralPath -cne $mockDriverKey -or $Name -cne 'Driver') {
+                    throw "The bootstrap read an unexpected driver registration '$LiteralPath'."
+                }
+                return $State.DriverPath
+            }
+            function Get-AuthenticodeSignature {
+                param([string] $LiteralPath, [object] $ErrorAction)
+                return [pscustomobject]@{
+                    Status = $State.SignatureStatus
+                    SignerCertificate = [pscustomobject]@{ Subject = $State.SignerSubject }
+                }
+            }
+            # Redirects only the tnsnames.ora write, so an injected create/rollback stays off the real host path.
+            function Join-Path {
+                param([Parameter(Position = 0)] [string] $Path, [Parameter(Position = 1)] [string] $ChildPath)
+                if ($Path -ceq $mockTnsAdmin -and $ChildPath -ceq 'tnsnames.ora') { return $mockTnsNames }
+                return [IO.Path]::Combine($Path, $ChildPath)
+            }
+            function Test-Path {
+                param([string] $LiteralPath, [object] $PathType, [object] $ErrorAction)
+                if ($LiteralPath -ceq $mockTnsNames) {
+                    return ($State.TnsNamesPresent -or [IO.File]::Exists($LiteralPath))
+                }
+                if ($LiteralPath -ceq 'C:\orant\BIN' -or $LiteralPath -ceq $State.DriverPath -or
+                    $LiteralPath -ceq $mockTnsAdmin) {
+                    return $true
+                }
+                throw "The bootstrap probed an unexpected path '$LiteralPath'."
+            }
+            function Get-Content {
+                param([string] $LiteralPath, [switch] $Raw)
+                if ($LiteralPath -cne $mockTnsNames) { throw "The bootstrap read an unexpected file '$LiteralPath'." }
+                return $State.TnsNamesContent
+            }
+            function Get-OdbcDsn {
+                param([string] $Name, [string] $DsnType, [string] $Platform, [object] $ErrorAction)
+                $State.Calls.Add("Get-OdbcDsn:${Name}:${DsnType}:$Platform")
+                if ($State.DsnReadCount -eq 0) {
+                    $State.DsnReadCount = 1
+                    return $State.ExistingDsn
+                }
+                $State.DsnReadCount = $State.DsnReadCount + 1
+                return $State.VerifiedDsn
+            }
+            function Add-OdbcDsn {
+                param([string] $Name, [string] $DriverName, [string] $DsnType, [string] $Platform,
+                    [string[]] $SetPropertyValue, [object] $ErrorAction)
+                $State.Calls.Add("Add-OdbcDsn:${Name}:${DriverName}:$($SetPropertyValue -join ',')")
+            }
+            function Remove-OdbcDsn {
+                param([string] $Name, [string] $DsnType, [string] $Platform, [object] $ErrorAction)
+                $State.Calls.Add("Remove-OdbcDsn:$Name")
+                if ($State.RemoveDsnFailure) { throw 'mock DSN removal failure' }
+            }
+            function New-ItemProperty {
+                param([string] $Path, [string] $Name, [string] $PropertyType, [object] $Value, [switch] $Force)
+                $State.Calls.Add("New-ItemProperty:$Name=$(@($Value) -join '|')")
+                $State.Environment = @($Value)
+            }
+            function Remove-ItemProperty {
+                param([string] $Path, [string] $Name, [object] $ErrorAction)
+                $State.Calls.Add("Remove-ItemProperty:$Name")
+                if ($State.RemoveEnvFailure) { throw 'mock environment restore failure' }
+                $State.Environment = $null
+            }
+            function New-Item {
+                param([string] $ItemType, [string] $Path, [switch] $Force)
+                $State.Calls.Add("New-Item:$Path")
+            }
+            function Remove-Item {
+                param([string] $LiteralPath, [switch] $Recurse, [switch] $Force, [object] $ErrorAction)
+                $State.Calls.Add("Remove-Item:$LiteralPath")
+                if ($null -ne $State.RemoveItemFailurePath -and $LiteralPath -ceq $State.RemoveItemFailurePath) {
+                    throw 'mock file removal failure'
+                }
+            }
+            function Get-Service {
+                param([string] $Name, [object] $ErrorAction)
+                $State.Calls.Add("Get-Service:$Name")
+                $controller = [pscustomobject]@{ Status = $State.ServiceStatus; MockState = $State }
+                Add-Member -InputObject $controller -MemberType ScriptMethod -Name WaitForStatus -Value { param($Status, $Timeout) }
+                Add-Member -InputObject $controller -MemberType ScriptMethod -Name Refresh -Value {
+                    $this.Status = $this.MockState.ServiceStatus
+                }
+                Add-Member -InputObject $controller -MemberType ScriptMethod -Name Stop -Value {
+                    $this.MockState.Calls.Add('ServiceController.Stop')
+                    if ($this.MockState.StopFailures -gt 0) {
+                        $this.MockState.StopFailures = $this.MockState.StopFailures - 1
+                        throw 'mock service stop failure'
+                    }
+                    $this.MockState.ServiceStatus = 'Stopped'
+                }
+                Add-Member -InputObject $controller -MemberType ScriptMethod -Name Start -Value {
+                    $this.MockState.Calls.Add('ServiceController.Start')
+                    if ($this.MockState.StartFailures -gt 0) {
+                        $this.MockState.StartFailures = $this.MockState.StartFailures - 1
+                        throw 'mock service start failure'
+                    }
+                    if (-not $this.MockState.StartNoOp) { $this.MockState.ServiceStatus = 'Running' }
+                }
+                return $controller
+            }
+
+            $arguments = @{ CommonModulePath = $mockCommonPath }
+            if ($PlanOnly) { $arguments['PlanOnly'] = $true }
+            return & $bootstrapScriptBlock @arguments
+        }
+
+        function Get-MockedBootstrapMutations {
+            param([hashtable] $State)
+            return @($State.Calls | Where-Object {
+                $_ -match '^(Add-OdbcDsn|Remove-OdbcDsn|New-ItemProperty|Remove-ItemProperty|New-Item|Remove-Item|ServiceController\.)'
+            })
+        }
+
+        $env:COMPUTERNAME = 'OFMFORMS6I'
+
+        $planState = New-MockedBootstrapState
+        $plan = Invoke-MockedLabConnectionBootstrap -State $planState -PlanOnly | ConvertFrom-Json
+        if ($plan.status -cne 'lab-connection-planned' -or $plan.dsnAction -cne 'create' -or
+            $plan.tnsAction -cne 'reuse' -or $plan.serviceEnvironmentAction -cne 'add' -or
+            $plan.serviceAction -cne 'restart' -or $plan.driverPath -cne $canonicalDriverPath -or
+            @(Get-MockedBootstrapMutations -State $planState).Count -ne 0) {
+            throw 'The lab connection plan either misreported the pending service restart or wrote to the host.'
+        }
+
+        $applyState = New-MockedBootstrapState
+        $apply = Invoke-MockedLabConnectionBootstrap -State $applyState | ConvertFrom-Json
+        $applyMutations = @(Get-MockedBootstrapMutations -State $applyState)
+        if ($apply.status -cne 'lab-connection-ready' -or $apply.serviceAction -cne 'restart' -or
+            @($applyMutations | Where-Object { $_ -ceq 'ServiceController.Stop' }).Count -ne 1 -or
+            @($applyMutations | Where-Object { $_ -ceq 'ServiceController.Start' }).Count -ne 1 -or
+            @($applyState.Calls | Where-Object { $_ -cmatch '^Restart-Service' }).Count -ne 0 -or
+            @($applyMutations | Where-Object { $_ -cmatch '^Add-OdbcDsn:OFM_GATEWAY_ORACLE9I:Microsoft ODBC for Oracle:Server=OFM_ORCL9I$' }).Count -ne 1 -or
+            @($applyMutations | Where-Object { $_ -cmatch '^New-ItemProperty:Environment=.*TNS_ADMIN=' }).Count -ne 1 -or
+            $applyState.Calls.IndexOf('ServiceController.Stop') -lt
+                $applyState.Calls.IndexOf('New-ItemProperty:Environment=ASPNETCORE_ENVIRONMENT=Production|TNS_ADMIN=C:\ProgramData\OracleFormsMigrationFleet\SourceGateway\oracle-net') -or
+            $applyState.Calls.IndexOf('ServiceController.Start') -lt $applyState.Calls.IndexOf('ServiceController.Stop')) {
+            throw 'The applied lab connection did not bind TNS_ADMIN and then restart the service through bounded stop/start control requests.'
+        }
+
+        $idempotentState = New-MockedBootstrapState @{
+            Environment = @('ASPNETCORE_ENVIRONMENT=Production',
+                'TNS_ADMIN=C:\ProgramData\OracleFormsMigrationFleet\SourceGateway\oracle-net')
+            ExistingDsn = @($matchingDsn)
+        }
+        $idempotent = Invoke-MockedLabConnectionBootstrap -State $idempotentState | ConvertFrom-Json
+        if ($idempotent.status -cne 'lab-connection-ready' -or $idempotent.dsnAction -cne 'reuse' -or
+            $idempotent.serviceEnvironmentAction -cne 'reuse' -or $idempotent.serviceAction -cne 'none' -or
+            @(Get-MockedBootstrapMutations -State $idempotentState).Count -ne 0) {
+            throw 'An unchanged lab connection restarted the service or rewrote tooling state.'
+        }
+
+        $rollbackState = New-MockedBootstrapState @{
+            VerifiedDsn = @([pscustomobject]@{
+                DriverName = 'Microsoft ODBC for Oracle'
+                Attribute = @{ Server = 'SOMETHING_ELSE' }
+            })
+        }
+        $rollbackFailure = try { Invoke-MockedLabConnectionBootstrap -State $rollbackState; $null } catch { $_ }
+        if ($null -eq $rollbackFailure -or $rollbackFailure.Exception.Message -notmatch 'did not verify after it was written' -or
+            @($rollbackState.Calls | Where-Object { $_ -ceq 'Remove-OdbcDsn:OFM_GATEWAY_ORACLE9I' }).Count -ne 1 -or
+            @($rollbackState.Calls | Where-Object { $_ -ceq 'ServiceController.Stop' }).Count -ne 2 -or
+            @($rollbackState.Calls | Where-Object { $_ -ceq 'ServiceController.Start' }).Count -ne 2 -or
+            $rollbackState.ServiceStatus -cne 'Running' -or
+            (@($rollbackState.Environment) -join '|') -cne 'ASPNETCORE_ENVIRONMENT=Production') {
+            throw ('A failed lab connection did not restore the prior service environment and running state. ' +
+                "Error: $($rollbackFailure.Exception.Message); Status: $($rollbackState.ServiceStatus); " +
+                "Env: $(@($rollbackState.Environment) -join '|'); Calls: $($rollbackState.Calls -join ',')")
+        }
+
+        # Every rollback step must aggregate its own failure and must not bypass the service recovery.
+        $bootstrapTnsPath = [IO.Path]::Combine($bootstrapStage, 'tnsnames.ora')
+        foreach ($injected in @(
+                @{ Name = 'DSN removal'
+                   Overrides = @{ RemoveDsnFailure = $true }
+                   Pattern = "^Rollback could not remove the 32-bit System DSN 'OFM_GATEWAY_ORACLE9I' this run created \(mock DSN removal failure\)" },
+                @{ Name = 'TNS configuration removal'
+                   Overrides = @{ TnsNamesPresent = $false; TnsNamesPath = $bootstrapTnsPath
+                       RemoveItemFailurePath = $bootstrapTnsPath }
+                   Pattern = '^Rollback could not remove the tooling TNS configuration .+ this run created \(mock file removal failure\)' },
+                @{ Name = 'service environment restore'
+                   Overrides = @{ Environment = $null; RemoveEnvFailure = $true }
+                   Pattern = '^Rollback could not restore the prior service environment \(mock environment restore failure\)' })) {
+            $injectedOverrides = $injected.Overrides.Clone()
+            $injectedOverrides['VerifiedDsn'] = @([pscustomobject]@{
+                DriverName = 'Microsoft ODBC for Oracle'
+                Attribute = @{ Server = 'SOMETHING_ELSE' }
+            })
+            $injectedState = New-MockedBootstrapState $injectedOverrides
+            $injectedFailure = try { Invoke-MockedLabConnectionBootstrap -State $injectedState; $null } catch { $_ }
+            if ($null -eq $injectedFailure -or $injectedFailure.Exception.Message -notmatch $injected.Pattern -or
+                $injectedFailure.Exception.Message -notmatch "after 'The tooling-owned lab connection did not verify after it was written" -or
+                @($injectedState.Calls | Where-Object { $_ -ceq 'ServiceController.Stop' }).Count -ne 2 -or
+                @($injectedState.Calls | Where-Object { $_ -ceq 'ServiceController.Start' }).Count -ne 2 -or
+                $injectedState.ServiceStatus -cne 'Running') {
+                throw ("A failed $($injected.Name) rollback step did not aggregate with the primary failure or " +
+                    "stopped the service recovery. Error: " +
+                    "$(if ($null -ne $injectedFailure) { $injectedFailure.Exception.Message } else { 'no error' }); " +
+                    "Status: $($injectedState.ServiceStatus); Calls: $($injectedState.Calls -join ',')")
+            }
+        }
+
+        # The original defect: stop accepted, start refused, and the restart flag was only set afterwards,
+        # so the rollback skipped the restart and left the gateway service down.
+        $startFailsOnceState = New-MockedBootstrapState @{ StartFailures = 1 }
+        $startFailsOnce = try { Invoke-MockedLabConnectionBootstrap -State $startFailsOnceState; $null } catch { $_ }
+        if ($null -eq $startFailsOnce -or $startFailsOnce.Exception.Message -notmatch 'mock service start failure' -or
+            $startFailsOnceState.ServiceStatus -cne 'Running' -or
+            @($startFailsOnceState.Calls | Where-Object { $_ -ceq 'ServiceController.Start' }).Count -ne 2 -or
+            @($startFailsOnceState.Calls | Where-Object { $_ -ceq 'Remove-OdbcDsn:OFM_GATEWAY_ORACLE9I' }).Count -ne 1 -or
+            (@($startFailsOnceState.Environment) -join '|') -cne 'ASPNETCORE_ENVIRONMENT=Production') {
+            throw 'A stop that succeeded and a start that failed did not rescue the service or restore the prior environment.'
+        }
+
+        $startAlwaysFailsState = New-MockedBootstrapState @{ StartFailures = 5 }
+        $startAlwaysFails = try { Invoke-MockedLabConnectionBootstrap -State $startAlwaysFailsState; $null } catch { $_ }
+        if ($null -eq $startAlwaysFails -or
+            $startAlwaysFails.Exception.Message -notmatch "^Rollback could not return 'OFMSourceGateway' to its previous Running state" -or
+            $startAlwaysFails.Exception.Message -notmatch 'mock service start failure' -or
+            $startAlwaysFailsState.ServiceStatus -ceq 'Running' -or
+            (@($startAlwaysFailsState.Environment) -join '|') -cne 'ASPNETCORE_ENVIRONMENT=Production') {
+            throw 'An unrecoverable restart reported silent success instead of surfacing the cleanup failure with the primary failure.'
+        }
+
+        $stopFailsState = New-MockedBootstrapState @{ StopFailures = 5 }
+        $stopFails = try { Invoke-MockedLabConnectionBootstrap -State $stopFailsState; $null } catch { $_ }
+        if ($null -eq $stopFails -or $stopFails.Exception.Message -notmatch 'mock service stop failure' -or
+            @($stopFailsState.Calls | Where-Object { $_ -ceq 'ServiceController.Start' }).Count -ne 0 -or
+            $stopFailsState.ServiceStatus -cne 'Running' -or
+            (@($stopFailsState.Environment) -join '|') -cne 'ASPNETCORE_ENVIRONMENT=Production') {
+            throw 'A refused stop request did not restore the prior service environment while leaving the service running.'
+        }
+
+        # An accepted start control request that never reaches Running must end at the bounded wait, not hang.
+        $noProgressState = New-MockedBootstrapState @{ StartNoOp = $true }
+        $noProgress = try { Invoke-MockedLabConnectionBootstrap -State $noProgressState; $null } catch { $_ }
+        if ($null -eq $noProgress -or
+            $noProgress.Exception.Message -notmatch "did not reach Running within the bounded restart window" -or
+            $noProgress.Exception.Message -notmatch "^Rollback could not return 'OFMSourceGateway'" -or
+            @($noProgressState.Calls | Where-Object { $_ -ceq 'ServiceController.Start' }).Count -ne 2 -or
+            (@($noProgressState.Environment) -join '|') -cne 'ASPNETCORE_ENVIRONMENT=Production') {
+            throw 'A start request that never reached Running was not bounded and reported through the rollback.'
+        }
+
+        foreach ($rejectedBinding in @(
+                @{ Overrides = @{ ExistingDsn = @($matchingDsn); DsnAttributeDriver = 'C:\orant\BIN\sqora32.dll' }
+                   Pattern = 'instead of the registered' },
+                @{ Overrides = @{ ExistingDsn = @($matchingDsn); DsnAttributeServer = 'XE' }
+                   Pattern = 'approved tooling TNS alias' },
+                @{ Overrides = @{ ExistingDsn = @($matchingDsn); DsnAttributeServer = 'OFM_ORCL9I_OLD' }
+                   Pattern = 'approved tooling TNS alias' },
+                @{ Overrides = @{ ExistingDsn = @($matchingDsn); DsnCatalogDriver = 'Oracle in OraHome92' }
+                   Pattern = 'is not registered as installed' },
+                @{ Overrides = @{ ExistingDsn = @([pscustomobject]@{
+                        DriverName = 'Oracle in OraHome92'; Attribute = @{ Server = 'OFM_ORCL9I' } }) }
+                   Pattern = 'Refusing to adopt the pre-existing' })) {
+            $rejectedBindingState = New-MockedBootstrapState $rejectedBinding.Overrides
+            $bindingRejection = try { Invoke-MockedLabConnectionBootstrap -State $rejectedBindingState; $null } catch { $_ }
+            if ($null -eq $bindingRejection -or $bindingRejection.Exception.Message -notmatch $rejectedBinding.Pattern -or
+                @(Get-MockedBootstrapMutations -State $rejectedBindingState).Count -ne 0) {
+                throw ("The lab connection bootstrap adopted a DSN whose own registry binding was wrong " +
+                    "('$($rejectedBinding.Pattern)'): $(if ($null -ne $bindingRejection) { $bindingRejection.Exception.Message } else { 'no error' })")
+            }
+        }
+
+        # A DSN whose Server drifts after the write must fail verification and roll back, never be reported ready.
+        $driftedServerState = New-MockedBootstrapState @{ DsnAttributeServer = 'XE' }
+        $driftedServer = try { Invoke-MockedLabConnectionBootstrap -State $driftedServerState; $null } catch { $_ }
+        if ($null -eq $driftedServer -or $driftedServer.Exception.Message -notmatch 'approved tooling TNS alias' -or
+            @($driftedServerState.Calls | Where-Object { $_ -ceq 'Remove-OdbcDsn:OFM_GATEWAY_ORACLE9I' }).Count -ne 1 -or
+            $driftedServerState.ServiceStatus -cne 'Running' -or
+            (@($driftedServerState.Environment) -join '|') -cne 'ASPNETCORE_ENVIRONMENT=Production') {
+            throw 'A written DSN bound to a stale alias was reported ready instead of verified and rolled back.'
+        }
+
+        $stoppedState = New-MockedBootstrapState @{ ServiceStatus = 'Stopped' }
+        $stoppedFailure = try { Invoke-MockedLabConnectionBootstrap -State $stoppedState; $null } catch { $_ }
+        $stoppedPlanFailure = try {
+            Invoke-MockedLabConnectionBootstrap -State (New-MockedBootstrapState @{
+                ServiceStatus = 'Stopped'
+                Environment = @('ASPNETCORE_ENVIRONMENT=Production',
+                    'TNS_ADMIN=C:\ProgramData\OracleFormsMigrationFleet\SourceGateway\oracle-net')
+                ExistingDsn = @($matchingDsn)
+            }) -PlanOnly
+            $null
+        } catch { $_ }
+        if ($null -eq $stoppedFailure -or $stoppedFailure.Exception.Message -notmatch 'must be Running' -or
+            $null -eq $stoppedPlanFailure -or $stoppedPlanFailure.Exception.Message -notmatch 'must be Running' -or
+            @(Get-MockedBootstrapMutations -State $stoppedState).Count -ne 0) {
+            throw 'The lab connection reported readiness while the source-gateway service was not running.'
+        }
+
+        foreach ($rejected in @(
+                @{ Overrides = @{ ExistingDsn = @([pscustomobject]@{
+                        DriverName = 'Microsoft ODBC for Oracle'; Attribute = @{ Server = 'OTHER_ALIAS' } }) }
+                   Pattern = 'Refusing to adopt the pre-existing' },
+                @{ Overrides = @{ TnsNamesContent = "OFM_ORCL9I = (DESCRIPTION = (ADDRESS = (HOST = 10.0.0.9)))`r`n" }
+                   Pattern = 'Refusing to rewrite the existing tooling TNS configuration' },
+                @{ Overrides = @{ DriverPath = 'C:\orant\BIN\sqora32.dll' }; Pattern = 'canonical library' },
+                @{ Overrides = @{ DriverRegistration = 'Pending' }; Pattern = 'not registered as installed' },
+                @{ Overrides = @{ SignatureStatus = 'NotSigned' }; Pattern = 'valid Authenticode signature' },
+                @{ Overrides = @{ SignerSubject = 'CN=Contoso, O=Contoso Ltd' }; Pattern = 'not signed by Microsoft Corporation' })) {
+            $rejectedState = New-MockedBootstrapState $rejected.Overrides
+            $rejection = try { Invoke-MockedLabConnectionBootstrap -State $rejectedState; $null } catch { $_ }
+            if ($null -eq $rejection -or $rejection.Exception.Message -notmatch $rejected.Pattern -or
+                @(Get-MockedBootstrapMutations -State $rejectedState).Count -ne 0) {
+                throw "The lab connection bootstrap did not reject '$($rejected.Pattern)' before writing to the host."
+            }
+        }
+
+        $env:COMPUTERNAME = 'OFMWORKBENCH'
+        $wrongHost = try { Invoke-MockedLabConnectionBootstrap -State (New-MockedBootstrapState); $null } catch { $_ }
+        if ($null -eq $wrongHost -or $wrongHost.Exception.Message -notmatch 'unexpected host') {
+            throw 'The lab connection bootstrap ran on a host other than the Forms VM.'
+        }
+        $env:COMPUTERNAME = 'OFMFORMS6I'
+
+        foreach ($unpinned in @(
+                @{ OdbcDsn = 'OFM_GATEWAY_OTHER' },
+                @{ TnsAlias = 'OFM_OTHER' },
+                @{ OracleHost = '10.246.0.38' },
+                @{ OraclePort = 1522 },
+                @{ OracleSid = 'xe' },
+                @{ DriverName = 'Oracle in OraHome92' })) {
+            $unpinnedArguments = $unpinned.Clone()
+            $unpinnedArguments['CommonModulePath'] = $mockCommonPath
+            $unpinnedArguments['PlanOnly'] = $true
+            $unpinnedFailure = try { & $bootstrapScriptBlock @unpinnedArguments; $null } catch { $_ }
+            if ($null -eq $unpinnedFailure -or
+                $unpinnedFailure.Exception -isnot [Management.Automation.ParameterBindingException]) {
+                throw "The lab connection bootstrap accepted the unpinned argument '$($unpinned.Keys)'."
+            }
+        }
+    }
+    finally {
+        $env:COMPUTERNAME = $bootstrapHost
+        Remove-Item -LiteralPath $bootstrapStage -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+$certificateStoreAbsent = & {
+    function Test-Path { param([string] $LiteralPath, [object] $ErrorAction) return $false }
+    function Get-ChildItem { throw 'An absent certificate store must not be enumerated.' }
+    Get-SourceGatewayCertificateStoreItems -StorePath 'Cert:\LocalMachine\My'
+}
+if (@($certificateStoreAbsent).Count -ne 0) {
+    throw 'An absent certificate store did not resolve to an empty transfer-certificate collection.'
+}
+$certificateStoreDenied = & {
+    function Test-Path { param([string] $LiteralPath, [object] $ErrorAction) throw 'Access is denied' }
+    try { Get-SourceGatewayCertificateStoreItems -StorePath 'Cert:\LocalMachine\My'; $null } catch { $_ }
+}
+if ($null -eq $certificateStoreDenied -or $certificateStoreDenied.Exception.Message -notmatch 'Access is denied') {
+    throw 'A certificate store that could not be probed was treated as empty instead of failing closed.'
+}
+$certificateEnumerationDenied = & {
+    function Test-Path { param([string] $LiteralPath, [object] $ErrorAction) return $true }
+    function Get-ChildItem { param([string] $LiteralPath, [object] $ErrorAction) throw 'Enumeration failed' }
+    try { Get-SourceGatewayCertificateStoreItems -StorePath 'Cert:\LocalMachine\My'; $null } catch { $_ }
+}
+if ($null -eq $certificateEnumerationDenied -or
+    $certificateEnumerationDenied.Exception.Message -notmatch 'Enumeration failed') {
+    throw 'A certificate store enumeration failure was swallowed instead of failing closed.'
+}
+
+$expectedTnsNames = "OFM_ORCL9I =`r`n  (DESCRIPTION =`r`n" +
+    "    (ADDRESS = (PROTOCOL = TCP)(HOST = 10.246.0.37)(PORT = 1521))`r`n" +
+    "    (CONNECT_DATA = (SID = orcl))`r`n  )`r`n"
+$actualTnsNames = New-SourceGatewayTnsNamesContent -Alias 'OFM_ORCL9I' -OracleHost '10.246.0.37' `
+    -OraclePort 1521 -OracleSid 'orcl'
+if ($actualTnsNames -cne $expectedTnsNames) {
+    throw 'The dedicated tooling TNS alias is not emitted as the exact reviewed descriptor.'
+}
+foreach ($rejectedTns in @(
+        @{ Alias = 'ofm_orcl9i'; OracleHost = '10.246.0.37'; OraclePort = 1521; OracleSid = 'orcl' },
+        @{ Alias = 'OFM_ORCL9I'; OracleHost = 'oracle.lab.internal'; OraclePort = 1521; OracleSid = 'orcl' },
+        @{ Alias = 'OFM_ORCL9I'; OracleHost = '10.246.0.37'; OraclePort = 70000; OracleSid = 'orcl' },
+        @{ Alias = 'OFM_ORCL9I'; OracleHost = '10.246.0.37'; OraclePort = 1521; OracleSid = 'orcl;XE' })) {
+    $tnsFailure = try { New-SourceGatewayTnsNamesContent @rejectedTns; $null } catch { $_ }
+    if ($null -eq $tnsFailure) {
+        throw "The dedicated tooling TNS alias accepted invalid connection input '$($rejectedTns.Values -join '|')'."
+    }
+}
+
+$baseEnvironment = @('ASPNETCORE_ENVIRONMENT=Production', 'OFM_GATEWAY_MAX_CONCURRENT_EXTRACTIONS=1')
+$addedEnvironment = Merge-SourceGatewayServiceEnvironment -Existing $baseEnvironment -Name 'TNS_ADMIN' -Value 'C:\tns'
+if (-not $addedEnvironment.Changed -or $addedEnvironment.Environment.Count -ne 3 -or
+    $addedEnvironment.Environment[2] -cne 'TNS_ADMIN=C:\tns' -or
+    (Compare-Object -ReferenceObject $baseEnvironment -DifferenceObject @($addedEnvironment.Environment[0..1]) -SyncWindow 0)) {
+    throw 'The service-environment merge did not append exactly the isolated TNS directory.'
+}
+$reusedEnvironment = Merge-SourceGatewayServiceEnvironment -Existing @($addedEnvironment.Environment) `
+    -Name 'TNS_ADMIN' -Value 'C:\tns'
+if ($reusedEnvironment.Changed -or $reusedEnvironment.Environment.Count -ne 3) {
+    throw 'The service-environment merge rewrote an already matching tooling-owned variable.'
+}
+$conflictEnvironment = try {
+    Merge-SourceGatewayServiceEnvironment -Existing @('TNS_ADMIN=C:\orant\NET80\ADMIN') -Name 'TNS_ADMIN' -Value 'C:\tns'
+    $null
+} catch { $_ }
+if ($null -eq $conflictEnvironment -or $conflictEnvironment.Exception.Message -notmatch 'different value') {
+    throw 'The service-environment merge overwrote an unmanaged TNS_ADMIN binding.'
+}
+$duplicateEnvironment = try {
+    Merge-SourceGatewayServiceEnvironment -Existing @('TNS_ADMIN=C:\tns', 'TNS_ADMIN=C:\tns') -Name 'TNS_ADMIN' -Value 'C:\tns'
+    $null
+} catch { $_ }
+if ($null -eq $duplicateEnvironment -or $duplicateEnvironment.Exception.Message -notmatch 'more than once') {
+    throw 'The service-environment merge accepted a duplicated variable declaration.'
+}
+$emptyEnvironment = Merge-SourceGatewayServiceEnvironment -Existing $null -Name 'TNS_ADMIN' -Value 'C:\tns'
+if (-not $emptyEnvironment.Changed -or $emptyEnvironment.Environment.Count -ne 1) {
+    throw 'The service-environment merge did not handle a service with no prior environment.'
+}
+$singleEnvironment = Merge-SourceGatewayServiceEnvironment -Existing @('ASPNETCORE_ENVIRONMENT=Production') `
+    -Name 'TNS_ADMIN' -Value 'C:\tns'
+if ($singleEnvironment.Environment.Count -ne 2 -or
+    $singleEnvironment.Environment[0] -cne 'ASPNETCORE_ENVIRONMENT=Production' -or
+    $singleEnvironment.Environment[1] -cne 'TNS_ADMIN=C:\tns') {
+    throw 'The service-environment merge collapsed a single prior variable instead of appending to it.'
+}
+
+$tnsBindingAdmin = 'C:\ProgramData\OracleFormsMigrationFleet\SourceGateway\oracle-net'
+$tnsBindingPath = Join-Path $tnsBindingAdmin 'tnsnames.ora'
+function Invoke-MockedTnsBindingAssertion {
+    param([object] $Environment, [bool] $FilePresent = $true, [string] $Content = $expectedTnsNames)
+
+    return & {
+        function Get-ItemProperty {
+            param([string] $LiteralPath, [object] $ErrorAction)
+            if ($LiteralPath -cne 'HKLM:\SYSTEM\CurrentControlSet\Services\OFMSourceGateway') {
+                throw "The TNS binding check read an unexpected registry path '$LiteralPath'."
+            }
+            if ($null -eq $Environment) { return [pscustomobject]@{ ImagePath = 'mock' } }
+            return [pscustomobject]@{ Environment = $Environment }
+        }
+        function Test-Path { param([string] $LiteralPath, [object] $PathType) return $FilePresent }
+        function Get-Content { param([string] $LiteralPath, [switch] $Raw) return $Content }
+        try {
+            Assert-SourceGatewayLabTnsBinding -ServiceName 'OFMSourceGateway' -TnsAdmin $tnsBindingAdmin `
+                -ExpectedTnsNames $expectedTnsNames
+        } catch { $_ }
+    }
+}
+if ((Invoke-MockedTnsBindingAssertion -Environment @('ASPNETCORE_ENVIRONMENT=Production', "TNS_ADMIN=$tnsBindingAdmin")) -cne $tnsBindingPath) {
+    throw 'The approved tooling TNS binding was not accepted by the credential preflight.'
+}
+foreach ($rejectedBinding in @(
+        @{ Environment = $null; Pattern = 'isolated tooling directory' },
+        @{ Environment = @('ASPNETCORE_ENVIRONMENT=Production'); Pattern = 'isolated tooling directory' },
+        @{ Environment = @('TNS_ADMIN=C:\orant\NET80\ADMIN'); Pattern = 'isolated tooling directory' },
+        @{ Environment = @("tns_admin=$tnsBindingAdmin"); Pattern = 'isolated tooling directory' },
+        @{ Environment = @("TNS_ADMIN=$tnsBindingAdmin"); FilePresent = $false; Pattern = 'is missing' },
+        @{ Environment = @("TNS_ADMIN=$tnsBindingAdmin")
+           Content = "OFM_ORCL9I =`r`n  (DESCRIPTION =`r`n    (ADDRESS = (PROTOCOL = TCP)(HOST = 10.246.0.36)(PORT = 1521))`r`n    (CONNECT_DATA = (SID = XE))`r`n  )`r`n"
+           Pattern = 'approved Oracle listener endpoint' })) {
+    $bindingArguments = @{ Environment = $rejectedBinding.Environment }
+    if ($rejectedBinding.ContainsKey('FilePresent')) { $bindingArguments['FilePresent'] = $rejectedBinding.FilePresent }
+    if ($rejectedBinding.ContainsKey('Content')) { $bindingArguments['Content'] = $rejectedBinding.Content }
+    $bindingFailure = Invoke-MockedTnsBindingAssertion @bindingArguments
+    if ($bindingFailure -isnot [Management.Automation.ErrorRecord] -or
+        $bindingFailure.Exception.Message -notmatch $rejectedBinding.Pattern) {
+        throw "The credential preflight accepted an unverified Oracle Net binding ('$($rejectedBinding.Pattern)')."
+    }
+}
+
+$bootstrap = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Initialize-SourceGatewayLabOracleConnection.ps1') -Raw
+foreach ($bootstrapGuard in @(
+        "if (`$env:COMPUTERNAME -cne 'OFMFORMS6I')",
+        'Refusing to adopt the pre-existing 32-bit System DSN',
+        'Refusing to rewrite the existing tooling TNS configuration',
+        'does not carry a valid Authenticode signature',
+        'is not signed by Microsoft Corporation',
+        'Restart-SourceGatewayServiceToRunning -Name $serviceName',
+        '$controller.Stop()',
+        '$controller.Start()',
+        'Invoke-SourceGatewayCleanupStep',
+        'ExpectedServer $TnsAlias',
+        'must be Running so the new environment can be verified',
+        "Add-OdbcDsn -Name `$OdbcDsn -DriverName `$DriverName -DsnType System -Platform '32-bit'",
+        "Get-OdbcDsn -Name `$OdbcDsn -DsnType System -Platform '32-bit'")) {
+    if ($bootstrap -cnotmatch [regex]::Escape($bootstrapGuard)) {
+        throw "The lab connection bootstrap is missing '$bootstrapGuard'."
+    }
+}
+if ($bootstrap -match 'Uid=|Pwd=|Password' -or $bootstrap -match 'NET80\\ADMIN') {
+    throw 'The lab connection bootstrap must hold no credential material and must not touch the Forms TNS configuration.'
+}
+$bootstrapWrite = $bootstrap.IndexOf('$createdDsn = $true')
+$bootstrapRollback = $bootstrap.IndexOf('if (-not $completed) {')
+$bootstrapVerify = $bootstrap.IndexOf('did not verify after it was written')
+$bootstrapRestartFlag = $bootstrap.IndexOf('$serviceRestartAttempted = $true')
+$bootstrapRestartCall = $bootstrap.IndexOf('Restart-SourceGatewayServiceToRunning -Name $serviceName')
+if ($bootstrapWrite -lt 0 -or $bootstrapVerify -lt $bootstrapWrite -or $bootstrapRollback -lt $bootstrapVerify -or
+    $bootstrapRestartFlag -lt 0 -or $bootstrapRestartCall -lt 0 -or $bootstrapRestartFlag -gt $bootstrapRestartCall -or
+    $bootstrap -match 'Restart-Service -Name' -or
+    $bootstrap -notmatch 'if \(\$PlanOnly\) \{' -or
+    $bootstrap -notmatch '-Value \$previousEnvironment -Force') {
+    throw 'The lab connection bootstrap must plan, verify after writing, roll back only what it created, and mark the restart attempt before issuing the control request.'
+}
+foreach ($guardedBranch in @('createdDsn', 'createdTnsNames', 'createdDirectory')) {
+    if ($bootstrap -cnotmatch "(?s)if \(\`$$guardedBranch\) \{\s*Invoke-SourceGatewayCleanupStep") {
+        throw "The lab connection rollback step for `$$guardedBranch does not run through the aggregating cleanup helper."
+    }
+}
+if ($bootstrap.Substring($bootstrapRollback) -match 'SilentlyContinue' -or
+    $bootstrap.IndexOf('if ($serviceRestartAttempted) {') -lt $bootstrapRollback) {
+    throw 'The lab connection rollback must suppress no cleanup failure and must attempt the service recovery last.'
+}
+
+$provision = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Invoke-SourceGatewayOracleCredentialProvision.ps1') -Raw
+if ($provision -cnotmatch [regex]::Escape("'Initialize-SourceGatewayLabOracleConnection.ps1',") -or
+    $provision -cnotmatch [regex]::Escape("if (`$Operation -eq 'InitializeLabConnection')") -or
+    ($provision | Select-String -Pattern 'Initialize-SourceGatewayLabOracleConnection\.ps1' -AllMatches).Matches.Count -ne 2) {
+    throw 'The provisioning entry point must carry the bootstrap in its reviewed bundle and invoke it from one explicit stage.'
+}
+$validateBranch = $provision.IndexOf("if (`$Operation -eq 'ValidatePrerequisites')")
+$validateBranchEnd = $provision.IndexOf("if (`$Operation -eq 'NewTransferKey')")
+if ($validateBranch -lt 0 -or $validateBranchEnd -lt $validateBranch -or
+    $provision.Substring($validateBranch, $validateBranchEnd - $validateBranch) -match
+        'Add-OdbcDsn|New-Item|Set-Content|New-ItemProperty|WriteAllText') {
+    throw 'The prerequisite validation stage must not write the lab connection.'
 }
 
 $cleanupCalls = [Collections.Generic.List[object]]::new()
@@ -259,6 +1026,46 @@ if ($completion -notmatch 'certificateCleanupRequired = \$true' -or
 }
 
 Import-Module (Join-Path $PSScriptRoot 'SourceGatewayCredentialTransfer.psm1') -Force
+$mismatchedStoreCertificates = Get-SourceGatewayTransferCertificates -TransferId ('a' * 32) -Certificates @(
+    [pscustomobject]@{ Subject = 'CN=Some Other Certificate'; FriendlyName = 'unrelated' },
+    [pscustomobject]@{ Subject = "CN=ofm source gateway credential transfer $('a' * 32)"; FriendlyName = '' }
+)
+if (@($mismatchedStoreCertificates).Count -ne 0 -or
+    @(Get-SourceGatewayTransferCertificates -TransferId ('a' * 32) -Certificates @()).Count -ne 0) {
+    throw 'The transfer-certificate filter adopted certificates that are not the exact one-time binding.'
+}
+
+# Get-SourceGatewayCertificateStoreItems enumerates, so an empty store reaches the call site as $null and
+# AllowEmptyCollection does not admit null. Both cleanup call sites must wrap the result in @(...).
+$absentStoreComposition = & {
+    function Test-Path { param([string] $LiteralPath, [object] $ErrorAction) return $false }
+    function Get-ChildItem { throw 'An absent certificate store must not be enumerated.' }
+    try {
+        @(Get-SourceGatewayTransferCertificates -TransferId ('b' * 32) `
+            -Certificates @(Get-SourceGatewayCertificateStoreItems -StorePath 'Cert:\LocalMachine\My'))
+    } catch { $_ }
+}
+if ($absentStoreComposition -is [Management.Automation.ErrorRecord] -or @($absentStoreComposition).Count -ne 0) {
+    throw 'Transfer-key cleanup against an absent certificate store did not resolve to no transfer certificates.'
+}
+$unwrappedStoreComposition = & {
+    function Test-Path { param([string] $LiteralPath, [object] $ErrorAction) return $false }
+    function Get-ChildItem { throw 'An absent certificate store must not be enumerated.' }
+    try {
+        Get-SourceGatewayTransferCertificates -TransferId ('b' * 32) `
+            -Certificates (Get-SourceGatewayCertificateStoreItems -StorePath 'Cert:\LocalMachine\My')
+        $null
+    } catch { $_ }
+}
+if ($null -eq $unwrappedStoreComposition -or
+    $unwrappedStoreComposition.Exception.Message -notmatch 'because it is null') {
+    throw 'The unwrapped empty certificate store no longer reproduces the null-binding failure the call sites must avoid.'
+}
+$oracleBootstrapWrapSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Invoke-SourceGatewayOracleCredentialProvision.ps1') -Raw
+if ([regex]::Matches($oracleBootstrapWrapSource, '-Certificates \(Get-SourceGatewayCertificateStoreItems').Count -ne 0 -or
+    [regex]::Matches($oracleBootstrapWrapSource, '-Certificates @\(Get-SourceGatewayCertificateStoreItems').Count -ne 2) {
+    throw 'Both transfer-material cleanup call sites must pass the enumerated certificate store as an explicit array.'
+}
 $testRsa = [Security.Cryptography.RSA]::Create(2048)
 $testCertificate = $null
 $testPublicCertificate = $null
@@ -294,7 +1101,7 @@ if (@($passwords | Where-Object { $_ -cnotmatch '^[A-Za-z][A-Za-z0-9]{29}$' }).C
     @($passwords | Sort-Object -Unique).Count -le 1) {
     throw 'The Oracle password generator violated the 30-character letter-first alphanumeric contract.'
 }
-$windowsPowerShell = if ($IsWindows -and $env:SystemRoot) {
+$windowsPowerShell = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and $env:SystemRoot) {
     Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 }
 if ($windowsPowerShell -and (Test-Path -LiteralPath $windowsPowerShell -PathType Leaf)) {
@@ -542,6 +1349,9 @@ $transferTestRoot = Join-Path ([IO.Path]::GetTempPath()) "ofm-transfer-cleanup-t
 try {
     [void](New-Item -ItemType Directory -Path $transferTestRoot)
     $transferId = '0123456789abcdef0123456789abcdef'
+    if (@(Get-SourceGatewayTransferCertificates -TransferId $transferId -Certificates @()).Count -ne 0) {
+        throw 'Transfer cleanup must accept an empty certificate store when no key was created.'
+    }
     $corruptedMetadata = Join-Path $transferTestRoot "credential-transfer-$transferId.json"
     Set-Content -LiteralPath $corruptedMetadata -Value '{not-json' -Encoding utf8
     if ($null -ne (Read-SourceGatewayTransferMetadata -TransferId $transferId `
@@ -607,8 +1417,8 @@ if ($oracleBootstrapErrors.Count -ne 0) {
 }
 $oracleBootstrap = Get-Content -LiteralPath $oracleBootstrapPath -Raw
 foreach ($requiredBootstrapContract in @(
-        'HKLM:\SOFTWARE\WOW6432Node\ODBC\ODBC.INI\ODBC Data Sources',
-        "StartsWith('C:\orant\'",
+        "Resolve-SourceGatewayFormsOdbcDriver -Dsn `$Dsn -OdbcRoot 'HKLM:\SOFTWARE\WOW6432Node\ODBC'",
+        'Get-SourceGatewayAllowedOdbcDriverRoots -SystemRoot $env:SystemRoot',
         'Complete-SourceGatewayCredentialTransfer.ps1',
         'OFM_GATEWAY_ORACLE_MERIDIAN_RO.dpapi',
         'oracleConnectionRegistered = $true',
@@ -661,6 +1471,20 @@ foreach ($requiredWorkflowContract in @(
 }
 if ($oracleWorkflow -match '(?i)(Password|Pwd)=\$') {
     throw 'The Oracle credential workflow passes plaintext credential material as a Run Command parameter.'
+}
+$oracleWorkflowDeleteStep = $oracleWorkflow.Substring($oracleWorkflow.IndexOf('Delete managed Run Commands'))
+foreach ($ownedRunCommand in @('ofm-oracle-labconn-$GITHUB_RUN_ID', 'ofm-oracle-preflight-$GITHUB_RUN_ID',
+        'ofm-oracle-key-$GITHUB_RUN_ID', 'ofm-oracle-create-$GITHUB_RUN_ID', 'ofm-oracle-complete-$GITHUB_RUN_ID',
+        'ofm-oracle-key-cleanup-$GITHUB_RUN_ID')) {
+    if ($oracleWorkflowDeleteStep -cnotmatch [regex]::Escape($ownedRunCommand)) {
+        throw "The Oracle credential workflow leaves the owned Run Command '$ownedRunCommand' on the VM."
+    }
+}
+foreach ($pinnedWorkflowInput in @("options: [OFM_GATEWAY_ORACLE9I]", "options: ['10.246.0.37']",
+        "options: ['1521']", 'options: [orcl]', 'options: [OFM_ORCL9I]')) {
+    if ($oracleWorkflow -cnotmatch [regex]::Escape($pinnedWorkflowInput)) {
+        throw "The Oracle credential workflow does not pin the dispatch input '$pinnedWorkflowInput'."
+    }
 }
 if ($oracleWorkflow -match 'SELECT_CATALOG_ROLE|SELECT ON MERIDIAN TABLES AND VIEWS' -or
     $oracleWorkflow -match 'CleanupTransferKey.+TransferCertificateThumbprint' -or
@@ -726,6 +1550,25 @@ $ciRejection = try {
 if ($null -eq $ciRejection -or $continuedAfterCiRejection -or
     $ciRejection.Exception.Message -ne 'Required CI verification failed with exit code 23.') {
     throw 'A nonzero required-CI verifier exit was allowed to continue to the next workflow command.'
+}
+
+$parseErrors = @()
+Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.ps1' | ForEach-Object {
+    $tokens = $null
+    $errors = $null
+    [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors)
+    $parseErrors += $errors
+}
+if ($parseErrors.Count -gt 0) {
+    throw "Source-gateway PowerShell parsing failed: $($parseErrors.Message -join '; ')"
+}
+
+# Everything above runs on the Forms VM under Windows PowerShell 5.1 and is proved on whichever host runs
+# this harness. Preview-SourceGateway.ps1 and Configure-SourceGatewayEntra.ps1 execute only on the pwsh 7
+# runner and use pwsh-only cmdlet parameters, so their checks below require that host.
+if ($PSVersionTable.PSVersion.Major -lt 6) {
+    Write-Output 'SOURCE_GATEWAY_WINDOWS_POWERSHELL_51_TESTS_PASS'
+    return
 }
 
 $previewPath = Join-Path $PSScriptRoot 'Preview-SourceGateway.ps1'
@@ -1166,17 +2009,6 @@ $wrongApplication = Invoke-MockedEntraConfiguration -Apply -ApplicationObjectId 
 if ($null -eq $wrongApplication.Error -or $wrongApplication.Error.Exception.Message -notmatch 'does not match the authorized gateway application' -or
     @($wrongApplication.Requests | Where-Object Method -eq 'PATCH').Count -ne 0) {
     throw 'The Entra configurator must reject a same-name but non-authorized application before mutation.'
-}
-
-$parseErrors = @()
-Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.ps1' | ForEach-Object {
-    $tokens = $null
-    $errors = $null
-    [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors)
-    $parseErrors += $errors
-}
-if ($parseErrors.Count -gt 0) {
-    throw "Source-gateway PowerShell parsing failed: $($parseErrors.Message -join '; ')"
 }
 
 Write-Output 'SOURCE_GATEWAY_POWERSHELL_TESTS_PASS'
