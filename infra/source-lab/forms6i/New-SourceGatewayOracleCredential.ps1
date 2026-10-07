@@ -15,7 +15,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-if ($env:COMPUTERNAME -cne 'OFMORADB') {
+if ($env:COMPUTERNAME -ine 'OFMORADB') {
     throw 'This operation is restricted to the approved Oracle 9i source-lab host.'
 }
 if (-not (Test-Path -LiteralPath $TransferModulePath -PathType Leaf)) {

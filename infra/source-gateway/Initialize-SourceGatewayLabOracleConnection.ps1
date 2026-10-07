@@ -32,7 +32,7 @@ if (-not ([Security.Principal.WindowsPrincipal]::new(
         [Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'This lab connection bootstrap must run elevated.'
 }
-if ($env:COMPUTERNAME -cne 'OFMFORMS6I') {
+if ($env:COMPUTERNAME -ine 'OFMFORMS6I') {
     throw 'The lab connection bootstrap reached an unexpected host.'
 }
 . $CommonModulePath
