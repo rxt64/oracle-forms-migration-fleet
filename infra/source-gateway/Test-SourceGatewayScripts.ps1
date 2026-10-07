@@ -1080,6 +1080,34 @@ if ($completion -notmatch 'certificateCleanupRequired = \$true' -or
 }
 
 Import-Module (Join-Path $PSScriptRoot 'SourceGatewayCredentialTransfer.psm1') -Force
+if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+    $projectionRoot = Join-Path ([IO.Path]::GetTempPath()) "ofm-source-gateway-projection-$([guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path $projectionRoot | Out-Null
+        $projectionAcl = Get-Acl -LiteralPath $projectionRoot
+        $projectionInheritance = [Security.AccessControl.InheritanceFlags]'ObjectInherit, ContainerInherit'
+        $projectionAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            [Security.Principal.SecurityIdentifier]::new('S-1-5-11'),
+            [Security.AccessControl.FileSystemRights]::Delete,
+            $projectionInheritance,
+            [Security.AccessControl.PropagationFlags]::InheritOnly,
+            [Security.AccessControl.AccessControlType]::Allow))
+        Set-Acl -LiteralPath $projectionRoot -AclObject $projectionAcl
+        $projectedAcl = Get-SourceGatewayDirectorySecurity -Path $projectionRoot
+        $projectedInheritOnly = @($projectedAcl.Access | Where-Object {
+                $_.IdentitySid -ceq 'S-1-5-11' -and
+                (([int]$_.Rights -band [int][Security.AccessControl.FileSystemRights]::Delete) -ne 0) -and
+                $_.InheritanceFlags -eq $projectionInheritance -and
+                $_.PropagationFlags -eq [Security.AccessControl.PropagationFlags]::InheritOnly
+            })
+        if ($projectedInheritOnly.Count -eq 0) {
+            throw 'Native directory security projection dropped ACL inheritance or propagation flags.'
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $projectionRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
 $mismatchedStoreCertificates = Get-SourceGatewayTransferCertificates -TransferId ('a' * 32) -Certificates @(
     [pscustomobject]@{ Subject = 'CN=Some Other Certificate'; FriendlyName = 'unrelated' },
     [pscustomobject]@{ Subject = "CN=ofm source gateway credential transfer $('a' * 32)"; FriendlyName = '' }
@@ -1758,19 +1786,25 @@ if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
     function New-StageAclProbeEntry {
         param(
             [Parameter(Mandatory)] [string] $Sid,
-            [Parameter(Mandatory)] [Security.AccessControl.FileSystemRights] $Rights
+            [Parameter(Mandatory)] [Security.AccessControl.FileSystemRights] $Rights,
+            [Security.AccessControl.InheritanceFlags] $InheritanceFlags =
+                [Security.AccessControl.InheritanceFlags]'ObjectInherit, ContainerInherit',
+            [Security.AccessControl.PropagationFlags] $PropagationFlags =
+                [Security.AccessControl.PropagationFlags]::None
         )
         # The mask comes from a real Allow rule built exactly as the stage builds its ACL, so the probe
         # reports what Windows actually stores rather than the requested enum value.
         $rule = [Security.AccessControl.FileSystemAccessRule]::new(
             [Security.Principal.SecurityIdentifier]::new($Sid), $Rights,
-            [Security.AccessControl.InheritanceFlags]'ObjectInherit, ContainerInherit',
-            [Security.AccessControl.PropagationFlags]::None,
+            $InheritanceFlags,
+            $PropagationFlags,
             [Security.AccessControl.AccessControlType]::Allow)
         return [pscustomobject]@{
             IdentitySid = [string]$rule.IdentityReference.Value
             Rights = [Security.AccessControl.FileSystemRights]$rule.FileSystemRights
             Type = [string]$rule.AccessControlType
+            InheritanceFlags = [Security.AccessControl.InheritanceFlags]$rule.InheritanceFlags
+            PropagationFlags = [Security.AccessControl.PropagationFlags]$rule.PropagationFlags
         }
     }
     $stageApprovedEntry = New-StageAclProbeEntry -Sid $stageSid -Rights ([Security.AccessControl.FileSystemRights]::Modify)
@@ -1873,6 +1907,55 @@ if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
         $deadSession = @([pscustomobject]@{ UserSid = $stageSid; SessionId = 0 })
         $stageProbe = { $liveSession }.GetNewClosure()
         $deadProbe = { $deadSession }.GetNewClosure()
+
+        $inheritOnlyDelete = New-StageAclProbeEntry -Sid 'S-1-5-11' `
+            -Rights ([Security.AccessControl.FileSystemRights]::Delete) `
+            -PropagationFlags ([Security.AccessControl.PropagationFlags]::InheritOnly)
+        $effectiveDelete = New-StageAclProbeEntry -Sid 'S-1-5-11' `
+            -Rights ([Security.AccessControl.FileSystemRights]::Delete)
+        $pinnedStagePath = 'C:\ProgramData\OracleFormsMigrationFleet\acl-regression-stage'
+        $trustedPinnedProbe = {
+            param($Probed)
+            return [pscustomobject]@{
+                Path = $Probed
+                Exists = $true
+                IsReparsePoint = $false
+                OwnerSid = 'S-1-5-18'
+                Access = @(New-StageAclProbeEntry -Sid 'S-1-5-18' `
+                    -Rights ([Security.AccessControl.FileSystemRights]::FullControl))
+            }
+        }
+        $abovePinnedInheritOnlyProbe = {
+            param($Probed)
+            $record = & $trustedPinnedProbe $Probed
+            if ($Probed -ieq 'C:\') { $record.Access = @($record.Access) + @($inheritOnlyDelete) }
+            return $record
+        }.GetNewClosure()
+        Assert-SourceGatewaySecureStageAncestry -Path $pinnedStagePath -RequireExists `
+            -DirectorySecurityProbe $abovePinnedInheritOnlyProbe
+
+        foreach ($aclRegressionCase in @(
+                @{ Name = 'effective delete on root'; Path = 'C:\'; Rule = $effectiveDelete },
+                @{ Name = 'effective delete on descendant'; Path = $pinnedStagePath; Rule = $effectiveDelete },
+                @{ Name = 'inherit-only delete on stage leaf'; Path = $pinnedStagePath; Rule = $inheritOnlyDelete })) {
+            $rejectedPath = $aclRegressionCase.Path
+            $rejectedRule = $aclRegressionCase.Rule
+            $rejectingProbe = {
+                param($Probed)
+                $record = & $trustedPinnedProbe $Probed
+                if ($Probed -ieq $rejectedPath) { $record.Access = @($record.Access) + @($rejectedRule) }
+                return $record
+            }.GetNewClosure()
+            $aclRegressionFailure = try {
+                Assert-SourceGatewaySecureStageAncestry -Path $pinnedStagePath -RequireExists `
+                    -DirectorySecurityProbe $rejectingProbe
+                $null
+            } catch { $_ }
+            if ($null -eq $aclRegressionFailure -or
+                $aclRegressionFailure.Exception.Message -notmatch 'untrusted write or delete access') {
+                throw "Stage ancestry accepted an unsafe ACL regression ('$($aclRegressionCase.Name)')."
+            }
+        }
 
         Reset-StageState -Body "Write-Output '$stageContractJson'"
         $stageSuccess = Invoke-StageUnderTest -TimeoutSeconds 120 -Probe $stageProbe
