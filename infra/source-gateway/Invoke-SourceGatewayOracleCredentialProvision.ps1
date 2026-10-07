@@ -110,10 +110,15 @@ try {
         if ([string]::IsNullOrWhiteSpace($PublicCertificateBase64)) {
             throw 'The Oracle credential leg requires the one-time public certificate.'
         }
-        & (Join-Path $bundleRoot 'New-SourceGatewayOracleCredential.ps1') `
-            -PublicCertificateBase64 $PublicCertificateBase64 `
+        Import-Module (Join-Path $bundleRoot 'SourceGatewayCredentialTransfer.psm1') -Force
+        # Azure Run Command runs as SYSTEM, which has no Oracle OS-auth SYSDBA right (ORA-01031); the approved
+        # script must run inside the existing ofmlabadmin desktop session that already owns the database.
+        Invoke-SourceGatewayInteractiveOracleStage `
+            -CredentialScriptPath (Join-Path $bundleRoot 'New-SourceGatewayOracleCredential.ps1') `
             -TransferModulePath (Join-Path $bundleRoot 'SourceGatewayCredentialTransfer.psm1') `
-            -OdbcDsn $OdbcDsn
+            -PublicCertificateBase64 $PublicCertificateBase64 `
+            -OdbcDsn $OdbcDsn `
+            -RunId ([guid]::NewGuid().ToString('N'))
         return
     }
 

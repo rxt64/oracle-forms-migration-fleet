@@ -170,6 +170,50 @@ public sealed class GeneratedTargetWorkflowTests
     }
 
     [Fact]
+    public void Source_gateway_powershell_harness_runs_its_windows_only_checks_on_both_shells()
+    {
+        YamlNode workflow = YamlNode.Parse(RepositoryText(".github/workflows/ci.yml"));
+        IReadOnlyList<YamlNode> windowsSteps = workflow["jobs"]!["native-worker-contract"]!["steps"]!.Sequence!;
+        YamlNode harness = Assert.Single(
+            windowsSteps,
+            step => StepLabel(step) == "Verify source-gateway PowerShell contract on Windows");
+        YamlNode artifact = Assert.Single(windowsSteps, step => StepLabel(step) == "Retain trusted main worker artifact");
+        Assert.True(windowsSteps.ToList().IndexOf(harness) < windowsSteps.ToList().IndexOf(artifact));
+        Assert.Equal("pwsh", harness["shell"]!.Text);
+
+        IReadOnlyList<string> commands = CommandLines(harness["run"]!.Text!);
+        Assert.Contains(commands, line => line.Contains("$harness = 'infra/source-gateway/Test-SourceGatewayScripts.ps1'", StringComparison.Ordinal));
+        Assert.Contains(commands, line => line.Contains("& pwsh -NoLogo -NoProfile -File $harness", StringComparison.Ordinal));
+        Assert.Contains(commands, line => line.Contains("& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $harness", StringComparison.Ordinal));
+
+        // A green exit code is not proof: the harness skips its scheduled-task, stage-ACL and containment
+        // checks off Windows, so both shells must report the Windows sentinel by name.
+        foreach (string sentinel in new[]
+        {
+            "SOURCE_GATEWAY_WINDOWS_NATIVE_CHECKS_PASS",
+            "SOURCE_GATEWAY_POWERSHELL_TESTS_PASS",
+            "SOURCE_GATEWAY_WINDOWS_POWERSHELL_51_TESTS_PASS",
+        })
+        {
+            Assert.Contains(commands, line => line.Contains(sentinel, StringComparison.Ordinal));
+        }
+
+        Assert.Equal(
+            2,
+            commands.Count(line => line.Contains("SOURCE_GATEWAY_WINDOWS_NATIVE_CHECKS_PASS", StringComparison.Ordinal)));
+        Assert.Contains(commands, line => line.Contains("ofm-interactive-stage-*", StringComparison.Ordinal));
+
+        // The Linux leg stays required too; neither platform may be suppressed in favour of the other.
+        IReadOnlyList<string> linuxCommands = workflow["jobs"]!["build-and-test"]!["steps"]!.Sequence!
+            .Where(step => step["run"]?.Text is not null)
+            .SelectMany(step => CommandLines(step["run"]!.Text!))
+            .ToList();
+        Assert.Contains(
+            linuxCommands,
+            line => line.Contains("pwsh -NoLogo -NoProfile -File 'infra/source-gateway/Test-SourceGatewayScripts.ps1'", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Source_gateway_install_uses_public_digest_pinned_transport_and_narrow_job_permissions()
     {
         YamlNode workflow = YamlNode.Parse(RepositoryText(".github/workflows/install-source-gateway.yml"));

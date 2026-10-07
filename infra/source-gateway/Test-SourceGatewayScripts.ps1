@@ -1461,6 +1461,742 @@ if ($oracleGuest -match 'Start-Transcript|Write-Host|Write-Verbose' -or
     throw 'The Oracle guest script must use stdin-only SQL*Plus and the shared OAEP-SHA256 transfer helper without transcript output.'
 }
 
+$stageWrapperText = New-SourceGatewayInteractiveStageWrapper -StagingPath 'C:\stage\run' -RunId ('a' * 32)
+if ($stageWrapperText -match '__STAGE__|__RUNID__' -or
+    $stageWrapperText -cnotmatch [regex]::Escape("`$stage = 'C:\stage\run'") -or
+    $stageWrapperText -match 'Start-Transcript|Write-Host|Pwd=|-Password ' -or
+    $stageWrapperText -cnotmatch [regex]::Escape('ORA-\d{5}|SP2-\d{4}')) {
+    throw 'The interactive Oracle stage wrapper must bind its own run and emit sanitized error codes only.'
+}
+$stageWrapperErrors = $null
+$stageWrapperTokens = $null
+[void][System.Management.Automation.Language.Parser]::ParseInput(
+    $stageWrapperText, [ref]$stageWrapperTokens, [ref]$stageWrapperErrors)
+if ($stageWrapperErrors.Count -ne 0) {
+    throw "The interactive Oracle stage wrapper does not parse: $($stageWrapperErrors.Message -join '; ')"
+}
+
+$stageRsa = [Security.Cryptography.RSA]::Create(3072)
+$stageCertificate = $null
+$stagePublicCertificate = $null
+$stageCertificateBase64 = $null
+$stageThumbprint = $null
+$stageCipherBase64 = $null
+$stageCipherSha256 = $null
+try {
+    $stageRequest = [Security.Cryptography.X509Certificates.CertificateRequest]::new(
+        'CN=OFM Source Gateway Stage Contract', $stageRsa,
+        [Security.Cryptography.HashAlgorithmName]::SHA256,
+        [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+    $stageCertificate = $stageRequest.CreateSelfSigned(
+        [DateTimeOffset]::UtcNow.AddMinutes(-1), [DateTimeOffset]::UtcNow.AddHours(1))
+    $stagePublicCertificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new(
+        $stageCertificate.Export([Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+    $stageCertificateBase64 = [Convert]::ToBase64String($stagePublicCertificate.RawData)
+    $stageThumbprint = [string]$stagePublicCertificate.Thumbprint
+    $stageCipher = Protect-SourceGatewayCredentialBytes -Certificate $stagePublicCertificate `
+        -Plaintext ([Text.Encoding]::UTF8.GetBytes('Dsn=OFM_GATEWAY_ORACLE9I;Uid=OFM_GATEWAY_RO;Pwd=stage-contract'))
+    $stageCipherBase64 = [Convert]::ToBase64String($stageCipher)
+    $stageSha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $stageCipherSha256 = ([BitConverter]::ToString($stageSha256.ComputeHash($stageCipher))).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $stageSha256.Dispose()
+    }
+}
+finally {
+    if ($null -ne $stagePublicCertificate) { $stagePublicCertificate.Dispose() }
+    if ($null -ne $stageCertificate) { $stageCertificate.Dispose() }
+    $stageRsa.Dispose()
+}
+
+$stageContractJson = (New-SourceGatewayOracleCredentialResult -Dsn 'OFM_GATEWAY_ORACLE9I' `
+    -CiphertextBase64 $stageCipherBase64 -CiphertextSha256 $stageCipherSha256 `
+    -CertificateThumbprint $stageThumbprint) | ConvertTo-Json -Compress
+if ((Assert-SourceGatewayOracleCredentialResult -ResultJson $stageContractJson -Dsn 'OFM_GATEWAY_ORACLE9I' `
+        -ExpectedCertificateThumbprint $stageThumbprint) -cnotmatch 'OFM_GATEWAY_RO') {
+    throw 'The allowlisted Oracle credential result was rejected by its own contract.'
+}
+$stageContractRunId = 'a' * 32
+$stageEnvelopeJson = ([ordered]@{ runId = $stageContractRunId; result = $stageContractJson } | ConvertTo-Json -Compress)
+$stageEnvelopeAccepted = Assert-SourceGatewayOracleCredentialResult -ResultJson $stageEnvelopeJson `
+    -Dsn 'OFM_GATEWAY_ORACLE9I' -ExpectedCertificateThumbprint $stageThumbprint `
+    -ExpectedRunId $stageContractRunId -IncludeRunId
+if (@(($stageEnvelopeAccepted | ConvertFrom-Json).PSObject.Properties.Name) -ccontains 'runId' -or
+    $stageEnvelopeAccepted -cnotmatch 'OFM_GATEWAY_SOURCE_RO') {
+    throw 'The run-bound envelope must not widen the public nonsecret result allowlist.'
+}
+
+$stageHugePayload = 'Z' * 2000
+foreach ($rejectedResult in @(
+        @{ Json = '{not json'; Expect = 'malformed' },
+        @{ Json = ('A' * 9000); Expect = 'oversized result document' },
+        @{ Json = ($stageContractJson -replace '^\{', '{"extra":1,'); Expect = 'nonsecret allowlist' },
+        @{ Json = ($stageContractJson -replace '"status":"encrypted"', '"status":"plaintext"'); Expect = 'nonsecret value contract' },
+        @{ Json = ($stageContractJson -replace '"schemaVersion":1', '"schemaVersion":2'); Expect = 'nonsecret value contract' },
+        @{ Json = ($stageContractJson -replace '"schemaVersion":1', '"schemaVersion":"1"'); Expect = 'nonsecret value contract' },
+        @{ Json = ($stageContractJson -replace '"schema":"MERIDIAN"', '"schema":"SYS"'); Expect = 'nonsecret value contract' },
+        @{ Json = ($stageContractJson -replace '"username":"OFM_GATEWAY_RO"', '"username":["OFM_GATEWAY_RO"]'); Expect = 'nonsecret value contract' },
+        @{ Json = ($stageContractJson -replace '"roleName":"OFM_GATEWAY_SOURCE_RO"', ('"roleName":"' + $stageHugePayload + '"')); Expect = 'nonsecret value contract' },
+        @{ Json = ($stageContractJson -replace '"CREATE SESSION"', ('"' + $stageHugePayload + '"')); Expect = 'nonsecret grant contract' },
+        @{ Json = ($stageContractJson -replace '"grants":\[[^\]]*\]', '"grants":[]'); Expect = 'nonsecret grant contract' },
+        @{ Json = ($stageContractJson -replace '"grants":\[[^\]]*\]', '"grants":[1,2,3,4]'); Expect = 'nonsecret grant contract' },
+        @{ Json = ($stageContractJson -replace [regex]::Escape($stageCipherBase64), 'AA=='); Expect = 'ciphertext bounds contract' },
+        @{ Json = ($stageContractJson -replace [regex]::Escape($stageCipherBase64), ('A' * 512)); Expect = 'ciphertext digest contract' },
+        @{ Json = ($stageContractJson -replace [regex]::Escape($stageCipherSha256), ('f' * 64)); Expect = 'ciphertext digest contract' },
+        @{ Json = ($stageContractJson -replace [regex]::Escape($stageCipherSha256), $stageHugePayload); Expect = 'ciphertext digest contract' },
+        @{ Json = ($stageContractJson -replace [regex]::Escape($stageThumbprint), ('B' * 40)); Expect = 'certificate binding contract' },
+        @{ Json = ($stageContractJson -replace [regex]::Escape($stageThumbprint), $stageHugePayload); Expect = 'certificate binding contract' },
+        @{ Json = ($stageEnvelopeJson -replace [regex]::Escape($stageContractRunId), ('b' * 32)); Expect = 'does not belong to this run'; Envelope = $true },
+        @{ Json = ($stageEnvelopeJson -replace [regex]::Escape($stageContractRunId), $stageHugePayload); Expect = 'does not belong to this run'; Envelope = $true },
+        @{ Json = ([ordered]@{ runId = $stageContractRunId; result = ''; extra = 1 } | ConvertTo-Json -Compress); Expect = 'run-binding allowlist'; Envelope = $true },
+        @{ Json = ([ordered]@{ runId = $stageContractRunId; result = '' } | ConvertTo-Json -Compress); Expect = 'does not carry a result document'; Envelope = $true })) {
+    $resultFailure = try {
+        if ($rejectedResult.Contains('Envelope')) {
+            [void](Assert-SourceGatewayOracleCredentialResult -ResultJson $rejectedResult.Json `
+                -Dsn 'OFM_GATEWAY_ORACLE9I' -ExpectedCertificateThumbprint $stageThumbprint `
+                -ExpectedRunId $stageContractRunId -IncludeRunId)
+        }
+        else {
+            [void](Assert-SourceGatewayOracleCredentialResult -ResultJson $rejectedResult.Json `
+                -Dsn 'OFM_GATEWAY_ORACLE9I' -ExpectedCertificateThumbprint $stageThumbprint)
+        }
+        $null
+    } catch { $_ }
+    if ($null -eq $resultFailure -or $resultFailure.Exception.Message -notmatch [regex]::Escape($rejectedResult.Expect)) {
+        throw "An invalid Oracle credential result was accepted ($($rejectedResult.Expect))."
+    }
+    if ($resultFailure.Exception.Message -cmatch 'ZZZZZZZZ|AAAAAAAA' -or
+        $resultFailure.Exception.Message.Length -gt 200) {
+        throw "An invalid Oracle credential result echoed its payload ($($rejectedResult.Expect))."
+    }
+}
+if ((@(Get-SourceGatewaySafeErrorCodes -Text 'ORA-01031 raised by connect / as sysdba on MERIDIAN') -join ',') -cne 'ORA-01031') {
+    throw 'Error sanitization must surface Oracle codes without the surrounding statement text.'
+}
+
+$insecureAncestry = @(
+    @{ Name = 'reparse point'; Expect = 'crosses a reparse point'
+       Mutate = { param($Record) $Record.IsReparsePoint = $true; $Record } },
+    @{ Name = 'untrusted owner'; Expect = 'not owned by SYSTEM or Administrators'
+       Mutate = { param($Record) $Record.OwnerSid = 'S-1-5-21-11-22-33-1001'; $Record } },
+    @{ Name = 'untrusted delete'; Expect = 'untrusted write or delete access'
+       Mutate = {
+           param($Record)
+           $Record.Access = @($Record.Access) + @([pscustomobject]@{
+               IdentitySid = 'S-1-5-21-11-22-33-1001'
+               Rights = [Security.AccessControl.FileSystemRights]'DeleteSubdirectoriesAndFiles'
+               Type = 'Allow' })
+           $Record
+       } }
+)
+
+$stageCleanupFailure = ''
+
+if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+    $global:ofmAdapterProbe = @{
+        Exists = $false; Registered = ''; Limit = $null; Started = ''; Stopped = ''
+        Unregistered = ''; Confirmed = $null; State = 'Ready'; LastTaskResult = 0
+    }
+    function global:New-ScheduledTaskAction {
+        param($Execute, $Argument)
+        return [pscustomobject]@{ Execute = $Execute; Arguments = $Argument }
+    }
+    function global:New-ScheduledTaskPrincipal {
+        param($UserId, $LogonType, $RunLevel)
+        return [pscustomobject]@{ UserId = $UserId; LogonType = $LogonType; RunLevel = $RunLevel }
+    }
+    function global:New-ScheduledTaskSettingsSet {
+        param($ExecutionTimeLimit, $MultipleInstances)
+        return [pscustomobject]@{ ExecutionTimeLimit = $ExecutionTimeLimit; MultipleInstances = $MultipleInstances }
+    }
+    function global:Register-ScheduledTask {
+        param($TaskName, $Action, $Principal, $Settings)
+        $global:ofmAdapterProbe.Registered = [string]$TaskName
+        $global:ofmAdapterProbe.Limit = $Settings.ExecutionTimeLimit
+        return [pscustomobject]@{ Principal = $Principal; Actions = @($Action) }
+    }
+    function global:Get-ScheduledTask {
+        param($TaskName, $ErrorAction)
+        if (-not $global:ofmAdapterProbe.Exists) { return $null }
+        return [pscustomobject]@{ State = [string]$global:ofmAdapterProbe.State }
+    }
+    function global:Get-ScheduledTaskInfo {
+        param($TaskName)
+        return [pscustomobject]@{ LastTaskResult = [int]$global:ofmAdapterProbe.LastTaskResult }
+    }
+    function global:Start-ScheduledTask { param($TaskName) $global:ofmAdapterProbe.Started = [string]$TaskName }
+    function global:Stop-ScheduledTask {
+        param($TaskName, $ErrorAction)
+        $global:ofmAdapterProbe.Stopped = [string]$TaskName
+    }
+    function global:Unregister-ScheduledTask {
+        param($TaskName, $Confirm, $ErrorAction)
+        $global:ofmAdapterProbe.Unregistered = [string]$TaskName
+        $global:ofmAdapterProbe.Confirmed = $Confirm
+    }
+    try {
+        # The factory's scriptblocks run in the caller's scope, so every value they need must arrive as a
+        # parameter; a captured factory local would be unbound here under Set-StrictMode -Version Latest.
+        $productionAdapter = New-SourceGatewayScheduledTaskAdapter
+        if (& $productionAdapter.Exists 'OFM-Adapter-Probe') {
+            throw 'The production scheduled-task adapter reported a task that does not exist.'
+        }
+        $adapterBinding = & $productionAdapter.Register 'OFM-Adapter-Probe' 'C:\probe\powershell.exe' `
+            '-NoProfile -File "C:\probe\stage\Invoke-OracleCredentialStage.ps1"' 'PROBEHOST\ofmlabadmin' 97
+        if ([string]$adapterBinding.UserId -cne 'PROBEHOST\ofmlabadmin' -or
+            [string]$adapterBinding.LogonType -cne 'Interactive' -or
+            [string]$adapterBinding.RunLevel -cne 'Highest' -or
+            [string]$adapterBinding.Execute -cne 'C:\probe\powershell.exe' -or
+            [string]$adapterBinding.Arguments -cne '-NoProfile -File "C:\probe\stage\Invoke-OracleCredentialStage.ps1"' -or
+            $global:ofmAdapterProbe.Limit -ne [TimeSpan]::FromSeconds(97) -or
+            $global:ofmAdapterProbe.Registered -cne 'OFM-Adapter-Probe') {
+            throw 'The production scheduled-task adapter did not bind its registration arguments explicitly.'
+        }
+        $global:ofmAdapterProbe.Exists = $true
+        $global:ofmAdapterProbe.State = 'Running'
+        $global:ofmAdapterProbe.LastTaskResult = 267009
+        & $productionAdapter.Start 'OFM-Adapter-Probe'
+        & $productionAdapter.Stop 'OFM-Adapter-Probe'
+        $adapterState = & $productionAdapter.Query 'OFM-Adapter-Probe'
+        & $productionAdapter.Unregister 'OFM-Adapter-Probe'
+        if (-not (& $productionAdapter.Exists 'OFM-Adapter-Probe') -or
+            [string]$adapterState.State -cne 'Running' -or [int]$adapterState.LastTaskResult -ne 267009 -or
+            $global:ofmAdapterProbe.Started -cne 'OFM-Adapter-Probe' -or
+            $global:ofmAdapterProbe.Stopped -cne 'OFM-Adapter-Probe' -or
+            $global:ofmAdapterProbe.Unregistered -cne 'OFM-Adapter-Probe' -or
+            $global:ofmAdapterProbe.Confirmed -ne $false) {
+            throw 'The production scheduled-task adapter did not expose stop, query, and unregister outside the factory.'
+        }
+    }
+    finally {
+        foreach ($mocked in @('New-ScheduledTaskAction', 'New-ScheduledTaskPrincipal', 'New-ScheduledTaskSettingsSet',
+                'Register-ScheduledTask', 'Get-ScheduledTask', 'Get-ScheduledTaskInfo', 'Start-ScheduledTask',
+                'Stop-ScheduledTask', 'Unregister-ScheduledTask')) {
+            Remove-Item -LiteralPath "Function:\$mocked" -Force -ErrorAction SilentlyContinue
+        }
+        Remove-Variable -Name 'ofmAdapterProbe' -Scope Global -Force -ErrorAction SilentlyContinue
+    }
+
+    $stageRoot = Join-Path ([IO.Path]::GetTempPath()) "ofm-interactive-stage-$([guid]::NewGuid().ToString('N'))"
+    $stageSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $stageHost = (Get-Process -Id $PID).Path
+    $stageMockPath = Join-Path $stageRoot 'mock-credential.ps1'
+    $stageChildRecordPath = Join-Path $stageRoot 'child.json'
+    $stageModulePath = Join-Path $PSScriptRoot 'SourceGatewayCredentialTransfer.psm1'
+    $stageState = @{}
+    $stageAdapter = @{
+        Exists = { param($Name) [bool]$stageState.Existing }
+        Register = {
+            param($Name, $Executable, $Arguments, $UserId, $ExecutionTimeLimitSeconds)
+            $stageState.Registered = $true
+            $stageState.Arguments = $Arguments
+            $stageState.Executable = $Executable
+            $stageState.UserId = $UserId
+            $stageState.TimeLimit = $ExecutionTimeLimitSeconds
+            if ([string]$stageState.Mode -eq 'readback') {
+                throw 'Simulated scheduled-task readback failure after the task was created.'
+            }
+            return [pscustomobject]@{
+                UserId = [string]$stageState.PrincipalUserId
+                LogonType = [string]$stageState.LogonType
+                RunLevel = [string]$stageState.RunLevel
+                Execute = if ([string]$stageState.Mode -eq 'swapped') { 'C:\attacker\powershell.exe' } else { [string]$Executable }
+                Arguments = if ([string]$stageState.Mode -eq 'swapped') { '-File "C:\attacker\stage.ps1"' } else { [string]$Arguments }
+            }
+        }
+        Start = {
+            param($Name)
+            $stageState.Started = $true
+            if ([string]$stageState.Mode -eq 'dead') { $stageState.ExitCode = 0; return }
+            $wrapper = [regex]::Match([string]$stageState.Arguments, '-File "(?<path>[^"]+)"').Groups['path'].Value
+            if (@('child', 'stubborn', 'querythrow', 'probefault') -ccontains [string]$stageState.Mode) {
+                $stageState.Process = [Diagnostics.Process]::Start(
+                    $stageHost, '-NoProfile -NonInteractive -File "' + $wrapper + '"')
+                # Native stage startup gets its own bounded 30 second allowance; the caller's contained
+                # timeout only begins once the real grandchild marker is observed, so it is never a race.
+                $readyDeadline = [DateTime]::UtcNow.AddSeconds(30)
+                while (-not (Test-Path -LiteralPath $stageChildRecordPath -PathType Leaf)) {
+                    if ([DateTime]::UtcNow -ge $readyDeadline) {
+                        throw 'The staged wrapper did not record its grandchild within the 30 second native startup allowance.'
+                    }
+                    Start-Sleep -Milliseconds 100
+                }
+                return
+            }
+            & $stageHost -NoProfile -NonInteractive -File $wrapper 2>&1 | Out-Null
+            $stageState.ExitCode = $LASTEXITCODE
+        }
+        Stop = {
+            param($Name)
+            $stageState.Stopped = $true
+            if ([string]$stageState.Mode -eq 'stubborn') { throw 'Simulated scheduled-task stop failure.' }
+            if ($null -ne $stageState.Process -and -not $stageState.Process.HasExited) {
+                # Only the task's own process is killed; the staged job object must take the descendants.
+                $stageState.Process.Kill()
+                [void]$stageState.Process.WaitForExit(15000)
+            }
+        }
+        Query = {
+            param($Name)
+            if ([string]$stageState.Mode -eq 'querythrow') {
+                # Only fault once the real wrapper and its grandchild are actually running.
+                if (Test-Path -LiteralPath $stageChildRecordPath -PathType Leaf) {
+                    throw 'Simulated scheduled-task query failure while the staged wrapper was running.'
+                }
+                return [pscustomobject]@{ State = 'Running'; LastTaskResult = 267009 }
+            }
+            if (@('running', 'child', 'stubborn', 'probefault') -ccontains [string]$stageState.Mode) {
+                return [pscustomobject]@{ State = 'Running'; LastTaskResult = 267009 }
+            }
+            $code = if ($null -eq $stageState.ExitCode) { 267011 } else { [int]$stageState.ExitCode }
+            return [pscustomobject]@{ State = 'Ready'; LastTaskResult = $code }
+        }
+        Unregister = { param($Name) $stageState.Unregistered = $true }
+    }
+    function New-StageAclProbeEntry {
+        param(
+            [Parameter(Mandatory)] [string] $Sid,
+            [Parameter(Mandatory)] [Security.AccessControl.FileSystemRights] $Rights
+        )
+        # The mask comes from a real Allow rule built exactly as the stage builds its ACL, so the probe
+        # reports what Windows actually stores rather than the requested enum value.
+        $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+            [Security.Principal.SecurityIdentifier]::new($Sid), $Rights,
+            [Security.AccessControl.InheritanceFlags]'ObjectInherit, ContainerInherit',
+            [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Allow)
+        return [pscustomobject]@{
+            IdentitySid = [string]$rule.IdentityReference.Value
+            Rights = [Security.AccessControl.FileSystemRights]$rule.FileSystemRights
+            Type = [string]$rule.AccessControlType
+        }
+    }
+    $stageApprovedEntry = New-StageAclProbeEntry -Sid $stageSid -Rights ([Security.AccessControl.FileSystemRights]::Modify)
+    if (([int]$stageApprovedEntry.Rights -band [int][Security.AccessControl.FileSystemRights]::Synchronize) -eq 0 -or
+        [int]$stageApprovedEntry.Rights -eq [int][Security.AccessControl.FileSystemRights]::Modify) {
+        throw 'A real Allow rule must carry Synchronize beyond Modify, otherwise the leaf allowance is untested.'
+    }
+    $stageAncestryProbe = {
+        param($Probed)
+        # Ancestors stay trusted-only; the leaf reproduces the ACL this tooling actually writes, which is
+        # SYSTEM and Administrators FullControl plus the resolved interactive account at Modify.
+        $access = @(New-StageAclProbeEntry -Sid 'S-1-5-18' -Rights ([Security.AccessControl.FileSystemRights]::FullControl))
+        if ($Probed.StartsWith($stageRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            $access += New-StageAclProbeEntry -Sid 'S-1-5-32-544' -Rights ([Security.AccessControl.FileSystemRights]::FullControl)
+            $access += New-StageAclProbeEntry -Sid $stageSid -Rights ([Security.AccessControl.FileSystemRights]::Modify)
+        }
+        return [pscustomobject]@{
+            Path = $Probed
+            Exists = [bool](Test-Path -LiteralPath $Probed)
+            IsReparsePoint = $false
+            OwnerSid = 'S-1-5-18'
+            Access = $access
+        }
+    }
+    function Reset-StageState {
+        param([string] $Mode = 'normal', [string] $Body)
+        $script:stageState = @{
+            Mode = $Mode; Existing = $false; Registered = $false; Started = $false
+            Unregistered = $false; Stopped = $false; ExitCode = $null; Process = $null
+            Arguments = ''; Executable = ''; UserId = ''; TimeLimit = 0
+            PrincipalUserId = $stageSid; LogonType = 'Interactive'; RunLevel = 'Highest'
+        }
+        Remove-Item -LiteralPath $stageChildRecordPath -Force -ErrorAction SilentlyContinue
+        if ($PSBoundParameters.ContainsKey('Body')) {
+            Set-Content -LiteralPath $stageMockPath -Encoding ascii -Value (
+                "param([string]`$PublicCertificateBase64,[string]`$TransferModulePath,[string]`$OdbcDsn)`n" + $Body)
+        }
+    }
+    function Stop-StageOwnedProcesses {
+        # Only this run's own wrapper and the grandchild it recorded; never a broad process sweep.
+        if ($null -ne $stageState -and $stageState.Contains('Process') -and $null -ne $stageState.Process) {
+            try { if (-not $stageState.Process.HasExited) { $stageState.Process.Kill() } } catch { }
+            [void]$stageState.Process.WaitForExit(15000)
+        }
+        if (Test-Path -LiteralPath $stageChildRecordPath -PathType Leaf) {
+            $recorded = (Get-Content -LiteralPath $stageChildRecordPath -Raw).Trim()
+            if ($recorded -match '^\d{1,10}$') {
+                $owned = Get-Process -Id ([int]$recorded) -ErrorAction SilentlyContinue
+                if ($null -ne $owned) {
+                    try { $owned.Kill() } catch { }
+                    [void]$owned.WaitForExit(15000)
+                }
+            }
+        }
+    }
+    function Remove-StagePathStrict {
+        param([Parameter(Mandatory)] [string] $Path)
+        # This run's own paths only; residue left by anything else is never touched by this harness.
+        if (-not $Path.StartsWith($stageRoot, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "The stage harness refused to remove a path it does not own: $Path"
+        }
+        if (-not (Test-Path -LiteralPath $Path)) { return }
+        $removeDeadline = [DateTime]::UtcNow.AddSeconds(15)
+        while ($true) {
+            try { Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop; break }
+            catch {
+                if ([DateTime]::UtcNow -ge $removeDeadline) {
+                    throw "The stage harness could not remove its own path ${Path}: $($_.Exception.Message)"
+                }
+                Start-Sleep -Milliseconds 250
+            }
+        }
+        if (Test-Path -LiteralPath $Path) { throw "The stage harness left its own path behind: $Path" }
+    }
+    function Invoke-StageUnderTest {
+        param(
+            [int] $TimeoutSeconds = 30,
+            [scriptblock] $Probe,
+            [scriptblock] $AncestryProbe,
+            [scriptblock] $ProcessProbe,
+            [int] $ContainmentTimeoutSeconds = 30
+        )
+        if (-not $PSBoundParameters.ContainsKey('Probe')) { $Probe = { $liveSession } }
+        if (-not $PSBoundParameters.ContainsKey('AncestryProbe')) { $AncestryProbe = $stageAncestryProbe }
+        if (-not $PSBoundParameters.ContainsKey('ProcessProbe')) {
+            $ProcessProbe = { param($ProcessId) Get-Process -Id $ProcessId -ErrorAction SilentlyContinue }
+        }
+        return Invoke-SourceGatewayInteractiveOracleStage -CredentialScriptPath $stageMockPath `
+            -TransferModulePath $stageModulePath -PublicCertificateBase64 $stageCertificateBase64 `
+            -OdbcDsn 'OFM_GATEWAY_ORACLE9I' -RunId ([guid]::NewGuid().ToString('N')) `
+            -StagingRoot $stageRoot -InteractiveAccountName $stageSid -TimeoutSeconds $TimeoutSeconds `
+            -ContainmentTimeoutSeconds $ContainmentTimeoutSeconds `
+            -InteractiveSessionProbe $Probe -TaskAdapter $stageAdapter -DirectorySecurityProbe $AncestryProbe `
+            -ProcessProbe $ProcessProbe `
+            -Wait { param($Milliseconds) Start-Sleep -Milliseconds 100 }
+    }
+    try {
+        [void](New-Item -ItemType Directory -Path $stageRoot -Force)
+        $liveSession = @([pscustomobject]@{ UserSid = $stageSid; SessionId = 1 })
+        $deadSession = @([pscustomobject]@{ UserSid = $stageSid; SessionId = 0 })
+        $stageProbe = { $liveSession }.GetNewClosure()
+        $deadProbe = { $deadSession }.GetNewClosure()
+
+        Reset-StageState -Body "Write-Output '$stageContractJson'"
+        $stageSuccess = Invoke-StageUnderTest -TimeoutSeconds 120 -Probe $stageProbe
+        if (($stageSuccess | ConvertFrom-Json).username -cne 'OFM_GATEWAY_RO' -or
+            @(($stageSuccess | ConvertFrom-Json).PSObject.Properties.Name) -ccontains 'runId' -or
+            -not $stageState.Unregistered -or $stageState.UserId -cne $stageSid -or
+            [int]$stageState.TimeLimit -ne 120 -or
+            $stageState.Arguments -notmatch '^-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' -or
+            $stageState.Arguments -match 'Pwd=|Password' -or
+            @(Get-ChildItem -LiteralPath $stageRoot -Directory).Count -ne 0) {
+            throw 'The interactive Oracle stage did not complete, clean up, or keep task arguments nonsecret.'
+        }
+
+        $stageFailures = @(
+            @{ Name = 'auth denied'; Mode = 'normal'; Probe = $stageProbe; Timeout = 60
+               Body = "throw 'ORA-01031: insufficient privileges while running connect / as sysdba'"
+               Expect = 'ORA-01031'; Forbidden = 'sysdba'; Registered = $true },
+            @{ Name = 'no interactive session'; Mode = 'normal'; Probe = $deadProbe; Timeout = 60
+               Body = "Write-Output '$stageContractJson'"
+               Expect = 'existing interactive desktop session'; Registered = $false },
+            @{ Name = 'task timeout'; Mode = 'running'; Probe = $stageProbe; Timeout = 5
+               Body = "Write-Output '$stageContractJson'"
+               Expect = 'did not finish within'; Registered = $true },
+            @{ Name = 'dead child'; Mode = 'dead'; Probe = $stageProbe; Timeout = 60
+               Body = "Write-Output '$stageContractJson'"
+               Expect = 'produced no status'; Registered = $true },
+            @{ Name = 'empty result'; Mode = 'normal'; Probe = $stageProbe; Timeout = 60
+               Body = "Write-Output ''"
+               Expect = 'does not carry a result document'; Registered = $true },
+            @{ Name = 'invalid keys'; Mode = 'normal'; Probe = $stageProbe; Timeout = 60
+               Body = ("Write-Output '" + ($stageContractJson -replace '^\{', '{"extra":1,') + "'")
+               Expect = 'nonsecret allowlist'; Registered = $true },
+            @{ Name = 'foreign certificate'; Mode = 'normal'; Probe = $stageProbe; Timeout = 60
+               Body = ("Write-Output '" + ($stageContractJson -replace [regex]::Escape($stageThumbprint), ('B' * 40)) + "'")
+               Expect = 'certificate binding contract'; Registered = $true },
+            @{ Name = 'registration readback failure'; Mode = 'readback'; Probe = $stageProbe; Timeout = 60
+               Body = "Write-Output '$stageContractJson'"
+               Expect = 'readback failure'; Registered = $true },
+            @{ Name = 'swapped task action'; Mode = 'swapped'; Probe = $stageProbe; Timeout = 60
+               Body = "Write-Output '$stageContractJson'"
+               Expect = 'does not run the staged wrapper'; Registered = $true }
+        )
+        foreach ($case in $stageFailures) {
+            Reset-StageState -Mode $case.Mode -Body $case.Body
+            $failure = try {
+                [void](Invoke-StageUnderTest -TimeoutSeconds $case.Timeout -Probe $case.Probe)
+                $null
+            }
+            catch { $_ }
+            if ($null -eq $failure -or $failure.Exception.Message -notmatch [regex]::Escape($case.Expect)) {
+                throw "The interactive Oracle stage did not fail as required for '$($case.Name)'."
+            }
+            if ($case.Contains('Forbidden') -and $failure.Exception.Message -match $case.Forbidden) {
+                throw "The interactive Oracle stage leaked statement text for '$($case.Name)'."
+            }
+            if ($stageState.Registered -ne $case.Registered -or
+                ($case.Registered -and -not $stageState.Unregistered) -or
+                @(Get-ChildItem -LiteralPath $stageRoot -Directory).Count -ne 0) {
+                throw "The interactive Oracle stage left a task or staging folder behind for '$($case.Name)'."
+            }
+        }
+
+        foreach ($ancestryCase in $insecureAncestry) {
+            Reset-StageState -Body "Write-Output '$stageContractJson'"
+            $mutator = $ancestryCase.Mutate
+            $insecureProbe = {
+                param($Probed)
+                $record = & $stageAncestryProbe $Probed
+                if ($Probed -ieq $stageRoot) { return (& $mutator $record) }
+                return $record
+            }.GetNewClosure()
+            $ancestryFailure = try {
+                [void](Invoke-StageUnderTest -TimeoutSeconds 60 -Probe $stageProbe -AncestryProbe $insecureProbe)
+                $null
+            }
+            catch { $_ }
+            if ($null -eq $ancestryFailure -or
+                $ancestryFailure.Exception.Message -notmatch [regex]::Escape($ancestryCase.Expect) -or
+                $stageState.Registered -or $stageState.Started -or
+                @(Get-ChildItem -LiteralPath $stageRoot -Directory).Count -ne 0) {
+                throw "The interactive Oracle stage staged a run over an insecure ancestor ('$($ancestryCase.Name)')."
+            }
+        }
+
+        foreach ($leafAclCase in @(
+                @{ Name = 'foreign identity on the stage leaf'; Expect = 'untrusted write or delete access'
+                   Extra = (New-StageAclProbeEntry -Sid 'S-1-5-32-545' `
+                       -Rights ([Security.AccessControl.FileSystemRights]::Modify)) },
+                @{ Name = 'approved identity beyond Modify'; Expect = 'more than Modify'
+                   Extra = (New-StageAclProbeEntry -Sid $stageSid `
+                       -Rights ([Security.AccessControl.FileSystemRights]::FullControl)) })) {
+            Reset-StageState -Body "Write-Output '$stageContractJson'"
+            $leafExtra = $leafAclCase.Extra
+            $leafProbe = {
+                param($Probed)
+                $record = & $stageAncestryProbe $Probed
+                if ($record.Exists -and
+                    $Probed.StartsWith($stageRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+                    $record.Access = @($record.Access) + @($leafExtra)
+                }
+                return $record
+            }.GetNewClosure()
+            $leafFailure = try {
+                [void](Invoke-StageUnderTest -TimeoutSeconds 60 -Probe $stageProbe -AncestryProbe $leafProbe)
+                $null
+            } catch { $_ }
+            if ($null -eq $leafFailure -or
+                $leafFailure.Exception.Message -notmatch [regex]::Escape($leafAclCase.Expect) -or
+                $stageState.Started -or @(Get-ChildItem -LiteralPath $stageRoot -Directory).Count -ne 0) {
+                throw "The interactive Oracle stage accepted an unsafe stage leaf ACL ('$($leafAclCase.Name)')."
+            }
+        }
+
+        foreach ($principalCase in @(
+                @{ UserId = 'S-1-5-18'; LogonType = 'Interactive'; RunLevel = 'Highest' },
+                @{ UserId = $stageSid; LogonType = 'Password'; RunLevel = 'Highest' },
+                @{ UserId = $stageSid; LogonType = 'Interactive'; RunLevel = 'Limited' })) {
+            Reset-StageState -Body "Write-Output '$stageContractJson'"
+            $stageState.PrincipalUserId = $principalCase.UserId
+            $stageState.LogonType = $principalCase.LogonType
+            $stageState.RunLevel = $principalCase.RunLevel
+            $principalFailure = try { [void](Invoke-StageUnderTest -Probe $stageProbe); $null } catch { $_ }
+            if ($null -eq $principalFailure -or
+                $principalFailure.Exception.Message -notmatch 'not the approved interactive account' -or
+                -not $stageState.Unregistered) {
+                throw 'The interactive Oracle stage accepted an unapproved task principal.'
+            }
+        }
+
+        Reset-StageState -Body "Write-Output '$stageContractJson'"
+        $stageState.Existing = $true
+        $collisionFailure = try { [void](Invoke-StageUnderTest -Probe $stageProbe); $null } catch { $_ }
+        if ($null -eq $collisionFailure -or
+            $collisionFailure.Exception.Message -notmatch 'refusing to reuse an existing task' -or
+            $stageState.Registered) {
+            throw 'The interactive Oracle stage reused a scheduled task it does not own.'
+        }
+
+        $pinnedFailure = try {
+            [void](Invoke-SourceGatewayInteractiveOracleStage -CredentialScriptPath $stageMockPath `
+                -TransferModulePath $stageModulePath -PublicCertificateBase64 $stageCertificateBase64 `
+                -OdbcDsn 'OFM_GATEWAY_ORACLE9I' -RunId ([guid]::NewGuid().ToString('N')) `
+                -StagingRoot $stageRoot -InteractiveAccountName $stageSid)
+            $null
+        }
+        catch { $_ }
+        if ($null -eq $pinnedFailure -or
+            $pinnedFailure.Exception.Message -notmatch 'only runs under the pinned ProgramData root') {
+            throw 'The interactive Oracle stage accepted an unpinned staging root without an injected adapter.'
+        }
+
+        # A real descendant must die with the staged wrapper; pwsh stands in for SQL*Plus so the proof is portable.
+        $childBody = @"
+`$child = Start-Process -FilePath '$stageHost' -PassThru ``
+    -ArgumentList '-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 900'
+Set-Content -LiteralPath '$stageChildRecordPath' -Encoding ascii -Value ([string]`$child.Id)
+Start-Sleep -Seconds 900
+"@
+        Reset-StageState -Mode 'child' -Body $childBody
+        $childFailure = try { [void](Invoke-StageUnderTest -TimeoutSeconds 5 -Probe $stageProbe); $null } catch { $_ }
+        if ($null -eq $childFailure -or $childFailure.Exception.Message -notmatch 'did not finish within') {
+            throw 'The interactive Oracle stage did not time out while a real staged child was running.'
+        }
+        if (-not $stageState.Stopped -or $null -eq $stageState.Process -or -not $stageState.Process.HasExited) {
+            throw 'The interactive Oracle stage did not stop and await the staged task process on timeout.'
+        }
+        if (-not (Test-Path -LiteralPath $stageChildRecordPath -PathType Leaf)) {
+            throw 'The staged child never recorded itself, so descendant containment was not exercised.'
+        }
+        $stageChildId = [int](Get-Content -LiteralPath $stageChildRecordPath -Raw).Trim()
+        $stageChildDeadline = [DateTime]::UtcNow.AddSeconds(30)
+        while ($null -ne (Get-Process -Id $stageChildId -ErrorAction SilentlyContinue) -and
+            [DateTime]::UtcNow -lt $stageChildDeadline) {
+            Start-Sleep -Milliseconds 200
+        }
+        $stageChildSurvivor = Get-Process -Id $stageChildId -ErrorAction SilentlyContinue
+        if ($null -ne $stageChildSurvivor) {
+            $stageChildSurvivor.Kill()
+            throw 'The staged job object did not kill the descendant process when the task was stopped.'
+        }
+        if ($childFailure.Exception.Message -match 'containment could not be verified' -or
+            @(Get-ChildItem -LiteralPath $stageRoot -Directory).Count -ne 0) {
+            throw 'Verified containment must still clean the staging folder.'
+        }
+
+        Reset-StageState -Mode 'stubborn' -Body $childBody
+        $stubbornFailure = try { [void](Invoke-StageUnderTest -TimeoutSeconds 5 -Probe $stageProbe `
+            -ContainmentTimeoutSeconds 5); $null } catch { $_ }
+        if ($null -eq $stubbornFailure -or
+            $stubbornFailure.Exception.Message -notmatch 'containment could not be verified' -or
+            $stubbornFailure.Exception.Message -notmatch 'did not finish within' -or
+            $stubbornFailure.Exception.Message -notmatch 'preserved at ') {
+            throw 'A failed stop must report the primary timeout and preserve the staging folder.'
+        }
+        $preservedStages = @(Get-ChildItem -LiteralPath $stageRoot -Directory)
+        if ($preservedStages.Count -ne 1) {
+            throw 'A failed stop must not silently delete the staging folder.'
+        }
+        Stop-StageOwnedProcesses
+        Remove-StagePathStrict -Path $preservedStages[0].FullName
+
+        # A Query fault raised after the wrapper and a real grandchild are running is still a post-start
+        # failure, so containment must run before anything is unregistered or deleted.
+        Reset-StageState -Mode 'querythrow' -Body $childBody
+        $queryFailure = try {
+            [void](Invoke-StageUnderTest -TimeoutSeconds 60 -Probe $stageProbe -ContainmentTimeoutSeconds 30)
+            $null
+        } catch { $_ }
+        if ($null -eq $queryFailure -or
+            $queryFailure.Exception.Message -notmatch 'Simulated scheduled-task query failure') {
+            throw 'A scheduled-task query fault after start must surface as the primary failure.'
+        }
+        if (-not $stageState.Stopped -or $null -eq $stageState.Process -or -not $stageState.Process.HasExited) {
+            throw 'A scheduled-task query fault must still stop and await the staged task process.'
+        }
+        if ($queryFailure.Exception.Message -match 'containment could not be verified' -or
+            @(Get-ChildItem -LiteralPath $stageRoot -Directory).Count -ne 0) {
+            throw 'Verified containment after a query fault must still clean the staging folder.'
+        }
+        if (-not (Test-Path -LiteralPath $stageChildRecordPath -PathType Leaf)) {
+            throw 'The query-fault run never recorded a grandchild, so containment was not exercised.'
+        }
+        $queryFaultChildId = [int](Get-Content -LiteralPath $stageChildRecordPath -Raw).Trim()
+        $queryFaultDeadline = [DateTime]::UtcNow.AddSeconds(30)
+        while ($null -ne (Get-Process -Id $queryFaultChildId -ErrorAction SilentlyContinue) -and
+            [DateTime]::UtcNow -lt $queryFaultDeadline) {
+            Start-Sleep -Milliseconds 200
+        }
+        $queryFaultSurvivor = Get-Process -Id $queryFaultChildId -ErrorAction SilentlyContinue
+        if ($null -ne $queryFaultSurvivor) {
+            $queryFaultSurvivor.Kill()
+            throw 'The staged job object did not kill the descendant after a scheduled-task query fault.'
+        }
+
+        # An unreadable process probe is UNKNOWN, never proof of exit.
+        foreach ($probeFault in @(
+                @{ Name = 'probe throws'
+                   Probe = { param($ProcessId) throw 'Simulated process probe failure.' } },
+                @{ Name = 'start time unreadable'
+                   Probe = {
+                       param($ProcessId)
+                       Add-Member -InputObject ([pscustomobject]@{ Id = $ProcessId }) `
+                           -MemberType ScriptProperty -Name StartTime `
+                           -Value { throw 'Simulated start time read failure.' } -PassThru
+                   } })) {
+            Reset-StageState -Mode 'probefault' -Body $childBody
+            $probeFailure = try {
+                [void](Invoke-StageUnderTest -TimeoutSeconds 10 -Probe $stageProbe `
+                    -ProcessProbe $probeFault.Probe -ContainmentTimeoutSeconds 5)
+                $null
+            } catch { $_ }
+            if ($null -eq $probeFailure -or
+                $probeFailure.Exception.Message -notmatch 'did not finish within' -or
+                $probeFailure.Exception.Message -notmatch 'containment could not be verified' -or
+                $probeFailure.Exception.Message -notmatch 'preserved at ') {
+                throw "An unreadable staged process probe ('$($probeFault.Name)') was treated as proof of exit."
+            }
+            $probeStages = @(Get-ChildItem -LiteralPath $stageRoot -Directory)
+            if ($probeStages.Count -ne 1) {
+                throw "An unreadable staged process probe ('$($probeFault.Name)') did not preserve the staging folder."
+            }
+            Stop-StageOwnedProcesses
+            Remove-StagePathStrict -Path $probeStages[0].FullName
+        }
+
+        # A staged process record is proof only when every field is present, typed and in range; anything
+        # else is UNKNOWN and must fail closed before the process probe is ever consulted.
+        $recordProbePath = Join-Path $stageRoot 'record-probe.json'
+        $recordRunId = [guid]::NewGuid().ToString('N')
+        $recordProbeState = @{ Called = $false }
+        $recordProbe = { param($ProcessId) $recordProbeState.Called = $true; $null }
+        $recordWait = { param($Milliseconds) }
+        if ((Wait-SourceGatewayStagedProcessExit -ProcessRecordPath $recordProbePath -RunId $recordRunId `
+                -TimeoutSeconds 1 -Wait $recordWait -ProcessProbe $recordProbe) -cne 'NoRecord') {
+            throw 'A missing staged process record must report NoRecord, distinctly from Unknown.'
+        }
+        foreach ($recordCase in @(
+                @{ Name = 'empty object'; Json = '{}' },
+                @{ Name = 'invalid json'; Json = '{"runId":' },
+                     @{ Name = 'singleton array'
+                         Json = ('[{"runId":"' + $recordRunId + '","processId":2147483647,"startTimeUtcTicks":"42"}]') },
+                @{ Name = 'malformed process identifier'
+                   Json = ('{"runId":"' + $recordRunId + '","processId":"12a","startTimeUtcTicks":"42"}') },
+                @{ Name = 'negative process identifier'
+                   Json = ('{"runId":"' + $recordRunId + '","processId":-4,"startTimeUtcTicks":"42"}') },
+                @{ Name = 'overflowing process identifier'
+                   Json = ('{"runId":"' + $recordRunId + '","processId":"9999999999","startTimeUtcTicks":"42"}') },
+                @{ Name = 'overflowing start ticks'
+                   Json = ('{"runId":"' + $recordRunId + '","processId":"4","startTimeUtcTicks":"' + ('9' * 25) + '"}') },
+                @{ Name = 'null field'
+                   Json = ('{"runId":"' + $recordRunId + '","processId":null,"startTimeUtcTicks":"42"}') },
+                @{ Name = 'unexpected property'
+                   Json = ('{"runId":"' + $recordRunId + '","processId":"4","startTimeUtcTicks":"42","extra":1}') },
+                @{ Name = 'foreign run identifier'
+                   Json = ('{"runId":"' + ('a' * 32) + '","processId":"4","startTimeUtcTicks":"42"}') })) {
+            $recordProbeState.Called = $false
+            Set-Content -LiteralPath $recordProbePath -Encoding ascii -NoNewline -Value $recordCase.Json
+            $recordVerdict = Wait-SourceGatewayStagedProcessExit -ProcessRecordPath $recordProbePath `
+                -RunId $recordRunId -TimeoutSeconds 1 -Wait $recordWait -ProcessProbe $recordProbe
+            if ($recordVerdict -cne 'Unknown' -or $recordProbeState.Called) {
+                throw "A rejected staged process record ('$($recordCase.Name)') was not Unknown before probing."
+            }
+        }
+        $recordProbeState.Called = $false
+        Set-Content -LiteralPath $recordProbePath -Encoding ascii -NoNewline `
+            -Value ('{"runId":"' + $recordRunId + '","processId":"4","startTimeUtcTicks":"42"}')
+        $recordFaultVerdict = Wait-SourceGatewayStagedProcessExit -ProcessRecordPath $recordProbePath `
+            -RunId $recordRunId -TimeoutSeconds 1 -Wait $recordWait `
+            -ProcessProbe { param($ProcessId) $recordProbeState.Called = $true; throw 'Simulated probe failure.' }
+        if ($recordFaultVerdict -cne 'Unknown' -or -not $recordProbeState.Called) {
+            throw 'A faulting staged process probe must report Unknown rather than proof of exit.'
+        }
+        Remove-Item -LiteralPath $recordProbePath -Force
+    }
+    finally {
+        Stop-StageOwnedProcesses
+        try { Remove-StagePathStrict -Path $stageRoot }
+        catch { $stageCleanupFailure = $_.Exception.Message }
+    }
+
+    Write-Output 'SOURCE_GATEWAY_WINDOWS_NATIVE_CHECKS_PASS'
+}
+if (-not [string]::IsNullOrEmpty($stageCleanupFailure)) { throw $stageCleanupFailure }
+
 $oracleBootstrapPath = Join-Path $PSScriptRoot 'Invoke-SourceGatewayOracleCredentialProvision.ps1'
 $oracleBootstrapTokens = $null
 $oracleBootstrapErrors = $null
@@ -1484,10 +2220,14 @@ foreach ($requiredBootstrapContract in @(
         'catch {',
         'Transfer-key creation requires the runner-generated transfer identifier.',
         'CN=OFM Source Gateway Credential Transfer $TransferId',
+        'Invoke-SourceGatewayInteractiveOracleStage `',
         'Get-ChildItem -LiteralPath $transferRoot -Filter "credential-transfer-$TransferId.*"')) {
     if ($oracleBootstrap -cnotmatch [regex]::Escape($requiredBootstrapContract)) {
         throw "Oracle credential bootstrap is missing '$requiredBootstrapContract'."
     }
+}
+if ($oracleBootstrap -cmatch '&\s*\(Join-Path \$bundleRoot ''New-SourceGatewayOracleCredential\.ps1''\)') {
+    throw 'The Oracle credential script must not run directly in the Run Command SYSTEM context.'
 }
 $newTransferKeyBranch = $oracleBootstrap.Substring($oracleBootstrap.IndexOf("if (`$Operation -eq 'NewTransferKey')"))
 $createTransferCertificate = $newTransferKeyBranch.IndexOf('$certificate = New-SelfSignedCertificate')
